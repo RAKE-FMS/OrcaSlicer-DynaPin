@@ -1,0 +1,29 @@
+{
+  "grid": {
+    "origin": {
+      "row": 0,
+      "col": 0,
+      "y": "63.6",
+      "z": "4.0"
+    },
+    "pitch": {
+      "row_y": "12.4",
+      "col_z": "7.4"
+    }
+  },
+  "support_exclusion": {
+    "center_x": 110,
+    "width_x": 20,
+    "width_y": 8,
+    "z_range": 8
+  },
+  "pull_gcode": {
+    "x_hook": "160",
+    "x_latch": "168",
+    "x_front": "30",
+    "y_offset": "4",
+    "z_offset": "4",
+    "feed_rate": 1500,
+    "fast_feed_rate": 5000
+  }
+}

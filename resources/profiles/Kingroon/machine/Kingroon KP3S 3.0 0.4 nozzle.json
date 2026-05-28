@@ -94,5 +94,6 @@
     ],
     "z_hop": [
         "0.2"
-    ]
+    ],
+    "dynapin_config_path": "Kingroon/dynapin/kp3s.json"
 }
