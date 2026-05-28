@@ -5,6 +5,7 @@
 #include "Print.hpp"
 #include "SupportMaterial.hpp"
 #include "SupportCommon.hpp"
+#include "../DynaPin.hpp"
 #include "Geometry.hpp"
 #include "Point.hpp"
 #include "MutablePolygon.hpp"
@@ -1331,6 +1332,11 @@ struct SupportAnnotations
         // Append custom supports.
         object.project_and_append_custom_facets(false, EnforcerBlockerType::ENFORCER, enforcers_layers);
         object.project_and_append_custom_facets(false, EnforcerBlockerType::BLOCKER, blockers_layers);
+        auto dynapin_blockers = DynaPin::support_blockers_for_object(object);
+        if (blockers_layers.size() < dynapin_blockers.size())
+            blockers_layers.resize(dynapin_blockers.size());
+        for (size_t layer_id = 0; layer_id < dynapin_blockers.size(); ++layer_id)
+            append(blockers_layers[layer_id], dynapin_blockers[layer_id]);
 
         // Expand the blocker a bit. Custom blockers produce strips
         // spanning just the projection between the two slices.

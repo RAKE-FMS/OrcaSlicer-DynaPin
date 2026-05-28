@@ -1035,6 +1035,8 @@ PRINT_CONFIG_CLASS_DEFINE(
 
     // Orca: internal use only
     ((ConfigOptionBool,  calib_flowrate_topinfill_special_order)) // ORCA: special flag for flow rate calibration
+    ((ConfigOptionBool,  enable_dynapin_support_optimization))
+    ((ConfigOptionString,dynapin_selected_pins))
 )
 
 // This object is mapped to Perl as Slic3r::Config::PrintRegion.
@@ -1480,6 +1482,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionString,             filename_format))
     ((ConfigOptionStrings,            post_process))
     ((ConfigOptionString,             printer_model))
+    ((ConfigOptionString,             dynapin_config_path))
     ((ConfigOptionFloat,              resolution))
     ((ConfigOptionFloats,             retraction_minimum_travel))
     ((ConfigOptionBools,              retract_when_changing_layer))

@@ -4635,6 +4635,12 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionString());
     def->cli = ConfigOptionDef::nocli;
 
+    def = this->add("dynapin_config_path", coString);
+    def->label = L("DynaPin config path");
+    def->tooltip = L("Relative path to the printer-specific DynaPin JSON configuration.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionString());
+
     def = this->add("printer_notes", coString);
     def->label = L("Printer notes");
     def->tooltip = L("You can put your notes regarding the printer here.");
@@ -5568,6 +5574,23 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Support");
     def->tooltip = L("Enable support generation.");
     def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("enable_dynapin_support_optimization", coBool);
+    def->label = L("DynaPin support optimization");
+    def->category = L("Support");
+    def->tooltip = L("Exclude selected DynaPin pin areas before support generation.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("dynapin_selected_pins", coString);
+    def->label = L("DynaPin selected pins");
+    def->category = L("Support");
+    def->tooltip = L("Selected DynaPin pins as row,col pairs separated by spaces, semicolons, or new lines.");
+    def->multiline = true;
+    def->full_width = true;
+    def->height = 4;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionString());
 
     def = this->add("support_type", coEnum);
     def->label = L("Type");

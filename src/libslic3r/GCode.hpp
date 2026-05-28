@@ -614,6 +614,7 @@ private:
     bool m_silent_time_estimator_enabled;
 
     Print *m_print{nullptr};
+    std::set<std::string> m_dynapin_pulls_done;
 
     std::vector<const PrintObject*> m_printed_objects;
 

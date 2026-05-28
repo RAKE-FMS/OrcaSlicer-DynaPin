@@ -12,6 +12,7 @@
 #include "GCode/PrintExtents.hpp"
 #include "GCode/Thumbnails.hpp"
 #include "GCode/WipeTower.hpp"
+#include "DynaPin.hpp"
 #include "ShortestPath.hpp"
 #include "Print.hpp"
 #include "Utils.hpp"
@@ -2406,6 +2407,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     m_last_height  = 0.f;
     m_last_layer_z = 0.f;
     m_max_layer_z  = 0.f;
+    m_dynapin_pulls_done.clear();
     m_last_width = 0.f;
     m_is_role_based_fan_on.fill(false);
 
@@ -5507,6 +5509,25 @@ std::string GCode::change_layer(coordf_t print_z)
 
     m_nominal_z = z;
     m_writer.get_position().z() = z;
+
+    if (m_print != nullptr) {
+        DynaPin::Config dynapin_config;
+        if (DynaPin::load_config_for_print(*m_print, dynapin_config)) {
+            for (const PrintObject *object : m_print->objects()) {
+                if (!object->config().enable_dynapin_support_optimization.value)
+                    continue;
+                for (const DynaPin::Pin &pin : DynaPin::parse_pin_list(object->config().dynapin_selected_pins.value)) {
+                    const double pin_z = DynaPin::pin_z(dynapin_config, pin);
+                    if (pin_z <= print_z + EPSILON) {
+                        const std::string key = std::to_string(object->id().id) + ":" + std::to_string(pin.row) + ":" +
+                                                std::to_string(pin.col);
+                        if (m_dynapin_pulls_done.insert(key).second)
+                            gcode += DynaPin::pull_gcode_for_pin(dynapin_config, pin);
+                    }
+                }
+            }
+        }
+    }
 
     // forget last wiping path as wiping after raising Z is pointless
     // BBS. Dont forget wiping path to reduce stringing.

@@ -15,6 +15,7 @@
 #include "Fill/Fill.hpp"
 #include "Layer.hpp"
 #include "Print.hpp"
+#include "../DynaPin.hpp"
 #include "MultiPoint.hpp"
 #include "Polygon.hpp"
 #include "Polyline.hpp"
@@ -204,6 +205,11 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
     std::vector<Polygons>    blockers_layers{ print_object.slice_support_blockers() };
     print_object.project_and_append_custom_facets(false, EnforcerBlockerType::ENFORCER, enforcers_layers);
     print_object.project_and_append_custom_facets(false, EnforcerBlockerType::BLOCKER, blockers_layers);
+    auto dynapin_blockers = DynaPin::support_blockers_for_object(print_object);
+    if (blockers_layers.size() < dynapin_blockers.size())
+        blockers_layers.resize(dynapin_blockers.size());
+    for (size_t layer_id = 0; layer_id < dynapin_blockers.size(); ++layer_id)
+        append(blockers_layers[layer_id], dynapin_blockers[layer_id]);
     const int                support_threshold      = config.support_threshold_angle.value;
     const bool               support_threshold_auto = support_threshold == 0;
     // +1 makes the threshold inclusive
