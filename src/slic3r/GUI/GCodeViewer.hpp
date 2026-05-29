@@ -249,6 +249,14 @@ private:
     DynaPinPreviewState    m_dynapin_preview;
     SequentialView::Marker m_dynapin_marker;
     bool                   m_dynapin_overlays_visible{true};
+    // Static overlays built once per G-code load: semi-transparent boxes for the
+    // support-blocked regions and small markers at the selected pin positions.
+    GLModel                m_dynapin_blocker_model;
+    GLModel                m_dynapin_pin_model;
+    size_t                 m_dynapin_blocker_count{0};
+
+    void load_dynapin_overlays(const Print& print);
+    void render_dynapin_overlays();
 
 public:
     GCodeViewer();

@@ -24,6 +24,7 @@
 #include "GUI_Preview.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/DynaPin.hpp"
 #include "Widgets/ProgressDialog.hpp"
 #include "MsgDialog.hpp"
 
@@ -250,6 +251,106 @@ void GCodeViewer::SequentialView::Marker::render(int canvas_width, int canvas_he
     shader->set_uniform("view_normal_matrix", view_normal_matrix);
 
     m_model.render();
+
+    shader->stop_using();
+
+    glsafe(::glDisable(GL_BLEND));
+}
+
+// Appends an axis-aligned box (world coordinates) as 12 triangles with outward
+// face normals to the given P3N3 geometry buffer.
+static void append_box_geometry(GLModel::Geometry& geo, const Vec3d& min, const Vec3d& max)
+{
+    const Vec3f a = min.cast<float>();
+    const Vec3f b = max.cast<float>();
+    const Vec3f c[8] = {
+        {a.x(), a.y(), a.z()}, {b.x(), a.y(), a.z()}, {b.x(), b.y(), a.z()}, {a.x(), b.y(), a.z()},
+        {a.x(), a.y(), b.z()}, {b.x(), a.y(), b.z()}, {b.x(), b.y(), b.z()}, {a.x(), b.y(), b.z()},
+    };
+    struct Face { int i0, i1, i2, i3; Vec3f n; };
+    const Face faces[6] = {
+        {0, 3, 2, 1, {0.f, 0.f, -1.f}}, // bottom (-z)
+        {4, 5, 6, 7, {0.f, 0.f, 1.f}},  // top (+z)
+        {0, 1, 5, 4, {0.f, -1.f, 0.f}}, // -y
+        {2, 3, 7, 6, {0.f, 1.f, 0.f}},  // +y
+        {1, 2, 6, 5, {1.f, 0.f, 0.f}},  // +x
+        {3, 0, 4, 7, {-1.f, 0.f, 0.f}}, // -x
+    };
+    for (const Face& f : faces) {
+        const unsigned int base = static_cast<unsigned int>(geo.vertices_count());
+        geo.add_vertex(c[f.i0], f.n);
+        geo.add_vertex(c[f.i1], f.n);
+        geo.add_vertex(c[f.i2], f.n);
+        geo.add_vertex(c[f.i3], f.n);
+        geo.add_triangle(base, base + 1, base + 2);
+        geo.add_triangle(base, base + 2, base + 3);
+    }
+}
+
+void GCodeViewer::load_dynapin_overlays(const Print& print)
+{
+    m_dynapin_blocker_model.reset();
+    m_dynapin_pin_model.reset();
+    m_dynapin_blocker_count = 0;
+
+    const std::vector<DynaPin::BlockerBox> boxes = DynaPin::selected_blocker_boxes(print);
+    if (boxes.empty())
+        return;
+    m_dynapin_blocker_count = boxes.size();
+
+    GLModel::Geometry blocker_geo;
+    blocker_geo.format = {GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3};
+    GLModel::Geometry pin_geo;
+    pin_geo.format = {GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3};
+
+    const double pin_half = 1.5; // mm, half-size of the pin marker cube
+    const Vec3d  half(pin_half, pin_half, pin_half);
+    for (const DynaPin::BlockerBox& box : boxes) {
+        append_box_geometry(blocker_geo, box.min, box.max);
+        append_box_geometry(pin_geo, box.pin_pos - half, box.pin_pos + half);
+    }
+
+    if (!blocker_geo.is_empty()) {
+        m_dynapin_blocker_model.init_from(std::move(blocker_geo));
+        m_dynapin_blocker_model.set_color({0.90f, 0.30f, 0.20f, 0.25f});
+    }
+    if (!pin_geo.is_empty()) {
+        m_dynapin_pin_model.init_from(std::move(pin_geo));
+        m_dynapin_pin_model.set_color({1.00f, 0.80f, 0.10f, 0.85f});
+    }
+}
+
+void GCodeViewer::render_dynapin_overlays()
+{
+    if (!m_dynapin_blocker_model.is_initialized() && !m_dynapin_pin_model.is_initialized())
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("gouraud_light");
+    if (shader == nullptr)
+        return;
+
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+
+    shader->start_using();
+    shader->set_uniform("emission_factor", 0.0f);
+
+    const Camera&      camera      = wxGetApp().plater()->get_camera();
+    const Transform3d& view_matrix = camera.get_view_matrix();
+    // Box geometry is already expressed in world (machine) coordinates, so the
+    // model matrix is the identity.
+    shader->set_uniform("view_model_matrix", view_matrix);
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+    const Matrix3d view_normal_matrix = view_matrix.matrix().block(0, 0, 3, 3);
+    shader->set_uniform("view_normal_matrix", view_normal_matrix);
+
+    // Blocked regions are translucent: don't write depth so the toolpaths behind
+    // them stay visible. The pin markers are nearly opaque and do write depth.
+    glsafe(::glDepthMask(GL_FALSE));
+    m_dynapin_blocker_model.render();
+    glsafe(::glDepthMask(GL_TRUE));
+    m_dynapin_pin_model.render();
 
     shader->stop_using();
 
@@ -1362,6 +1463,7 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult&       gcode_result,
 
     m_sequential_view.gcode_window.load_gcode(gcode_result.filename, gcode_result.lines_ends);
     m_dynapin_preview.load(gcode_result);
+    load_dynapin_overlays(print);
 
     // BBS: add only gcode mode
     // if (wxGetApp().is_gcode_viewer())
@@ -1582,6 +1684,9 @@ void GCodeViewer::reset()
     m_sequential_view.gcode_window.reset();
     m_contained_in_bed = true;
     m_dynapin_preview.reset();
+    m_dynapin_blocker_model.reset();
+    m_dynapin_pin_model.reset();
+    m_dynapin_blocker_count    = 0;
     m_dynapin_overlays_visible = true;
 }
 
@@ -1616,10 +1721,13 @@ void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
     m_sequential_view.render(!m_no_render_path, legend_height, &m_viewer, m_viewer.get_current_vertex().gcode_id, canvas_width,
                              canvas_height - bottom_margin * m_scale, right_margin * m_scale, m_viewer.get_view_type());
 
-    if (m_dynapin_overlays_visible && m_dynapin_preview.selection()) {
-        m_dynapin_marker.set_world_position(m_dynapin_preview.position_for_gcode_id(m_viewer.get_current_vertex().gcode_id));
-        m_dynapin_marker.set_z_offset(m_z_offset + 0.5f);
-        m_dynapin_marker.render(canvas_width, canvas_height, m_viewer.get_view_type());
+    if (m_dynapin_overlays_visible) {
+        render_dynapin_overlays();
+        if (m_dynapin_preview.selection()) {
+            m_dynapin_marker.set_world_position(m_dynapin_preview.position_for_gcode_id(m_viewer.get_current_vertex().gcode_id));
+            m_dynapin_marker.set_z_offset(m_z_offset + 0.5f);
+            m_dynapin_marker.render(canvas_width, canvas_height, m_viewer.get_view_type());
+        }
     }
 
 #if VGCODE_ENABLE_COG_AND_TOOL_MARKERS
@@ -3318,12 +3426,14 @@ void GCodeViewer::render_legend(float& legend_height, int canvas_width, int canv
         }
     };
 
-    if (!m_dynapin_preview.empty()) {
+    if (!m_dynapin_preview.empty() || m_dynapin_blocker_model.is_initialized()) {
         ImGui::Separator();
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f * m_scale, 6.0f * m_scale));
         ImGuiWrapper::text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, "DynaPin");
         ImGui::Checkbox("Show overlays", &m_dynapin_overlays_visible);
         imgui.text((boost::format("Pull events: %1%") % m_dynapin_preview.events().size()).str());
+        if (m_dynapin_blocker_model.is_initialized())
+            imgui.text((boost::format("Blocked regions: %1%") % m_dynapin_blocker_count).str());
         if (m_dynapin_preview.selection()) {
             const DynaPinSelection& selection = *m_dynapin_preview.selection();
             const Vec3f             position  = m_dynapin_preview.position_for_gcode_id(m_viewer.get_current_vertex().gcode_id);

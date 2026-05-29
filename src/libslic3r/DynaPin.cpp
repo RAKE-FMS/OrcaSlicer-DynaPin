@@ -220,6 +220,41 @@ std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
     return out;
 }
 
+std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
+{
+    std::vector<BlockerBox> out;
+    if (!print.config().enable_dynapin_support_optimization.value)
+        return out;
+
+    Config      config;
+    std::string error;
+    if (!load_config_for_print(print, config, &error)) {
+        BOOST_LOG_TRIVIAL(warning) << error;
+        return out;
+    }
+
+    const std::vector<Pin> pins = parse_pin_list(print.config().dynapin_selected_pins.value);
+    out.reserve(pins.size());
+    for (const Pin& pin : pins) {
+        const double y     = pin_y(config, pin);
+        const double z     = pin_z(config, pin);
+        const double min_x = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
+        const double max_x = config.blocker_center_x + 0.5 * config.blocker_width_x;
+        const double min_y = y - 0.5 * config.blocker_width_y;
+        const double max_y = y + 0.5 * config.blocker_width_y;
+        const double z_min = 0.;
+        const double z_max = z + config.blocker_z_max;
+
+        BlockerBox box;
+        box.pin     = pin;
+        box.min     = Vec3d(min_x, min_y, z_min);
+        box.max     = Vec3d(max_x, max_y, z_max);
+        box.pin_pos = Vec3d(config.blocker_center_x, y, z);
+        out.push_back(box);
+    }
+    return out;
+}
+
 std::string pull_gcode_for_pin(const Config& config, const Pin& pin)
 {
     const double       y = pin_y(config, pin) + config.pull_gcode.y_offset;
