@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <set>
 #include <sstream>
 
@@ -171,10 +172,13 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
     config.pull_gcode.x_front  = number_or(pull, "x_front", config.pull_gcode.x_front);
     config.pull_gcode.y_offset = number_or(pull, "y_offset", config.pull_gcode.y_offset);
     config.pull_gcode.z_offset = number_or(pull, "z_offset", config.pull_gcode.z_offset);
-    config.pull_gcode.travel_feedrate = number_or(pull, "travel_feedrate", config.pull_gcode.travel_feedrate);
-    config.pull_gcode.pull_feedrate   = number_or(pull, "pull_feedrate", config.pull_gcode.pull_feedrate);
-    config.pull_gcode.travel_feedrate = number_or(pull, "fast_feed_rate", config.pull_gcode.travel_feedrate);
-    config.pull_gcode.pull_feedrate   = number_or(pull, "feed_rate", config.pull_gcode.pull_feedrate);
+    config.pull_gcode.travel_feedrate    = number_or(pull, "travel_feedrate", config.pull_gcode.travel_feedrate);
+    config.pull_gcode.pull_feedrate      = number_or(pull, "pull_feedrate", config.pull_gcode.pull_feedrate);
+    config.pull_gcode.travel_feedrate    = number_or(pull, "fast_feed_rate", config.pull_gcode.travel_feedrate);
+    config.pull_gcode.pull_feedrate      = number_or(pull, "feed_rate", config.pull_gcode.pull_feedrate);
+    config.pull_gcode.approach_y_offset  = number_or(pull, "approach_y_offset", config.pull_gcode.approach_y_offset);
+    config.pull_gcode.pull_feedrate_fast = number_or(pull, "pull_feedrate_fast", config.pull_gcode.pull_feedrate_fast);
+    config.pull_gcode.disengage_x_offset = number_or(pull, "disengage_x_offset", config.pull_gcode.disengage_x_offset);
 
     if (config.blocker_width_x <= 0. || config.blocker_width_y <= 0. || config.row_pitch_y == 0. || config.col_pitch_z == 0.) {
         if (error)
@@ -309,15 +313,31 @@ std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
 
 std::string pull_gcode_for_pin(const Config& config, const Pin& pin)
 {
-    const double       y = pin_y(config, pin) + config.pull_gcode.y_offset;
-    const double       z = pin_z(config, pin) + config.pull_gcode.z_offset;
+    const double       y      = pin_y(config, pin) + config.pull_gcode.y_offset;
+    const double       z      = pin_z(config, pin);
+    const double       z_ret  = z + config.pull_gcode.z_offset;
+    const double       y_app  = y + config.pull_gcode.approach_y_offset;
+    const double       f_fast = config.pull_gcode.travel_feedrate;
+    const double       f_slow = config.pull_gcode.pull_feedrate;
+    const double       f_pull = config.pull_gcode.pull_feedrate_fast;
     std::ostringstream gcode;
+    gcode << std::fixed << std::setprecision(4);
     gcode << "; BEGIN_DYNAPIN_PULL ROW=" << pin.row << " COL=" << pin.col << "\n";
-    gcode << "G0 Z" << z << " F" << config.pull_gcode.travel_feedrate << "\n";
-    gcode << "G0 X" << config.pull_gcode.x_hook << " Y" << y << " F" << config.pull_gcode.travel_feedrate << "\n";
-    gcode << "G1 X" << config.pull_gcode.x_latch << " F" << config.pull_gcode.pull_feedrate << "\n";
+    // Approach: shift Y away from pin, then move X+Z together to hook height
+    gcode << "G1 Y" << y_app << " F" << f_fast << "\n";
+    gcode << "G1 X" << config.pull_gcode.x_hook << " Z" << z << " F" << f_fast << "\n";
+    // Latch: advance X to latch position
+    gcode << "G1 X" << config.pull_gcode.x_latch << " F" << f_slow << "\n";
+    // Engage: move Y back onto pin
+    gcode << "G1 Y" << y << " F" << f_slow << "\n";
     gcode << "; DYNAPIN_PULL_MOVE\n";
-    gcode << "G1 X" << config.pull_gcode.x_front << " F" << config.pull_gcode.pull_feedrate << "\n";
+    // Pull pin out fast
+    gcode << "G1 X" << config.pull_gcode.x_front << " F" << f_pull << "\n";
+    // Disengage: shift X slightly and Y away
+    gcode << "G1 X" << (config.pull_gcode.x_front + config.pull_gcode.disengage_x_offset)
+          << " Y" << y_app << " F" << f_slow << "\n";
+    // Retract Z to clear
+    gcode << "G1 Z" << z_ret << " F" << f_slow << "\n";
     gcode << "; END_DYNAPIN_PULL\n";
     return gcode.str();
 }

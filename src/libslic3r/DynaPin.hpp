@@ -26,6 +26,9 @@ struct PullMoveConfig
     double x_front = 0.;
     double y_offset = 0.;
     double z_offset = 0.;
+    double approach_y_offset = -4.;
+    double pull_feedrate_fast = 3000.;
+    double disengage_x_offset = 1.5;
     double travel_feedrate = 6000.;
     double pull_feedrate = 1200.;
 };

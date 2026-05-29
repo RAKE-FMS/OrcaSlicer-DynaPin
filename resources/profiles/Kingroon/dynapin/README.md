@@ -31,10 +31,15 @@ x_hook  x_latch             x_front
   ↓       ↓                    ↓
 ─────── ───────         ─────────────── (X軸)
 
-1. G0 Z(pin_z + z_offset)           ← ピン高さへ移動（早送り）
-2. G0 X(x_hook) Y(pin_y + y_offset) ← フック位置へ移動（早送り）
-3. G1 X(x_latch)                    ← ラッチをかける（低速）
-4. G1 X(x_front)                    ← 前面まで引き出す（低速）
+1. G1 Y(pin_y + y_offset + approach_y_offset)       ← ピンをよけてY接近（早送り）
+2. G1 X(x_hook) Z(pin_z)                            ← XZ同時移動でフック高さへ（早送り）
+3. G1 X(x_latch)                                    ← ラッチをかける（低速）
+4. G1 Y(pin_y + y_offset)                           ← Yをピンに当てる（低速）
+── ; DYNAPIN_PULL_MOVE ──
+5. G1 X(x_front)                                    ← 前面まで引き出す（高速）
+6. G1 X(x_front + disengage_x_offset) Y(pin_y + y_offset + approach_y_offset)
+                                                    ← XY同時移動でピンを外す（低速）
+7. G1 Z(pin_z + z_offset)                           ← Z退避（低速）
 ```
 
 ### サポート材の除外領域
@@ -146,6 +151,10 @@ pin_z = origin.z + (col - origin.col) × pitch.col_z
   "x_front": 30,
   "y_offset": 4,
   "z_offset": 4,
+  "approach_y_offset": -4,
+  "pull_feedrate_fast": 3000,
+  "disengage_x_offset": 1.5,
+  "disengage_z_offset": 4,
   "feed_rate": 1500,
   "fast_feed_rate": 5000
 }
@@ -157,9 +166,12 @@ pin_z = origin.z + (col - origin.col) × pitch.col_z
 | `x_latch` | number | ○ | ラッチ位置のX座標 [mm]（ピンを捕捉する位置） |
 | `x_front` | number | ○ | 最終引き出し位置のX座標 [mm] |
 | `y_offset` | number | – | ピンY座標へのオフセット [mm]（省略時 0） |
-| `z_offset` | number | – | ピンZ座標へのオフセット [mm]（省略時 0） |
-| `feed_rate` | number | – | 引き出し動作の送り速度 [mm/min]（省略時 1200） |
-| `fast_feed_rate` | number | – | 移動動作の送り速度 [mm/min]（省略時 6000） |
+| `z_offset` | number | – | 引き出し完了後の退避Z量 [mm]（省略時 0）。`pin_z + z_offset` の高さまでZを上げる |
+| `approach_y_offset` | number | – | 接近時にY座標をさらにずらす量 [mm]（省略時 -4）。フック進入時にピンと干渉しないよう手前にずれる |
+| `pull_feedrate_fast` | number | – | 引き出し（`x_front`への移動）時の送り速度 [mm/min]（省略時 3000） |
+| `disengage_x_offset` | number | – | 外し動作でXを `x_front` から追加移動する量 [mm]（省略時 1.5） |
+| `feed_rate` | number | – | ラッチ・係合・外し動作の送り速度 [mm/min]（省略時 1200） |
+| `fast_feed_rate` | number | – | 接近・フック移動の送り速度 [mm/min]（省略時 6000） |
 
 > `feed_rate` は `pull_feedrate`、`fast_feed_rate` は `travel_feedrate` としても記述できます。
 
@@ -198,6 +210,14 @@ pin_z = origin.z + (col - origin.col) × pitch.col_z
 | `support_exclusion.y_width` | `width_y` の代替名 |
 | `pull_gcode.pull_feedrate` | `feed_rate` の代替名 |
 | `pull_gcode.travel_feedrate` | `fast_feed_rate` の代替名 |
+
+新フィールドを省略した場合はデフォルト値が使われます（後方互換あり）。
+
+| フィールド | 省略時のデフォルト |
+|---|---|
+| `pull_gcode.approach_y_offset` | `-4.0` mm |
+| `pull_gcode.pull_feedrate_fast` | `3000` mm/min |
+| `pull_gcode.disengage_x_offset` | `1.5` mm |
 
 ---
 

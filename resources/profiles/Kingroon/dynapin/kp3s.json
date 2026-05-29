@@ -23,6 +23,9 @@
     "x_front": "30",
     "y_offset": "4",
     "z_offset": "4",
+    "approach_y_offset": -4,
+    "pull_feedrate_fast": 3000,
+    "disengage_x_offset": 1.5,
     "feed_rate": 1500,
     "fast_feed_rate": 5000
   }
