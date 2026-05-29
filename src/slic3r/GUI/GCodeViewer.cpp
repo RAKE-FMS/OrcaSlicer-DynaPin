@@ -3436,7 +3436,40 @@ void GCodeViewer::render_legend(float& legend_height, int canvas_width, int canv
             imgui.text((boost::format("Blocked regions: %1%") % m_dynapin_blocker_count).str());
         if (m_dynapin_preview.selection()) {
             const DynaPinSelection& selection = *m_dynapin_preview.selection();
-            const Vec3f             position  = m_dynapin_preview.position_for_gcode_id(m_viewer.get_current_vertex().gcode_id);
+
+            // Build the list of distinct pins (one entry per address, in first-seen order)
+            // so the user can pick which pin the marker / preview follows.
+            std::vector<const DynaPinEvent*> pins;
+            for (const DynaPinEvent& event : m_dynapin_preview.events()) {
+                const bool already = std::any_of(pins.begin(), pins.end(),
+                    [&event](const DynaPinEvent* e) { return e->address == event.address; });
+                if (!already)
+                    pins.push_back(&event);
+            }
+
+            int current = 0;
+            for (size_t i = 0; i < pins.size(); ++i) {
+                if (pins[i]->address == selection.address) {
+                    current = static_cast<int>(i);
+                    break;
+                }
+            }
+
+            const std::string preview_label = (boost::format("r%1% c%2%") % selection.address.row % selection.address.col).str();
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+            if (ImGui::BeginCombo("##dynapin_pin", preview_label.c_str())) {
+                for (size_t i = 0; i < pins.size(); ++i) {
+                    const std::string label = (boost::format("r%1% c%2%") % pins[i]->address.row % pins[i]->address.col).str();
+                    const bool is_selected  = static_cast<int>(i) == current;
+                    if (ImGui::Selectable(label.c_str(), is_selected))
+                        m_dynapin_preview.set_selection(DynaPinSelection{pins[i]->address, pins[i]->start_pos});
+                    if (is_selected)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+
+            const Vec3f position = m_dynapin_preview.position_for_gcode_id(m_viewer.get_current_vertex().gcode_id);
             imgui.text((boost::format("Displaying r%1% c%2%") % selection.address.row % selection.address.col).str());
             imgui.text((boost::format("Preview %.2f %.2f %.2f") % position.x() % position.y() % position.z()).str());
         } else {

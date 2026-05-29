@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <set>
 #include <sstream>
 
@@ -171,10 +172,13 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
     config.pull_gcode.x_front  = number_or(pull, "x_front", config.pull_gcode.x_front);
     config.pull_gcode.y_offset = number_or(pull, "y_offset", config.pull_gcode.y_offset);
     config.pull_gcode.z_offset = number_or(pull, "z_offset", config.pull_gcode.z_offset);
-    config.pull_gcode.travel_feedrate = number_or(pull, "travel_feedrate", config.pull_gcode.travel_feedrate);
-    config.pull_gcode.pull_feedrate   = number_or(pull, "pull_feedrate", config.pull_gcode.pull_feedrate);
-    config.pull_gcode.travel_feedrate = number_or(pull, "fast_feed_rate", config.pull_gcode.travel_feedrate);
-    config.pull_gcode.pull_feedrate   = number_or(pull, "feed_rate", config.pull_gcode.pull_feedrate);
+    config.pull_gcode.travel_feedrate    = number_or(pull, "travel_feedrate", config.pull_gcode.travel_feedrate);
+    config.pull_gcode.pull_feedrate      = number_or(pull, "pull_feedrate", config.pull_gcode.pull_feedrate);
+    config.pull_gcode.travel_feedrate    = number_or(pull, "fast_feed_rate", config.pull_gcode.travel_feedrate);
+    config.pull_gcode.pull_feedrate      = number_or(pull, "feed_rate", config.pull_gcode.pull_feedrate);
+    config.pull_gcode.approach_y_offset  = number_or(pull, "approach_y_offset", config.pull_gcode.approach_y_offset);
+    config.pull_gcode.pull_feedrate_fast = number_or(pull, "pull_feedrate_fast", config.pull_gcode.pull_feedrate_fast);
+    config.pull_gcode.disengage_x_offset = number_or(pull, "disengage_x_offset", config.pull_gcode.disengage_x_offset);
 
     if (config.blocker_width_x <= 0. || config.blocker_width_y <= 0. || config.row_pitch_y == 0. || config.col_pitch_z == 0.) {
         if (error)
@@ -182,6 +186,21 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
         return false;
     }
     return true;
+}
+
+// Maximum X (in mm) reachable on the bed, taken from the printer's printable
+// area. The support blocker is extended out to this edge so the pin can be
+// pulled clear of the print. Falls back to the blocker's own right edge when
+// the bed shape is unavailable.
+static double bed_max_x(const Print& print, const Config& config)
+{
+    const Points bed = get_bed_shape(print.config());
+    if (bed.empty())
+        return config.blocker_center_x + 0.5 * config.blocker_width_x;
+    coord_t max_x = bed.front().x();
+    for (const Point& p : bed)
+        max_x = std::max(max_x, p.x());
+    return unscale_(max_x);
 }
 
 std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
@@ -209,13 +228,14 @@ std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
     // PrintObject.cpp), because instance.shift also carries the large multi-plate
     // offset which would push the blocker far off the bed.
     const Point shift = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
+    const double max_x_bed = bed_max_x(print, config);
     for (const Pin& pin : pins) {
-        const double y     = pin_y(config, pin);
+        const double y     = pin_y(config, pin) + config.pull_gcode.y_offset;
         const double z     = pin_z(config, pin);
         const double z_min = 0.;
         const double z_max = z + config.blocker_z_max;
         const double min_x = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
-        const double max_x = config.blocker_center_x + 0.5 * config.blocker_width_x;
+        const double max_x = max_x_bed;
         const double min_y = y - 0.5 * config.blocker_width_y;
         const double max_y = y + 0.5 * config.blocker_width_y;
 
@@ -251,12 +271,13 @@ std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject& objec
     const Point shift = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
 
     const std::vector<Pin> pins = parse_pin_list(print.config().dynapin_selected_pins.value);
+    const double max_x_bed = bed_max_x(print, config);
     out.reserve(pins.size());
     for (const Pin& pin : pins) {
-        const double y     = pin_y(config, pin);
+        const double y     = pin_y(config, pin) + config.pull_gcode.y_offset;
         const double z     = pin_z(config, pin);
         const double min_x = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
-        const double max_x = config.blocker_center_x + 0.5 * config.blocker_width_x;
+        const double max_x = max_x_bed;
         const double min_y = y - 0.5 * config.blocker_width_y;
         const double max_y = y + 0.5 * config.blocker_width_y;
 
@@ -286,12 +307,13 @@ std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
     }
 
     const std::vector<Pin> pins = parse_pin_list(print.config().dynapin_selected_pins.value);
+    const double max_x_bed = bed_max_x(print, config);
     out.reserve(pins.size());
     for (const Pin& pin : pins) {
-        const double y     = pin_y(config, pin);
+        const double y     = pin_y(config, pin) + config.pull_gcode.y_offset;
         const double z     = pin_z(config, pin);
         const double min_x = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
-        const double max_x = config.blocker_center_x + 0.5 * config.blocker_width_x;
+        const double max_x = max_x_bed;
         const double min_y = y - 0.5 * config.blocker_width_y;
         const double max_y = y + 0.5 * config.blocker_width_y;
         const double z_min = 0.;
@@ -309,15 +331,31 @@ std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
 
 std::string pull_gcode_for_pin(const Config& config, const Pin& pin)
 {
-    const double       y = pin_y(config, pin) + config.pull_gcode.y_offset;
-    const double       z = pin_z(config, pin) + config.pull_gcode.z_offset;
+    const double       y      = pin_y(config, pin) + config.pull_gcode.y_offset;
+    const double       z      = pin_z(config, pin);
+    const double       z_ret  = z + config.pull_gcode.z_offset;
+    const double       y_app  = y + config.pull_gcode.approach_y_offset;
+    const double       f_fast = config.pull_gcode.travel_feedrate;
+    const double       f_slow = config.pull_gcode.pull_feedrate;
+    const double       f_pull = config.pull_gcode.pull_feedrate_fast;
     std::ostringstream gcode;
+    gcode << std::fixed << std::setprecision(4);
     gcode << "; BEGIN_DYNAPIN_PULL ROW=" << pin.row << " COL=" << pin.col << "\n";
-    gcode << "G0 Z" << z << " F" << config.pull_gcode.travel_feedrate << "\n";
-    gcode << "G0 X" << config.pull_gcode.x_hook << " Y" << y << " F" << config.pull_gcode.travel_feedrate << "\n";
-    gcode << "G1 X" << config.pull_gcode.x_latch << " F" << config.pull_gcode.pull_feedrate << "\n";
+    // Approach: shift Y away from pin, then move X+Z together to hook height
+    gcode << "G1 Y" << y_app << " F" << f_fast << "\n";
+    gcode << "G1 X" << config.pull_gcode.x_hook << " Z" << z << " F" << f_fast << "\n";
+    // Latch: advance X to latch position
+    gcode << "G1 X" << config.pull_gcode.x_latch << " F" << f_slow << "\n";
+    // Engage: move Y back onto pin
+    gcode << "G1 Y" << y << " F" << f_slow << "\n";
     gcode << "; DYNAPIN_PULL_MOVE\n";
-    gcode << "G1 X" << config.pull_gcode.x_front << " F" << config.pull_gcode.pull_feedrate << "\n";
+    // Pull pin out fast
+    gcode << "G1 X" << config.pull_gcode.x_front << " F" << f_pull << "\n";
+    // Disengage: shift X slightly and Y away
+    gcode << "G1 X" << (config.pull_gcode.x_front + config.pull_gcode.disengage_x_offset)
+          << " Y" << y_app << " F" << f_slow << "\n";
+    // Retract Z to clear
+    gcode << "G1 Z" << z_ret << " F" << f_slow << "\n";
     gcode << "; END_DYNAPIN_PULL\n";
     return gcode.str();
 }
