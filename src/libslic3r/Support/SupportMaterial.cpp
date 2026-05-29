@@ -509,6 +509,47 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     }
 */
 
+    // DynaPin: clip already-generated support away from the blocked prisms.
+    // The per-layer overhang/contact blocker only stops support that is *detected*
+    // inside the region; support columns descending from overhangs located above
+    // the region still pass straight through it. Trim every support layer whose
+    // print_z falls inside a blocker prism so the pins (not printed support) take
+    // over in that zone.
+    if (const std::vector<DynaPin::LocalBlocker> dynapin_blockers = DynaPin::support_blocker_regions_local(object);
+        !dynapin_blockers.empty()) {
+        for (const DynaPin::LocalBlocker &b : dynapin_blockers) {
+            BoundingBox bb = get_extents(b.poly);
+            BOOST_LOG_TRIVIAL(warning) << "DynaPin clip blocker local bbox x[" << unscale<double>(bb.min.x()) << "," << unscale<double>(bb.max.x())
+                                       << "] y[" << unscale<double>(bb.min.y()) << "," << unscale<double>(bb.max.y())
+                                       << "] z[" << b.z_min << "," << b.z_max << "]";
+        }
+        auto clip_layers = [&dynapin_blockers](SupportGeneratorLayersPtr &layers, const char* name) {
+            double area_before = 0., area_removed = 0.; int hit = 0;
+            for (SupportGeneratorLayer *layer : layers) {
+                if (layer == nullptr || layer->polygons.empty())
+                    continue;
+                Polygons blockers;
+                for (const DynaPin::LocalBlocker &b : dynapin_blockers)
+                    if (layer->print_z + EPSILON >= b.z_min && layer->print_z - EPSILON <= b.z_max)
+                        blockers.push_back(b.poly);
+                if (!blockers.empty()) {
+                    double a0 = 0.; for (const Polygon &p : layer->polygons) a0 += p.area();
+                    layer->polygons = diff(layer->polygons, blockers);
+                    double a1 = 0.; for (const Polygon &p : layer->polygons) a1 += p.area();
+                    area_before += a0 * SCALING_FACTOR * SCALING_FACTOR; area_removed += (a0 - a1) * SCALING_FACTOR * SCALING_FACTOR; ++hit;
+                }
+            }
+            BOOST_LOG_TRIVIAL(warning) << "DynaPin clip " << name << ": hit_layers=" << hit
+                                       << " area_before=" << area_before << "mm2 area_removed=" << area_removed << "mm2";
+        };
+        clip_layers(top_contacts, "top_contacts");
+        clip_layers(bottom_contacts, "bottom_contacts");
+        clip_layers(intermediate_layers, "intermediate");
+        clip_layers(interface_layers, "interface");
+        clip_layers(base_interface_layers, "base_interface");
+        // Raft layers sit below the object; leave them so first-layer adhesion is kept.
+    }
+
     BOOST_LOG_TRIVIAL(info) << "Support generator - Creating layers";
 
 // For debugging purposes, one may want to show only some of the support extrusions.

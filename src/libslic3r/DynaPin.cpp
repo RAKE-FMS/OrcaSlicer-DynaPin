@@ -199,6 +199,16 @@ std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
     }
 
     const std::vector<Pin> pins = parse_pin_list(print.config().dynapin_selected_pins.value);
+    // The blocker geometry above is expressed in world (machine/bed) coordinates,
+    // matching the G-code preview overlay. The support polygons we subtract it from
+    // (layer.lslices etc.) live in object-local coordinates: world = local + instance.shift.
+    // Convert the blocker into object-local space by subtracting the instance shift,
+    // otherwise the blocker lands in the wrong place and support is still generated
+    // inside the previewed block region. Use shift_without_plate_offset() (the same
+    // transform PrintObject uses to bring world polygons into object coords, see
+    // PrintObject.cpp), because instance.shift also carries the large multi-plate
+    // offset which would push the blocker far off the bed.
+    const Point shift = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
     for (const Pin& pin : pins) {
         const double y     = pin_y(config, pin);
         const double z     = pin_z(config, pin);
@@ -210,12 +220,54 @@ std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
         const double max_y = y + 0.5 * config.blocker_width_y;
 
         Polygon poly;
-        poly.points = {Point(scale_(min_x), scale_(min_y)), Point(scale_(max_x), scale_(min_y)), Point(scale_(max_x), scale_(max_y)),
-                       Point(scale_(min_x), scale_(max_y))};
+        poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
+                       Point(scale_(max_x) - shift.x(), scale_(min_y) - shift.y()),
+                       Point(scale_(max_x) - shift.x(), scale_(max_y) - shift.y()),
+                       Point(scale_(min_x) - shift.x(), scale_(max_y) - shift.y())};
         for (const Layer* layer : object.layers()) {
             if (layer->print_z + EPSILON >= z_min && layer->print_z - EPSILON <= z_max)
                 out[layer->id()].push_back(poly);
         }
+    }
+    return out;
+}
+
+std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject& object)
+{
+    std::vector<LocalBlocker> out;
+    const Print&              print = *object.print();
+    if (!print.config().enable_dynapin_support_optimization.value)
+        return out;
+
+    Config      config;
+    std::string error;
+    if (!load_config_for_print(print, config, &error)) {
+        BOOST_LOG_TRIVIAL(warning) << error;
+        return out;
+    }
+
+    // World (machine) -> object-local: subtract the instance shift without the
+    // multi-plate offset (same transform PrintObject uses, see PrintObject.cpp).
+    const Point shift = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
+
+    const std::vector<Pin> pins = parse_pin_list(print.config().dynapin_selected_pins.value);
+    out.reserve(pins.size());
+    for (const Pin& pin : pins) {
+        const double y     = pin_y(config, pin);
+        const double z     = pin_z(config, pin);
+        const double min_x = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
+        const double max_x = config.blocker_center_x + 0.5 * config.blocker_width_x;
+        const double min_y = y - 0.5 * config.blocker_width_y;
+        const double max_y = y + 0.5 * config.blocker_width_y;
+
+        LocalBlocker blocker;
+        blocker.z_min = 0.;
+        blocker.z_max = z + config.blocker_z_max;
+        blocker.poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
+                               Point(scale_(max_x) - shift.x(), scale_(min_y) - shift.y()),
+                               Point(scale_(max_x) - shift.x(), scale_(max_y) - shift.y()),
+                               Point(scale_(min_x) - shift.x(), scale_(max_y) - shift.y())};
+        out.push_back(std::move(blocker));
     }
     return out;
 }

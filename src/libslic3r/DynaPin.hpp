@@ -57,9 +57,23 @@ struct BlockerBox
     Vec3d pin_pos{Vec3d::Zero()}; // physical position of the pin
 };
 
+// A prism in which support material must be excluded. The polygon is expressed
+// in the PrintObject's local (slice) coordinate system so it can be subtracted
+// directly from generated support layers; [z_min, z_max] are print_z bounds (mm).
+struct LocalBlocker
+{
+    Polygon poly;
+    double  z_min = 0.;
+    double  z_max = 0.;
+};
+
 std::vector<Pin> parse_pin_list(const std::string &pins);
 bool load_config_for_print(const Print &print, Config &config, std::string *error = nullptr);
 std::vector<Polygons> support_blockers_for_object(const PrintObject &object);
+// Blocker prisms in object-local coordinates, used to clip already-generated
+// support layers (e.g. support columns descending through the blocked region
+// from overhangs located above it).
+std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject &object);
 // Returns one box per selected pin (empty when DynaPin optimization is disabled
 // or the config cannot be loaded).
 std::vector<BlockerBox> selected_blocker_boxes(const Print &print);
