@@ -160,13 +160,10 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
         config.blocker_center_x = 0.5 * (x_min + x_max);
         config.blocker_width_x  = std::abs(x_max - x_min);
     }
-    config.blocker_z_min = number_or(exclusion, "z_min", config.blocker_z_min);
-    config.blocker_z_max = number_or(exclusion, "z_max", config.blocker_z_max);
+    config.blocker_z_max = number_or(exclusion, "z_above", number_or(exclusion, "z_max", config.blocker_z_max));
     const double z_range = number_or(exclusion, "z_range", 0.);
-    if (z_range > 0. && config.blocker_z_min == 0. && config.blocker_z_max == 0.) {
-        config.blocker_z_min = -0.5 * z_range;
+    if (z_range > 0. && config.blocker_z_max == 0.)
         config.blocker_z_max = 0.5 * z_range;
-    }
 
     const nlohmann::json pull  = j.contains("pull_gcode") && j["pull_gcode"].is_object() ? j["pull_gcode"] : nlohmann::json::object();
     config.pull_gcode.x_hook   = number_or(pull, "x_hook", config.pull_gcode.x_hook);
@@ -205,9 +202,9 @@ std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
     for (const Pin& pin : pins) {
         const double y     = pin_y(config, pin);
         const double z     = pin_z(config, pin);
-        const double z_min = z + config.blocker_z_min;
+        const double z_min = 0.;
         const double z_max = z + config.blocker_z_max;
-        const double min_x = config.blocker_center_x - 0.5 * config.blocker_width_x;
+        const double min_x = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
         const double max_x = config.blocker_center_x + 0.5 * config.blocker_width_x;
         const double min_y = y - 0.5 * config.blocker_width_y;
         const double max_y = y + 0.5 * config.blocker_width_y;

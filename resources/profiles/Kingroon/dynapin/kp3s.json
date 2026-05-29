@@ -15,7 +15,7 @@
     "center_x": 110,
     "width_x": 20,
     "width_y": 8,
-    "z_range": 8
+    "z_above": 4
   },
   "pull_gcode": {
     "x_hook": "160",
