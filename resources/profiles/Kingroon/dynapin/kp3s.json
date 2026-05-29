@@ -14,7 +14,7 @@
   "support_exclusion": {
     "center_x": 110,
     "width_x": 20,
-    "width_y": 8,
+    "width_y": 10,
     "z_above": 4
   },
   "pull_gcode": {
