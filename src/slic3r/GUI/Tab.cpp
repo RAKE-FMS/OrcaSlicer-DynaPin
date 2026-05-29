@@ -4579,8 +4579,10 @@ void TabPrinter::build_fff()
     optgroup->append_single_option_line(option, "printer_machine_gcode#template-custom-g-code");
 
     page     = add_options_page(L("DynaPin"), "custom-gcode_support");
-    optgroup = page->new_optgroup(L("DynaPin"), L"param_support", 0);
-    optgroup->append_single_option_line("dynapin_config_path");
+    optgroup = page->new_optgroup(L("DynaPin"), L"param_support");
+    option                = optgroup->get_option("dynapin_config_path");
+    option.opt.full_width = true;
+    optgroup->append_single_option_line(option);
 
     page                  = add_options_page(L("Notes"), "custom-gcode_note"); // ORCA: icon only visible on placeholders
     optgroup              = page->new_optgroup(L("Notes"), "note", 0);

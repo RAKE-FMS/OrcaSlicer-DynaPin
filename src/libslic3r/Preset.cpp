@@ -1025,7 +1025,7 @@ static std::vector<std::string> s_Preset_printer_options {
     "print_host_webui",
     "printhost_cafile","printhost_port","printhost_authorization_type",
     "printhost_user", "printhost_password", "printhost_ssl_ignore_revoke", "thumbnails", "thumbnails_format",
-    "use_relative_e_distances", "extruder_type", "use_firmware_retraction", "printer_notes",
+    "use_relative_e_distances", "extruder_type", "use_firmware_retraction", "printer_notes", "dynapin_config_path",
     "grab_length", "support_object_skip_flush", "physical_extruder_map",
     "cooling_tube_retraction",
     "cooling_tube_length", "high_current_on_filament_swap", "parking_pos_retraction", "extra_loading_move", "wipe_tower_type", "purge_in_prime_tower", "enable_filament_ramming",
