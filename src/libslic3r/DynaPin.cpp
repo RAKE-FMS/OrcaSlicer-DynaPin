@@ -188,6 +188,21 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
     return true;
 }
 
+// Maximum X (in mm) reachable on the bed, taken from the printer's printable
+// area. The support blocker is extended out to this edge so the pin can be
+// pulled clear of the print. Falls back to the blocker's own right edge when
+// the bed shape is unavailable.
+static double bed_max_x(const Print& print, const Config& config)
+{
+    const Points bed = get_bed_shape(print.config());
+    if (bed.empty())
+        return config.blocker_center_x + 0.5 * config.blocker_width_x;
+    coord_t max_x = bed.front().x();
+    for (const Point& p : bed)
+        max_x = std::max(max_x, p.x());
+    return unscale_(max_x);
+}
+
 std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
 {
     std::vector<Polygons> out(object.layer_count());
@@ -213,13 +228,14 @@ std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
     // PrintObject.cpp), because instance.shift also carries the large multi-plate
     // offset which would push the blocker far off the bed.
     const Point shift = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
+    const double max_x_bed = bed_max_x(print, config);
     for (const Pin& pin : pins) {
-        const double y     = pin_y(config, pin);
+        const double y     = pin_y(config, pin) + config.pull_gcode.y_offset;
         const double z     = pin_z(config, pin);
         const double z_min = 0.;
         const double z_max = z + config.blocker_z_max;
         const double min_x = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
-        const double max_x = config.blocker_center_x + 0.5 * config.blocker_width_x;
+        const double max_x = max_x_bed;
         const double min_y = y - 0.5 * config.blocker_width_y;
         const double max_y = y + 0.5 * config.blocker_width_y;
 
@@ -255,12 +271,13 @@ std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject& objec
     const Point shift = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
 
     const std::vector<Pin> pins = parse_pin_list(print.config().dynapin_selected_pins.value);
+    const double max_x_bed = bed_max_x(print, config);
     out.reserve(pins.size());
     for (const Pin& pin : pins) {
-        const double y     = pin_y(config, pin);
+        const double y     = pin_y(config, pin) + config.pull_gcode.y_offset;
         const double z     = pin_z(config, pin);
         const double min_x = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
-        const double max_x = config.blocker_center_x + 0.5 * config.blocker_width_x;
+        const double max_x = max_x_bed;
         const double min_y = y - 0.5 * config.blocker_width_y;
         const double max_y = y + 0.5 * config.blocker_width_y;
 
@@ -290,12 +307,13 @@ std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
     }
 
     const std::vector<Pin> pins = parse_pin_list(print.config().dynapin_selected_pins.value);
+    const double max_x_bed = bed_max_x(print, config);
     out.reserve(pins.size());
     for (const Pin& pin : pins) {
-        const double y     = pin_y(config, pin);
+        const double y     = pin_y(config, pin) + config.pull_gcode.y_offset;
         const double z     = pin_z(config, pin);
         const double min_x = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
-        const double max_x = config.blocker_center_x + 0.5 * config.blocker_width_x;
+        const double max_x = max_x_bed;
         const double min_y = y - 0.5 * config.blocker_width_y;
         const double max_y = y + 0.5 * config.blocker_width_y;
         const double z_min = 0.;
