@@ -3,7 +3,7 @@
     "origin": {
       "row": 0,
       "col": 0,
-      "y": "63.6",
+      "y": "14",
       "z": "4.0"
     },
     "pitch": {
@@ -15,7 +15,7 @@
     "center_x": 110,
     "width_x": 20,
     "width_y": 12.4,
-    "z_above": 4
+    "z_above": 2.15
   },
   "pull_gcode": {
     "x_hook": "160",
