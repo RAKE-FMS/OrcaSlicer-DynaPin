@@ -51,6 +51,11 @@ static int int_or(const nlohmann::json& j, const char* key, int fallback)
     return fallback;
 }
 
+// Per-pin support block volume is shifted sideways along Y relative to the pin
+// position so the block sits next to (not on top of) the pin. The pin itself
+// (pull G-code, pin_pos) is unaffected.
+static constexpr double support_block_y_offset = -7.2;
+
 double pin_y(const Config& config, const Pin& pin) { return config.origin_y + double(pin.row - config.origin_row) * config.row_pitch_y; }
 
 double pin_z(const Config& config, const Pin& pin) { return config.origin_z + double(pin.col - config.origin_col) * config.col_pitch_z; }
@@ -234,10 +239,11 @@ std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
         const double z     = pin_z(config, pin);
         const double z_min = 0.;
         const double z_max = z + config.blocker_z_max;
+        const double block_y = y + support_block_y_offset;
         const double min_x = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
         const double max_x = max_x_bed;
-        const double min_y = y - 0.5 * config.blocker_width_y;
-        const double max_y = y + 0.5 * config.blocker_width_y;
+        const double min_y = block_y - 0.5 * config.blocker_width_y;
+        const double max_y = block_y + 0.5 * config.blocker_width_y;
 
         Polygon poly;
         poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
@@ -276,10 +282,11 @@ std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject& objec
     for (const Pin& pin : pins) {
         const double y     = pin_y(config, pin) + config.pull_gcode.y_offset;
         const double z     = pin_z(config, pin);
+        const double block_y = y + support_block_y_offset;
         const double min_x = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
         const double max_x = max_x_bed;
-        const double min_y = y - 0.5 * config.blocker_width_y;
-        const double max_y = y + 0.5 * config.blocker_width_y;
+        const double min_y = block_y - 0.5 * config.blocker_width_y;
+        const double max_y = block_y + 0.5 * config.blocker_width_y;
 
         LocalBlocker blocker;
         blocker.z_min = 0.;
@@ -312,10 +319,11 @@ std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
     for (const Pin& pin : pins) {
         const double y     = pin_y(config, pin) + config.pull_gcode.y_offset;
         const double z     = pin_z(config, pin);
+        const double block_y = y + support_block_y_offset;
         const double min_x = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
         const double max_x = max_x_bed;
-        const double min_y = y - 0.5 * config.blocker_width_y;
-        const double max_y = y + 0.5 * config.blocker_width_y;
+        const double min_y = block_y - 0.5 * config.blocker_width_y;
+        const double max_y = block_y + 0.5 * config.blocker_width_y;
         const double z_min = 0.;
         const double z_max = z + config.blocker_z_max;
 
