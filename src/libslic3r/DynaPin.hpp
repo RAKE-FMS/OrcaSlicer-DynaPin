@@ -70,6 +70,16 @@ struct LocalBlocker
     double  z_max = 0.;
 };
 
+// DynaPin ピンの上面を表す仮想サポート面。
+// サポート材がビルドプレートまで降りる代わりに、この面で「着地」できる。
+// PrintObject のローカル（スライス）座標系で表現される。
+// print_z はピン上面の高さ (mm)。
+struct VirtualSupportSurface
+{
+    Polygon poly;           // ピン上面の XY 形状（object-local 座標）
+    double  print_z = 0.;   // ピン上面の Z 高さ (mm)
+};
+
 std::vector<Pin> parse_pin_list(const std::string &pins);
 bool load_config_for_print(const Print &print, Config &config, std::string *error = nullptr);
 std::vector<Polygons> support_blockers_for_object(const PrintObject &object);
@@ -77,6 +87,10 @@ std::vector<Polygons> support_blockers_for_object(const PrintObject &object);
 // support layers (e.g. support columns descending through the blocked region
 // from overhangs located above it).
 std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject &object);
+// 選択された各ピンの上面を仮想サポート面として返す（object-local 座標）。
+// これらの面は「仮想ビルドプレート」として機能し、ピン上面より上で発生した
+// サポート材がビルドプレートまで降りずにピン上面で止まるようにする。
+std::vector<VirtualSupportSurface> pin_top_surfaces_for_object(const PrintObject &object);
 // Returns one box per selected pin (empty when DynaPin optimization is disabled
 // or the config cannot be loaded).
 std::vector<BlockerBox> selected_blocker_boxes(const Print &print);

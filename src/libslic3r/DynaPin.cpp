@@ -300,6 +300,48 @@ std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject& objec
     return out;
 }
 
+std::vector<VirtualSupportSurface> pin_top_surfaces_for_object(const PrintObject& object)
+{
+    std::vector<VirtualSupportSurface> out;
+    const Print&                       print = *object.print();
+    if (!print.config().enable_dynapin_support_optimization.value)
+        return out;
+
+    Config      config;
+    std::string error;
+    if (!load_config_for_print(print, config, &error)) {
+        BOOST_LOG_TRIVIAL(warning) << error;
+        return out;
+    }
+
+    // World (machine) -> object-local: subtract the instance shift without the
+    // multi-plate offset (same transform PrintObject uses, see PrintObject.cpp).
+    const Point shift = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
+
+    const std::vector<Pin> pins        = parse_pin_list(print.config().dynapin_selected_pins.value);
+    const double           max_x_bed   = bed_max_x(print, config);
+    out.reserve(pins.size());
+    for (const Pin& pin : pins) {
+        const double y       = pin_y(config, pin) + config.pull_gcode.y_offset;
+        const double z       = pin_z(config, pin);
+        const double block_y = y + support_block_y_offset;
+        const double min_x   = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
+        const double max_x   = max_x_bed;
+        const double min_y   = block_y - 0.5 * config.blocker_width_y;
+        const double max_y   = block_y + 0.5 * config.blocker_width_y;
+
+        // 仮想サポート面はブロッカー柱の最上面（=ピンの上面）に位置する。
+        VirtualSupportSurface surface;
+        surface.print_z = z + config.blocker_z_max;
+        surface.poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
+                               Point(scale_(max_x) - shift.x(), scale_(min_y) - shift.y()),
+                               Point(scale_(max_x) - shift.x(), scale_(max_y) - shift.y()),
+                               Point(scale_(min_x) - shift.x(), scale_(max_y) - shift.y())};
+        out.push_back(std::move(surface));
+    }
+    return out;
+}
+
 std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
 {
     std::vector<BlockerBox> out;

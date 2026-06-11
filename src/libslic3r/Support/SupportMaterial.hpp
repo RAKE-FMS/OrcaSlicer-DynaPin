@@ -7,6 +7,7 @@
 #include "Fill/FillBase.hpp"
 #include "SupportLayer.hpp"
 #include "SupportParameters.hpp"
+#include "../DynaPin.hpp"
 namespace Slic3r {
 
 class PrintObject;
@@ -61,13 +62,15 @@ private:
 	    const SupportGeneratorLayersPtr   &top_contacts,
 	    SupportGeneratorLayerStorage	  &layer_storage) const;
 
-	// Fill in the base layers with polygons.
+	// ポリゴンでベースレイヤー（中間レイヤー）を塗りつぶす。
 	void generate_base_layers(
 	    const PrintObject   &object,
 	    const SupportGeneratorLayersPtr   &bottom_contacts,
 	    const SupportGeneratorLayersPtr   &top_contacts,
 	    SupportGeneratorLayersPtr         &intermediate_layers,
-	    const std::vector<Polygons> &layer_support_areas) const;
+	    const std::vector<Polygons> &layer_support_areas,
+	    // DynaPin: ピン上面を仮想的なサポート着地面として渡す
+	    const std::vector<DynaPin::VirtualSupportSurface> &dynapin_surfaces = {}) const;
 
 
 
