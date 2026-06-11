@@ -7,6 +7,7 @@
 #include "Fill/FillBase.hpp"
 #include "SupportLayer.hpp"
 #include "SupportParameters.hpp"
+#include "../DynaPin.hpp"
 namespace Slic3r {
 
 class PrintObject;
@@ -49,7 +50,8 @@ private:
 	// otherwise set the layer height to a bridging flow of a support interface nozzle.
 	SupportGeneratorLayersPtr bottom_contact_layers_and_layer_support_areas(
 		const PrintObject &object, const SupportGeneratorLayersPtr &top_contacts, std::vector<Polygons> &buildplate_covered, 
-		SupportGeneratorLayerStorage &layer_storage, std::vector<Polygons> &layer_support_areas) const;
+		SupportGeneratorLayerStorage &layer_storage, std::vector<Polygons> &layer_support_areas,
+		const std::vector<DynaPin::LocalBlocker> &dynapin_blockers = {}) const;
 
 	// Trim the top_contacts layers with the bottom_contacts layers if they overlap, so there would not be enough vertical space for both of them.
 	void trim_top_contacts_by_bottom_contacts(const PrintObject &object, const SupportGeneratorLayersPtr &bottom_contacts, SupportGeneratorLayersPtr &top_contacts) const;
@@ -61,13 +63,15 @@ private:
 	    const SupportGeneratorLayersPtr   &top_contacts,
 	    SupportGeneratorLayerStorage	  &layer_storage) const;
 
-	// Fill in the base layers with polygons.
+	// ポリゴンでベースレイヤー（中間レイヤー）を塗りつぶす。
 	void generate_base_layers(
 	    const PrintObject   &object,
 	    const SupportGeneratorLayersPtr   &bottom_contacts,
 	    const SupportGeneratorLayersPtr   &top_contacts,
 	    SupportGeneratorLayersPtr         &intermediate_layers,
-	    const std::vector<Polygons> &layer_support_areas) const;
+	    const std::vector<Polygons> &layer_support_areas,
+	    // DynaPin: ピン上面を仮想的なサポート着地面として渡す
+	    const std::vector<DynaPin::VirtualSupportSurface> &dynapin_surfaces = {}) const;
 
 
 
