@@ -5634,7 +5634,7 @@ std::string GCode::change_layer(coordf_t print_z)
             for (const PrintObject* object : m_print->objects()) {
                 for (const DynaPin::Pin& pin : pins) {
                     const double pin_z = DynaPin::pin_z(dynapin_config, pin);
-                    if (pin_z <= print_z + EPSILON) {
+                    if (pin_z + dynapin_config.blocker_z_max <= print_z + EPSILON) {
                         const std::string key = std::to_string(object->id().id) + ":" + std::to_string(pin.row) + ":" +
                                                 std::to_string(pin.col);
                         if (m_dynapin_pulls_done.insert(key).second)
