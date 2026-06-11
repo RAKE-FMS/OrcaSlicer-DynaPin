@@ -167,6 +167,7 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
         config.blocker_width_x  = std::abs(x_max - x_min);
     }
     config.blocker_z_max = number_or(exclusion, "z_above", number_or(exclusion, "z_max", config.blocker_z_max));
+    config.pin_z_height  = number_or(exclusion, "pin_z_height", config.pin_z_height);
     const double z_range = number_or(exclusion, "z_range", 0.);
     if (z_range > 0. && config.blocker_z_max == 0.)
         config.blocker_z_max = 0.5 * z_range;
@@ -237,7 +238,7 @@ std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
     for (const Pin& pin : pins) {
         const double y     = pin_y(config, pin) + config.pull_gcode.y_offset;
         const double z     = pin_z(config, pin);
-        const double z_min = 0.;
+        const double z_min = std::max(0.0, z - config.pin_z_height);
         const double z_max = z + config.blocker_z_max;
         const double block_y = y + support_block_y_offset;
         const double min_x = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
@@ -289,7 +290,7 @@ std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject& objec
         const double max_y = block_y + 0.5 * config.blocker_width_y;
 
         LocalBlocker blocker;
-        blocker.z_min = 0.;
+        blocker.z_min = std::max(0.0, z - config.pin_z_height);
         blocker.z_max = z + config.blocker_z_max;
         blocker.poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
                                Point(scale_(max_x) - shift.x(), scale_(min_y) - shift.y()),
@@ -325,8 +326,8 @@ std::vector<VirtualSupportSurface> pin_top_surfaces_for_object(const PrintObject
         const double y       = pin_y(config, pin) + config.pull_gcode.y_offset;
         const double z       = pin_z(config, pin);
         const double block_y = y + support_block_y_offset;
-        const double min_x   = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
-        const double max_x   = max_x_bed;
+        const double min_x   = config.blocker_center_x - 0.5 * config.blocker_width_x;
+        const double max_x   = config.blocker_center_x + 0.5 * config.blocker_width_x;
         const double min_y   = block_y - 0.5 * config.blocker_width_y;
         const double max_y   = block_y + 0.5 * config.blocker_width_y;
 
@@ -366,7 +367,7 @@ std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
         const double max_x = max_x_bed;
         const double min_y = block_y - 0.5 * config.blocker_width_y;
         const double max_y = block_y + 0.5 * config.blocker_width_y;
-        const double z_min = 0.;
+        const double z_min = std::max(0.0, z - config.pin_z_height);
         const double z_max = z + config.blocker_z_max;
 
         BlockerBox box;

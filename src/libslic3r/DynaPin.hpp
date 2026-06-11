@@ -46,6 +46,7 @@ struct Config
     double blocker_width_y = 0.;
     double blocker_z_min = 0.;
     double blocker_z_max = 0.;
+    double pin_z_height = 0.;
     PullMoveConfig pull_gcode;
 };
 
