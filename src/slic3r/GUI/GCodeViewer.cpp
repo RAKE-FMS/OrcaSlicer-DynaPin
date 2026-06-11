@@ -307,7 +307,8 @@ void GCodeViewer::load_dynapin_overlays(const Print& print)
     const Vec3d  half(pin_half, pin_half, pin_half);
     for (const DynaPin::BlockerBox& box : boxes) {
         append_box_geometry(blocker_geo, box.min, box.max);
-        append_box_geometry(pin_geo, box.pin_pos - half, box.pin_pos + half);
+        // Do not display pin geometry (the small orange cube representing the pin marker) in the preview.
+        // append_box_geometry(pin_geo, box.pin_pos - half, box.pin_pos + half);
     }
 
     if (!blocker_geo.is_empty()) {
@@ -3434,30 +3435,35 @@ void GCodeViewer::render_legend(float& legend_height, int canvas_width, int canv
         imgui.text((boost::format("Pull events: %1%") % m_dynapin_preview.events().size()).str());
         if (m_dynapin_blocker_model.is_initialized())
             imgui.text((boost::format("Blocked regions: %1%") % m_dynapin_blocker_count).str());
-        if (m_dynapin_preview.selection()) {
-            const DynaPinSelection& selection = *m_dynapin_preview.selection();
-
-            // Build the list of distinct pins (one entry per address, in first-seen order)
-            // so the user can pick which pin the marker / preview follows.
-            std::vector<const DynaPinEvent*> pins;
+        std::vector<const DynaPinEvent*> pins;
+        if (!m_dynapin_preview.empty()) {
             for (const DynaPinEvent& event : m_dynapin_preview.events()) {
                 const bool already = std::any_of(pins.begin(), pins.end(),
                     [&event](const DynaPinEvent* e) { return e->address == event.address; });
                 if (!already)
                     pins.push_back(&event);
             }
+        }
 
-            int current = 0;
-            for (size_t i = 0; i < pins.size(); ++i) {
-                if (pins[i]->address == selection.address) {
-                    current = static_cast<int>(i);
-                    break;
+        if (!pins.empty()) {
+            int current = -1;
+            if (m_dynapin_preview.selection()) {
+                const DynaPinSelection& selection = *m_dynapin_preview.selection();
+                for (size_t i = 0; i < pins.size(); ++i) {
+                    if (pins[i]->address == selection.address) {
+                        current = static_cast<int>(i);
+                        break;
+                    }
                 }
             }
 
-            const std::string preview_label = (boost::format("r%1% c%2%") % selection.address.row % selection.address.col).str();
+            const std::string preview_label = (current >= 0) ?
+                (boost::format("r%1% c%2%") % pins[current]->address.row % pins[current]->address.col).str() :
+                "None";
             ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
             if (ImGui::BeginCombo("##dynapin_pin", preview_label.c_str())) {
+                if (ImGui::Selectable("None", current == -1))
+                    m_dynapin_preview.clear_selection();
                 for (size_t i = 0; i < pins.size(); ++i) {
                     const std::string label = (boost::format("r%1% c%2%") % pins[i]->address.row % pins[i]->address.col).str();
                     const bool is_selected  = static_cast<int>(i) == current;
@@ -3469,9 +3475,14 @@ void GCodeViewer::render_legend(float& legend_height, int canvas_width, int canv
                 ImGui::EndCombo();
             }
 
-            const Vec3f position = m_dynapin_preview.position_for_gcode_id(m_viewer.get_current_vertex().gcode_id);
-            imgui.text((boost::format("Displaying r%1% c%2%") % selection.address.row % selection.address.col).str());
-            imgui.text((boost::format("Preview %.2f %.2f %.2f") % position.x() % position.y() % position.z()).str());
+            if (m_dynapin_preview.selection()) {
+                const DynaPinSelection& selection = *m_dynapin_preview.selection();
+                const Vec3f position = m_dynapin_preview.position_for_gcode_id(m_viewer.get_current_vertex().gcode_id);
+                imgui.text((boost::format("Displaying r%1% c%2%") % selection.address.row % selection.address.col).str());
+                imgui.text((boost::format("Preview %.2f %.2f %.2f") % position.x() % position.y() % position.z()).str());
+            } else {
+                imgui.text("No DynaPin marker selected");
+            }
         } else {
             imgui.text("No DynaPin marker available");
         }

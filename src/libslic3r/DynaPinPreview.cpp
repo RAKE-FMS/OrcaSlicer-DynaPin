@@ -171,8 +171,9 @@ void DynaPinPreviewState::load(const GCodeProcessorResult& result)
     if (pending)
         BOOST_LOG_TRIVIAL(warning) << "DynaPin preview: ignoring incomplete block at line " << pending->begin_line;
 
-    if (!m_events.empty())
-        m_selection = DynaPinSelection{m_events.front().address, m_events.front().start_pos};
+    // Do not select a pin by default to avoid showing the nozzle preview initially.
+    // if (!m_events.empty())
+    //     m_selection = DynaPinSelection{m_events.front().address, m_events.front().start_pos};
 }
 
 Vec3f DynaPinPreviewState::position_for_gcode_id(unsigned int gcode_id) const
