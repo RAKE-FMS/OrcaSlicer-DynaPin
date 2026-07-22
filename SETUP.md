@@ -57,7 +57,7 @@ ctest --test-dir build --output-on-failure
 
 - macOS (アプリバンドルが生成される場合):
 ```bash
-open build/Release/OrcaSlicer.app || open build/OrcaSlicer.app
+open build/Release/OrcaSlicer.app || open build/src/OrcaSlicer.app
 ```
 - 実行ファイルを直接起動する例（ビルドディレクトリ直下に生成される場合）:
 ```bash

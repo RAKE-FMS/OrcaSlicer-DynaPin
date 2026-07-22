@@ -56,13 +56,14 @@ TEST_CASE("DynaPin model names are parsed", "[DynaPinPreview]")
 TEST_CASE("DynaPin pull G-code comments match preview contract", "[DynaPin]")
 {
     DynaPin::Config config;
-    config.origin_y           = 10.;
-    config.origin_z           = 20.;
-    config.row_pitch_y        = 1.;
-    config.col_pitch_z        = 2.;
-    config.pull_gcode.x_hook  = 100.;
-    config.pull_gcode.x_latch = 110.;
-    config.pull_gcode.x_front = 120.;
+    config.origin_y            = 10.;
+    config.origin_z            = 20.;
+    config.row_pitch_y         = 1.;
+    config.col_pitch_z         = 2.;
+    config.pull_gcode.x_hook   = 100.;
+    config.pull_gcode.x_latch  = 110.;
+    config.pull_gcode.x_front  = 120.;
+    config.pull_gcode.y_offset = -3.5;
 
     const std::string gcode = DynaPin::pull_gcode_for_pin(config, {2, 5});
 
@@ -71,6 +72,32 @@ TEST_CASE("DynaPin pull G-code comments match preview contract", "[DynaPin]")
     CHECK(gcode.find("; END_DYNAPIN_PULL\n") != std::string::npos);
     CHECK(gcode.find("row=") == std::string::npos);
     CHECK(gcode.find("col=") == std::string::npos);
+    CHECK(gcode.find("G1 Y4.5000") != std::string::npos);
+    CHECK(gcode.find("G1 X100.0000 Z30.0000") != std::string::npos);
+}
+
+TEST_CASE("DynaPin physical and pull coordinates are independent", "[DynaPin]")
+{
+    DynaPin::Config config;
+    config.origin_y            = 14.;
+    config.origin_z            = 5.;
+    config.physical_origin_y   = 18.;
+    config.physical_origin_z   = 4.;
+    config.row_pitch_y         = 12.4;
+    config.col_pitch_z         = 7.4;
+    config.pull_gcode.x_hook   = 160.;
+    config.pull_gcode.x_latch  = 165.;
+    config.pull_gcode.x_front  = 30.;
+    config.pull_gcode.y_offset = -3.5;
+
+    const DynaPin::Pin pin{1, 1};
+    CHECK(DynaPin::pin_y(config, pin) == 30.4);
+    CHECK(DynaPin::pin_z(config, pin) == 11.4);
+
+    const std::string gcode = DynaPin::pull_gcode_for_pin(config, pin);
+    CHECK(gcode.find("G1 Y22.9000") != std::string::npos);
+    CHECK(gcode.find("G1 X160.0000 Z12.4000") != std::string::npos);
+    CHECK(gcode.find("G1 X165.0000") != std::string::npos);
 }
 
 TEST_CASE("DynaPin pull comments create events", "[DynaPinPreview]")

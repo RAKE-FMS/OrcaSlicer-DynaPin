@@ -4,6 +4,10 @@
       "row": 0,
       "col": 0,
       "y": "14",
+      "z": "5.0"
+    },
+    "physical_origin": {
+      "y": "18.0",
       "z": "4.0"
     },
     "pitch": {
@@ -22,7 +26,7 @@
     "x_hook": "160",
     "x_latch": "168",
     "x_front": "30",
-    "y_offset": "4",
+    "y_offset": "-3.5",
     "z_offset": "4",
     "approach_y_offset": -4,
     "pull_feedrate_fast": 3000,

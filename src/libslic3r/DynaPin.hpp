@@ -3,6 +3,7 @@
 
 #include "ExPolygon.hpp"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -21,33 +22,35 @@ struct Pin
 
 struct PullMoveConfig
 {
-    double x_hook = 0.;
-    double x_latch = 0.;
-    double x_front = 0.;
-    double y_offset = 0.;
-    double z_offset = 0.;
-    double approach_y_offset = -4.;
+    double x_hook             = 0.;
+    double x_latch            = 0.;
+    double x_front            = 0.;
+    double y_offset           = 0.;
+    double z_offset           = 0.;
+    double approach_y_offset  = -4.;
     double pull_feedrate_fast = 3000.;
     double disengage_x_offset = 1.5;
-    double travel_feedrate = 6000.;
-    double pull_feedrate = 1200.;
+    double travel_feedrate    = 6000.;
+    double pull_feedrate      = 1200.;
 };
 
 struct Config
 {
-    int    origin_row = 0;
-    int    origin_col = 0;
-    double origin_y = 0.;
-    double origin_z = 0.;
-    double row_pitch_y = 0.;
-    double col_pitch_z = 0.;
-    double blocker_center_x = 0.;
-    double blocker_width_x = 0.;
-    double blocker_width_y = 0.;
-    double blocker_z_min = 0.;
-    double blocker_z_max = 0.;
-    double pin_z_height = 0.;
-    PullMoveConfig pull_gcode;
+    int                   origin_row = 0;
+    int                   origin_col = 0;
+    double                origin_y   = 0.;
+    double                origin_z   = 0.;
+    std::optional<double> physical_origin_y;
+    std::optional<double> physical_origin_z;
+    double                row_pitch_y      = 0.;
+    double                col_pitch_z      = 0.;
+    double                blocker_center_x = 0.;
+    double                blocker_width_x  = 0.;
+    double                blocker_width_y  = 0.;
+    double                blocker_z_min    = 0.;
+    double                blocker_z_max    = 0.;
+    double                pin_z_height     = 0.;
+    PullMoveConfig        pull_gcode;
 };
 
 // Axis-aligned 3D region (machine/world coordinates, mm) in which support
@@ -77,27 +80,27 @@ struct LocalBlocker
 // print_z はピン上面の高さ (mm)。
 struct VirtualSupportSurface
 {
-    Polygon poly;           // ピン上面の XY 形状（object-local 座標）
-    double  print_z = 0.;   // ピン上面の Z 高さ (mm)
+    Polygon poly;         // ピン上面の XY 形状（object-local 座標）
+    double  print_z = 0.; // ピン上面の Z 高さ (mm)
 };
 
-std::vector<Pin> parse_pin_list(const std::string &pins);
-bool load_config_for_print(const Print &print, Config &config, std::string *error = nullptr);
-std::vector<Polygons> support_blockers_for_object(const PrintObject &object);
+std::vector<Pin>      parse_pin_list(const std::string& pins);
+bool                  load_config_for_print(const Print& print, Config& config, std::string* error = nullptr);
+std::vector<Polygons> support_blockers_for_object(const PrintObject& object);
 // Blocker prisms in object-local coordinates, used to clip already-generated
 // support layers (e.g. support columns descending through the blocked region
 // from overhangs located above it).
-std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject &object);
+std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject& object);
 // 選択された各ピンの上面を仮想サポート面として返す（object-local 座標）。
 // これらの面は「仮想ビルドプレート」として機能し、ピン上面より上で発生した
 // サポート材がビルドプレートまで降りずにピン上面で止まるようにする。
-std::vector<VirtualSupportSurface> pin_top_surfaces_for_object(const PrintObject &object);
+std::vector<VirtualSupportSurface> pin_top_surfaces_for_object(const PrintObject& object);
 // Returns one box per selected pin (empty when DynaPin optimization is disabled
 // or the config cannot be loaded).
-std::vector<BlockerBox> selected_blocker_boxes(const Print &print);
-std::string pull_gcode_for_pin(const Config &config, const Pin &pin);
-double pin_y(const Config &config, const Pin &pin);
-double pin_z(const Config &config, const Pin &pin);
+std::vector<BlockerBox> selected_blocker_boxes(const Print& print);
+std::string             pull_gcode_for_pin(const Config& config, const Pin& pin);
+double                  pin_y(const Config& config, const Pin& pin);
+double                  pin_z(const Config& config, const Pin& pin);
 
 } // namespace DynaPin
 } // namespace Slic3r
