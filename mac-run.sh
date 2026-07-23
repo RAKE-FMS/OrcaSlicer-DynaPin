@@ -1,3 +1,3 @@
 #!/bin/bash
 
-open "./build/src/OrcaSlicer.app"
+open "./build/arm64/src/Release/OrcaSlicer.app"
