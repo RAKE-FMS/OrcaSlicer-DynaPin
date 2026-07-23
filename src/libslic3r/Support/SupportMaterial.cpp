@@ -74,13 +74,13 @@ static constexpr bool support_with_sheath = false;
 const char* support_surface_type_to_color_name(const SupporLayerType surface_type)
 {
     switch (surface_type) {
-        case SupporLayerType::TopContact:     return "rgb(255,0,0)"; // "red";
-        case SupporLayerType::TopInterface:   return "rgb(0,255,0)"; // "green";
-        case SupporLayerType::Base:           return "rgb(0,0,255)"; // "blue";
-        case SupporLayerType::BottomInterface:return "rgb(255,255,128)"; // yellow 
-        case SupporLayerType::BottomContact:  return "rgb(255,0,255)"; // magenta
-        case SupporLayerType::RaftInterface:  return "rgb(0,255,255)";
-        case SupporLayerType::RaftBase:       return "rgb(128,128,128)";
+        case SupporLayerType::TopContact:     return "rgb(0,128,0)";    // Support Interface (#008000)
+        case SupporLayerType::TopInterface:   return "rgb(0,128,0)";    // Support Interface (#008000)
+        case SupporLayerType::Base:           return "rgb(0,255,0)";    // Base (#0F0)
+        case SupporLayerType::BottomInterface:return "rgb(0,128,0)";    // Support Interface (#008000)
+        case SupporLayerType::BottomContact:  return "rgb(0,128,0)";    // Support Interface (#008000)
+        case SupporLayerType::RaftInterface:  return "rgb(0,128,0)";    // Support Interface (#008000)
+        case SupporLayerType::RaftBase:       return "rgb(0,255,0)";    // Base (#0F0)
         case SupporLayerType::Unknown:        return "rgb(128,0,0)"; // maroon
         default:                                            return "rgb(64,64,64)";
     };
@@ -136,6 +136,139 @@ void export_print_z_polygons_to_svg(const char *path, SupportGeneratorLayer ** c
     export_support_surface_type_legend_to_svg(svg, legend_pos);
     svg.Close();
 }
+
+enum class SideViewPlane { XZ, YZ };
+
+void export_support_side_view_to_svg(
+    const char *path,
+    const PrintObject &object,
+    SupportGeneratorLayer ** const layers,
+    size_t n_layers,
+    SideViewPlane plane = SideViewPlane::XZ)
+{
+    if (n_layers == 0 || layers == nullptr)
+        return;
+
+    auto get_coord = [plane](const Point& pt) -> coord_t {
+        return (plane == SideViewPlane::XZ) ? pt.x() : pt.y();
+    };
+
+    BoundingBox bbox_side;
+
+    // 1. 3Dモデル本体（オブジェクト）の領域を BoundingBox に反映
+    for (const Layer *layer : object.layers()) {
+        if (!layer) continue;
+        coord_t z_coord = scale_(layer->print_z);
+        for (const auto& expoly : layer->lslices) {
+            for (const auto& pt : expoly.contour.points) {
+                bbox_side.merge(Point(get_coord(pt), z_coord));
+            }
+        }
+    }
+
+    // 2. サポート材の領域を BoundingBox に反映
+    for (size_t i = 0; i < n_layers; ++i) {
+        if (!layers[i]) continue;
+        coord_t z_coord = scale_(layers[i]->print_z);
+        for (const auto& poly : layers[i]->polygons) {
+            for (const auto& pt : poly.points) {
+                bbox_side.merge(Point(get_coord(pt), z_coord));
+            }
+        }
+    }
+
+    Point legend_size = export_support_surface_type_legend_to_svg_box_size();
+    Point legend_pos(bbox_side.min(0), bbox_side.max(1));
+    bbox_side.merge(Point(std::max(bbox_side.min(0) + legend_size(0), bbox_side.max(0)), bbox_side.max(1) + legend_size(1)));
+
+    SVG svg(path, bbox_side);
+    std::string model_color = "rgb(255,125,56)";
+
+    // 3. 3Dモデル本体（オブジェクト）を実際の層の厚み(height)で背景に描画
+    for (const Layer *layer : object.layers()) {
+        if (!layer) continue;
+        coord_t z_coord = scale_(layer->print_z);
+        // float model_line_width = (layer->height > 0.0) ? scale_(layer->height * 1.05) : scale_(0.2);
+        const float model_line_width scale_(0.22);
+
+        for (const auto& expoly : layer->lslices) {
+            for (size_t j = 0; j < expoly.contour.points.size(); ++j) {
+                Point p1 = expoly.contour.points[j];
+                Point p2 = expoly.contour.points[(j + 1) % expoly.contour.points.size()];
+                svg.draw(Line(Point(get_coord(p1), z_coord), Point(get_coord(p2), z_coord)), model_color, model_line_width);
+            }
+            for (const auto& hole : expoly.holes) {
+                for (size_t j = 0; j < hole.points.size(); ++j) {
+                    Point p1 = hole.points[j];
+                    Point p2 = hole.points[(j + 1) % hole.points.size()];
+                    svg.draw(Line(Point(get_coord(p1), z_coord), Point(get_coord(p2), z_coord)), model_color, model_line_width);
+                }
+            }
+        }
+    }
+
+    // 4. サポート材を実際の層の厚み(height)で前面にカラー描画
+    for (size_t i = 0; i < n_layers; ++i) {
+        if (!layers[i]) continue;
+        coord_t z_coord = scale_(layers[i]->print_z);
+        // float support_line_width = (layers[i]->height > 0.0) ? scale_(layers[i]->height) : scale_(0.2);
+        const float support_line_width scale_(0.22);
+
+        std::string color = support_surface_type_to_color_name(layers[i]->layer_type);
+
+        for (const auto& poly : layers[i]->polygons) {
+            for (size_t j = 0; j < poly.points.size(); ++j) {
+                Point p1 = poly.points[j];
+                Point p2 = poly.points[(j + 1) % poly.points.size()];
+                svg.draw(Line(Point(get_coord(p1), z_coord), Point(get_coord(p2), z_coord)), color, support_line_width);
+            }
+        }
+    }
+
+    export_support_surface_type_legend_to_svg(svg, legend_pos);
+    svg.Close();
+}
+
+void export_print_z_polygons_with_object_to_svg(
+    const char *path,
+    const PrintObject &object,
+    SupportGeneratorLayer ** const layers,
+    size_t n_layers)
+{
+    BoundingBox bbox;
+    for (const Layer *layer : object.layers())
+        bbox.merge(get_extents(layer->lslices));
+    for (size_t i = 0; i < n_layers; ++i) {
+        if (layers[i]) bbox.merge(get_extents(layers[i]->polygons));
+    }
+
+    Point legend_size = export_support_surface_type_legend_to_svg_box_size();
+    Point legend_pos(bbox.min(0), bbox.max(1));
+    bbox.merge(Point(std::max(bbox.min(0) + legend_size(0), bbox.max(0)), bbox.max(1) + legend_size(1)));
+
+    SVG svg(path, bbox);
+
+    // 背景にモデル本体の全レイヤースライスを薄いグレーで描画
+    for (const Layer *layer : object.layers()) {
+        svg.draw(layer->lslices, "rgb(230,230,230)", 0.2f);
+        svg.draw_outline(layer->lslices, "rgb(180,180,180)", "rgb(180,180,180)");
+    }
+
+    // 前面にサポート材をカラーで描画
+    const float transparency = 0.6f;
+    for (size_t i = 0; i < n_layers; ++i) {
+        if (layers[i]) svg.draw(union_ex(layers[i]->polygons), support_surface_type_to_color_name(layers[i]->layer_type), transparency);
+    }
+    for (size_t i = 0; i < n_layers; ++i) {
+        if (layers[i]) svg.draw(to_polylines(layers[i]->polygons), support_surface_type_to_color_name(layers[i]->layer_type));
+    }
+
+    export_support_surface_type_legend_to_svg(svg, legend_pos);
+    svg.Close();
+}
+
+
+
 
 void export_print_z_polygons_and_extrusions_to_svg(
     const char                                      *path,
@@ -654,29 +787,21 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     generate_support_toolpaths(object.support_layers(), *m_object_config, m_support_params, m_slicing_params, raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers);
 
 #ifdef SLIC3R_DEBUG
-    {
-        size_t layer_id = 0;
-        for (int i = 0; i < int(layers_sorted.size());) {
-            // Find the last layer with roughly the same print_z, find the minimum layer height of all.
-            // Due to the floating point inaccuracies, the print_z may not be the same even if in theory they should.
-            int j = i + 1;
-            coordf_t zmax = layers_sorted[i]->print_z + EPSILON;
-            bool empty = true;
-            for (; j < layers_sorted.size() && layers_sorted[j]->print_z <= zmax; ++j)
-                if (! layers_sorted[j]->polygons.empty())
-                    empty = false;
-            if (! empty) {
-                export_print_z_polygons_to_svg(
-                    debug_out_path("support-%d-%lf.svg", iRun, layers_sorted[i]->print_z).c_str(),
-                                               layers_sorted.data() + i, j - i);
-                export_print_z_polygons_and_extrusions_to_svg(
-                    debug_out_path("support-w-fills-%d-%lf.svg", iRun, layers_sorted[i]->print_z).c_str(),
-                                                              layers_sorted.data() + i, j - i,
-                                                              *object.support_layers()[layer_id]);
-                ++layer_id;
-            }
-            i = j;
-        }
+    if (!layers_sorted.empty()) {
+        static int iRunSide = 0;
+        ++iRunSide;
+        // X-Z 平面 (正面/背面からの立面図: 3Dモデル本体表示付き)
+        export_support_side_view_to_svg(
+            debug_out_path("support-SIDE-VIEW-XZ-run%d.svg", iRunSide).c_str(),
+            object, layers_sorted.data(), layers_sorted.size(), SideViewPlane::XZ);
+        // Y-Z 平面 (側面からの立面図: 3Dモデル本体表示付き)
+        export_support_side_view_to_svg(
+            debug_out_path("support-SIDE-VIEW-YZ-run%d.svg", iRunSide).c_str(),
+            object, layers_sorted.data(), layers_sorted.size(), SideViewPlane::YZ);
+        // 全層重ね合わせ (上面図: 3Dモデル本体表示付き)
+        export_print_z_polygons_with_object_to_svg(
+            debug_out_path("support-ALL-LAYERS-OVERLAY-run%d.svg", iRunSide).c_str(),
+            object, layers_sorted.data(), layers_sorted.size());
     }
 #endif /* SLIC3R_DEBUG */
 

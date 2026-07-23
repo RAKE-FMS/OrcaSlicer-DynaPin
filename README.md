@@ -142,6 +142,10 @@ winget install --id=SoftFever.OrcaSlicer -e
  1. If you run into trouble executing it, try this command in the terminal:
     `chmod +x /path_to_appimage/OrcaSlicer_Linux.AppImage`
 
+# Developer Documentation & Debugging
+
+- **SVG Debug Output Guide**: For details on 2D/Side-View SVG debug exports, file output locations, and customization, see [docs/SVG_DEBUG_GUIDE.md](docs/SVG_DEBUG_GUIDE.md).
+
 # How to Compile
 
 All updated build instructions for Windows, macOS, and Linux are now available on the official [OrcaSlicer Wiki - How to build](https://www.orcaslicer.com/wiki/How-to-build) page.
