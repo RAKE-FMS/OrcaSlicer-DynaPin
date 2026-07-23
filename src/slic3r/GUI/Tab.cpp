@@ -2546,6 +2546,8 @@ void TabPrint::build()
     optgroup->append_single_option_line("support_remove_small_overhang", "support_settings_support#ignore-small-overhangs");
     optgroup->append_single_option_line("enable_dynapin_support_optimization");
     optgroup->append_single_option_line("dynapin_selected_pins");
+    optgroup->append_single_option_line("dynapin_debug_stage");
+
     // optgroup->append_single_option_line("enforce_support_layers", "support_settings_support");
 
     optgroup = page->new_optgroup(L("Raft"), L"param_raft");

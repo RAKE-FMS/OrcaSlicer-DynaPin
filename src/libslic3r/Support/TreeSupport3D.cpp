@@ -205,7 +205,12 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
     std::vector<Polygons>    blockers_layers{ print_object.slice_support_blockers() };
     print_object.project_and_append_custom_facets(false, EnforcerBlockerType::ENFORCER, enforcers_layers);
     print_object.project_and_append_custom_facets(false, EnforcerBlockerType::BLOCKER, blockers_layers);
-    auto dynapin_blockers = DynaPin::support_blockers_for_object(print_object);
+    int dynapin_debug_stage = print_object.print()->config().dynapin_debug_stage.value;
+    if (const char* env_stage = std::getenv("DYNAPIN_DEBUG_STAGE")) {
+        try { dynapin_debug_stage = std::stoi(env_stage); } catch (...) {}
+    }
+    auto dynapin_blockers = (dynapin_debug_stage >= 1) ? DynaPin::support_blockers_for_object(print_object) : std::vector<Polygons>{};
+
     if (blockers_layers.size() < dynapin_blockers.size())
         blockers_layers.resize(dynapin_blockers.size());
     for (size_t layer_id = 0; layer_id < dynapin_blockers.size(); ++layer_id)

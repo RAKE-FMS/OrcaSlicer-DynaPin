@@ -419,9 +419,14 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     // layer_support_areas contains the per object layer support areas. These per object layer support areas
     // may get merged and trimmed by this->generate_base_layers() if the support layers are not synchronized with object layers.
     std::vector<Polygons> layer_support_areas;
-    // DynaPin: 仮想サポート面（ピンの上面）と除外ブロッカーの計算を前方に移動
-    const std::vector<DynaPin::VirtualSupportSurface> dynapin_surfaces = DynaPin::pin_top_surfaces_for_object(object);
-    const std::vector<DynaPin::LocalBlocker>          dynapin_blockers = DynaPin::support_blocker_regions_local(object);
+    // DynaPin: デバッグステージの取得 (0: Off/Normal, 1: Landing Only, 2: Full DynaPin)
+    int dynapin_debug_stage = object.print()->config().dynapin_debug_stage.value;
+    if (const char* env_stage = std::getenv("DYNAPIN_DEBUG_STAGE")) {
+        try { dynapin_debug_stage = std::stoi(env_stage); } catch (...) {}
+    }
+    const std::vector<DynaPin::VirtualSupportSurface> dynapin_surfaces = (dynapin_debug_stage >= 1) ? DynaPin::pin_top_surfaces_for_object(object) : std::vector<DynaPin::VirtualSupportSurface>{};
+    const std::vector<DynaPin::LocalBlocker>          dynapin_blockers = (dynapin_debug_stage >= 1) ? DynaPin::support_blocker_regions_local(object) : std::vector<DynaPin::LocalBlocker>{};
+
 
     SupportGeneratorLayersPtr bottom_contacts = this->bottom_contact_layers_and_layer_support_areas(
         object, top_contacts, buildplate_covered,
@@ -567,7 +572,8 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     // サポート柱はそのまま領域を通過してしまう。
     // そのため、print_z がブロッカー領域内に含まれるすべてのサポートレイヤーをトリムし、
     // その領域ではプリントされるサポート材の代わりにピンが支えるようにする。
-    if (!dynapin_blockers.empty()) {
+    if (dynapin_debug_stage >= 2 && !dynapin_blockers.empty()) {
+
         for (const DynaPin::LocalBlocker &b : dynapin_blockers) {
             BoundingBox bb = get_extents(b.poly);
             BOOST_LOG_TRIVIAL(warning) << "DynaPin clip blocker local bbox x[" << unscale<double>(bb.min.x()) << "," << unscale<double>(bb.max.x())

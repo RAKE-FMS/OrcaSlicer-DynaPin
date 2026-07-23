@@ -5590,6 +5590,16 @@ void PrintConfigDef::init_fff_params()
     def->mode       = comAdvanced;
     def->set_default_value(new ConfigOptionString());
 
+    def           = this->add("dynapin_debug_stage", coInt);
+    def->label    = L("DynaPin debug stage");
+    def->category = L("Support");
+    def->tooltip  = L("Debug stage for DynaPin support generation: 0 = Off (Standard support), 1 = Landing Only (Pin Top landing), 2 = Full DynaPin (Landing + Clip).");
+    def->min      = 0;
+    def->max      = 2;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(2));
+
+
     def                = this->add("support_type", coEnum);
     def->label         = L("Type");
     def->category      = L("Support");
