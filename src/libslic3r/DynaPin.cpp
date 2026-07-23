@@ -253,7 +253,7 @@ std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
     for (const Pin& pin : pins) {
         const double y       = pin_y(config, pin);
         const double z       = pin_z(config, pin);
-        const double z_min   = std::max(0.0, z - config.pin_z_height);
+        const double z_min   = std::max(0.0, z - config.pin_z_height - 2.0);
         const double z_max   = z + config.blocker_z_max;
         const double block_y = y + support_block_y_offset;
         const double min_x   = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
@@ -305,7 +305,7 @@ std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject& objec
         const double max_y   = block_y + 0.5 * config.blocker_width_y;
 
         LocalBlocker blocker;
-        blocker.z_min       = std::max(0.0, z - config.pin_z_height);
+        blocker.z_min       = std::max(0.0, z - config.pin_z_height - 2.0);
         blocker.z_max       = z + config.blocker_z_max;
         blocker.poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
                                Point(scale_(max_x) - shift.x(), scale_(min_y) - shift.y()),
