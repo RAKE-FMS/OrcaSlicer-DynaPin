@@ -128,8 +128,17 @@ PrintBase::ApplyStatus PrintObject::set_instances(PrintInstances &&instances)
     	[](const PrintInstance& lhs, const PrintInstance& rhs) { return lhs.model_instance == rhs.model_instance && lhs.shift == rhs.shift; });
     if (! equal) {
         status = PrintBase::APPLY_STATUS_CHANGED;
-        if (m_print->invalidate_steps({ psSkirtBrim, psGCodeExport }) ||
-            (! equal_length && m_print->invalidate_step(psWipeTower)))
+        bool invalidated = m_print->invalidate_steps({ psSkirtBrim, psGCodeExport });
+        if (! equal_length)
+            invalidated |= m_print->invalidate_step(psWipeTower);
+        // DynaPin blockers are defined in machine coordinates and converted to
+        // object-local coordinates using the instance shift during support
+        // generation. Rebuild support material after an instance move so the
+        // blocker stays fixed at the physical pin position instead of moving
+        // with cached support geometry.
+        if (m_print->config().enable_dynapin_support_optimization.value)
+            invalidated |= this->invalidate_step(posSupportMaterial);
+        if (invalidated)
             status = PrintBase::APPLY_STATUS_INVALIDATED;
         m_instances = std::move(instances);
 	    for (PrintInstance &i : m_instances)

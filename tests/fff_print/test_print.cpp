@@ -90,6 +90,30 @@ SCENARIO("Print: Changing number of solid surfaces does not cause all surfaces t
     }
 }
 
+SCENARIO("Print: Moving a DynaPin model invalidates support material", "[Print][DynaPin][.]") {
+    GIVEN("A processed model with DynaPin support optimization enabled") {
+        Slic3r::Print print;
+        Slic3r::Model model;
+        Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            { "enable_dynapin_support_optimization", true },
+            { "enable_support",                    true }
+        });
+        Slic3r::Test::init_print({TestMesh::cube_20x20x20}, print, model, config);
+        print.process();
+        REQUIRE(print.is_step_done(posSupportMaterial));
+
+        WHEN("The model is moved in the XY plane and applied again") {
+            model.objects.front()->instances.front()->set_offset({10.0, 0.0, 0.0});
+            print.apply(model, config);
+
+            THEN("DynaPin support material is invalidated for regeneration") {
+                REQUIRE_FALSE(print.is_step_done(posSupportMaterial));
+            }
+        }
+    }
+}
+
 SCENARIO("Print: Brim generation", "[Print][.]") {
     GIVEN("20mm cube and default config, 1mm first layer width") {
         WHEN("Brim is set to 3mm")  {
