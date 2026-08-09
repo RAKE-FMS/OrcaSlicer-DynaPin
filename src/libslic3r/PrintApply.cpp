@@ -135,35 +135,42 @@ struct PrintObjectTrafoAndInstances
 
 // Generate a list of trafos and XY offsets for instances of a ModelObject
 // Orca: Updated to include XYZ filament shrinkage compensation
-static std::vector<PrintObjectTrafoAndInstances> print_objects_from_model_object(const ModelObject &model_object, const Vec3d &shrinkage_compensation)
+static std::vector<PrintObjectTrafoAndInstances> print_objects_from_model_object(
+    const ModelObject &model_object, const Vec3d &shrinkage_compensation, bool separate_instances)
 {
     std::set<PrintObjectTrafoAndInstances> trafos;
-    PrintObjectTrafoAndInstances           trafo;
+    std::vector<PrintObjectTrafoAndInstances> separated;
     //BBS: add useful logs for debug
-    int index = 0;
     for (ModelInstance *model_instance : model_object.instances) {
-        if (model_instance->is_printable()) {
-            // Orca: Updated with XYZ filament shrinkage compensation
-            Geometry::Transformation model_instance_transformation = model_instance->get_transformation();
-            trafo.trafo = model_instance_transformation.get_matrix_with_applied_shrinkage_compensation(shrinkage_compensation);
-            
-            auto shift = Point::new_scale(trafo.trafo.data()[12], trafo.trafo.data()[13]);
-            // Reset the XY axes of the transformation.
-            trafo.trafo.data()[12] = 0;
-            trafo.trafo.data()[13] = 0;
+        if (! model_instance->is_printable())
+            continue;
+
+        // Orca: Updated with XYZ filament shrinkage compensation
+        Geometry::Transformation model_instance_transformation = model_instance->get_transformation();
+        Transform3d instance_trafo = model_instance_transformation.get_matrix_with_applied_shrinkage_compensation(shrinkage_compensation);
+        auto shift = Point::new_scale(instance_trafo.data()[12], instance_trafo.data()[13]);
+        // Reset the XY axes of the transformation. The translation is kept in
+        // PrintInstance because the same mesh can be sliced in a shared frame.
+        instance_trafo.data()[12] = 0;
+        instance_trafo.data()[13] = 0;
+
+        if (separate_instances) {
+            PrintObjectTrafoAndInstances separated_instance;
+            separated_instance.trafo = std::move(instance_trafo);
+            separated_instance.instances.emplace_back(PrintInstance{ nullptr, model_instance, shift });
+            separated.emplace_back(std::move(separated_instance));
+        } else {
+            PrintObjectTrafoAndInstances trafo;
+            trafo.trafo = std::move(instance_trafo);
             // Search or insert a trafo.
-            auto it = trafos.emplace(trafo).first;
+            auto it = trafos.emplace(std::move(trafo)).first;
             const_cast<PrintObjectTrafoAndInstances&>(*it).instances.emplace_back(PrintInstance{ nullptr, model_instance, shift });
-            //BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(", Line %1%: found object %2%'s instance %3% for print")%__LINE__ %model_object.name %index;
         }
-        else {
-            //BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(", Line %1%: found object %2%'s instance %3% not printable")%__LINE__ %model_object.name %index;
-            //BOOST_LOG_TRIVIAL(debug) << boost::format(" object printable %1%, instance printable %2%, print_volume_state %3%")%model_object.printable %model_instance->printable %model_instance->print_volume_state;
-        }
-        index++;
     }
 
     //BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: got %2% print objects")%__LINE__ %trafos.size();
+    if (separate_instances)
+        return separated;
     return std::vector<PrintObjectTrafoAndInstances>(trafos.begin(), trafos.end());
 }
 
@@ -1510,7 +1517,9 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         for (ModelObject *model_object : m_model.objects) {
             ModelObjectStatus &model_object_status = const_cast<ModelObjectStatus&>(model_object_status_db.reuse(*model_object));
             // Orca: Updated for XYZ filament shrink compensation
-            model_object_status.print_instances = print_objects_from_model_object(*model_object, this->shrinkage_compensation());
+            const bool separate_dynapin_instances = m_config.enable_dynapin_support_optimization.value;
+            model_object_status.print_instances = print_objects_from_model_object(
+                *model_object, this->shrinkage_compensation(), separate_dynapin_instances);
             std::vector<const PrintObjectStatus*> old;
             old.reserve(print_object_status_db.count(*model_object));
             for (const PrintObjectStatus &print_object_status : print_object_status_db.get_range(*model_object))
@@ -1536,32 +1545,68 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 }
                 continue;
             }
-            // Complex case, try to merge the two lists.
-            // Sort the old lexicographically by their trafos.
-            std::sort(old.begin(), old.end(), [](const PrintObjectStatus *lhs, const PrintObjectStatus *rhs){ return transform3d_lower(lhs->trafo, rhs->trafo); });
-            // Merge the old / new lists.
-            auto it_old = old.begin();
-            for (PrintObjectTrafoAndInstances &new_instances : model_object_status.print_instances) {
-				for (; it_old != old.end() && transform3d_lower((*it_old)->trafo, new_instances.trafo); ++ it_old);
-				if (it_old == old.end() || ! transform3d_equal((*it_old)->trafo, new_instances.trafo)) {
-                    // This is a new instance (or a set of instances with the same trafo). Just add it.
-                    PrintObject *print_object = new PrintObject(this, model_object, new_instances.trafo, std::move(new_instances.instances));
-                    print_object_apply_config(print_object);
-                    print_objects_new.emplace_back(print_object);
-                    // print_object_status.emplace(PrintObjectStatus(print_object, PrintObjectStatus::New));
-                    new_objects = true;
-                    if (it_old != old.end())
-                        const_cast<PrintObjectStatus*>(*it_old)->status = PrintObjectStatus::Deleted;
-                } else {
-                    // The PrintObject already exists and the copies differ.
-					PrintBase::ApplyStatus status = (*it_old)->print_object->set_instances(std::move(new_instances.instances));
-                    if (status != PrintBase::APPLY_STATUS_UNCHANGED) {
-                        size_t extruder_num = new_full_config.option<ConfigOptionFloats>("nozzle_diameter")->size();
-                        update_apply_status(status == PrintBase::APPLY_STATUS_INVALIDATED);
-                    }
-					print_objects_new.emplace_back((*it_old)->print_object);
-					const_cast<PrintObjectStatus*>(*it_old)->status = PrintObjectStatus::Reused;
-				}
+            auto create_print_object = [this, &print_object_apply_config, &print_objects_new, &new_objects,
+                                        model_object](PrintObjectTrafoAndInstances &new_instances) {
+                PrintObject *print_object = new PrintObject(this, model_object, new_instances.trafo,
+                                                             std::move(new_instances.instances));
+                print_object_apply_config(print_object);
+                print_objects_new.emplace_back(print_object);
+                new_objects = true;
+            };
+            auto reuse_print_object = [&print_objects_new, &update_apply_status](PrintObjectStatus *old_status,
+                                                                                   PrintObjectTrafoAndInstances &new_instances) {
+                PrintBase::ApplyStatus status = old_status->print_object->set_instances(std::move(new_instances.instances));
+                if (status != PrintBase::APPLY_STATUS_UNCHANGED)
+                    update_apply_status(status == PrintBase::APPLY_STATUS_INVALIDATED);
+                print_objects_new.emplace_back(old_status->print_object);
+                old_status->status = PrintObjectStatus::Reused;
+            };
+
+            if (separate_dynapin_instances) {
+                // Once DynaPin is enabled, each PrintObject contains exactly one
+                // instance. Match old objects by instance ID so moving or
+                // reordering copies does not attach cached support to another
+                // physical copy. This also handles the transition from the
+                // legacy grouped representation, where one old object may still
+                // contain several instances.
+                for (PrintObjectTrafoAndInstances &new_instances : model_object_status.print_instances) {
+                    assert(new_instances.instances.size() == 1);
+                    const ObjectID instance_id = new_instances.instances.front().model_instance->id();
+                    auto it_old = std::find_if(old.begin(), old.end(), [instance_id](const PrintObjectStatus *status) {
+                        if (status->status != PrintObjectStatus::Unknown)
+                            return false;
+                        const PrintObject *old_object = status->print_object;
+                        if (old_object->instances().empty() ||
+                            ! transform3d_equal(status->trafo, old_object->trafo()))
+                            return false;
+                        return std::any_of(old_object->instances().begin(), old_object->instances().end(),
+                                           [instance_id](const PrintInstance &instance) {
+                                               return instance.model_instance->id() == instance_id;
+                                           });
+                    });
+                    if (it_old == old.end())
+                        create_print_object(new_instances);
+                    else
+                        reuse_print_object(const_cast<PrintObjectStatus*>(*it_old), new_instances);
+                }
+            } else {
+                // Complex case, try to merge the two lists.
+                // Sort the old lexicographically by their trafos.
+                std::sort(old.begin(), old.end(), [](const PrintObjectStatus *lhs, const PrintObjectStatus *rhs){ return transform3d_lower(lhs->trafo, rhs->trafo); });
+                // Merge the old / new lists.
+                auto it_old = old.begin();
+                for (PrintObjectTrafoAndInstances &new_instances : model_object_status.print_instances) {
+				    for (; it_old != old.end() && transform3d_lower((*it_old)->trafo, new_instances.trafo); ++ it_old);
+				    if (it_old == old.end() || ! transform3d_equal((*it_old)->trafo, new_instances.trafo)) {
+                        // This is a new instance (or a set of instances with the same trafo). Just add it.
+                        create_print_object(new_instances);
+                        if (it_old != old.end())
+                            const_cast<PrintObjectStatus*>(*it_old)->status = PrintObjectStatus::Deleted;
+                    } else {
+                        // The PrintObject already exists and the copies differ.
+                        reuse_print_object(const_cast<PrintObjectStatus*>(*it_old), new_instances);
+				    }
+                }
             }
         }
         if (m_objects != print_objects_new) {

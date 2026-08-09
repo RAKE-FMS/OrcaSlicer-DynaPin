@@ -2068,6 +2068,12 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 
     //add the print_object share check logic
     auto is_print_object_the_same = [this](const PrintObject* object1, const PrintObject* object2) -> bool{
+        // DynaPin blockers are fixed in machine coordinates. Even identical
+        // meshes at different instance shifts therefore need independent
+        // sliced/support layers; sharing would reuse the first copy's local
+        // blocker result for every other copy.
+        if (m_config.enable_dynapin_support_optimization.value)
+            return false;
         if (object1->trafo().matrix() != object2->trafo().matrix())
             return false;
         const ModelObject* model_obj1 = object1->model_object();
