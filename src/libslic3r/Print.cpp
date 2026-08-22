@@ -38,6 +38,7 @@
 
 #include "GCode/ConflictChecker.hpp"
 #include "ParameterUtils.hpp"
+#include "Support/SupportMaterial.hpp"
 
 #include <codecvt>
 
@@ -47,6 +48,140 @@ using namespace nlohmann;
 #define L(s) Slic3r::I18N::translate(s)
 
 namespace Slic3r {
+
+static std::string dynapin_pin_list_text(const std::vector<DynaPin::Pin>& pins)
+{
+    std::ostringstream out;
+    for (size_t i = 0; i < pins.size(); ++i) {
+        if (i != 0)
+            out << ' ';
+        out << pins[i].row << ',' << pins[i].col;
+    }
+    return out.str();
+}
+
+static const char* dynapin_selection_source_text(DynaPin::SelectionSource source)
+{
+    switch (source) {
+    case DynaPin::SelectionSource::Manual:      return "manual";
+    case DynaPin::SelectionSource::Automatic:   return "automatic";
+    case DynaPin::SelectionSource::Unavailable: return "unavailable";
+    }
+    return "none";
+}
+
+void Print::update_dynapin_selection()
+{
+    DynaPin::SelectionResult next;
+    BOOST_LOG_TRIVIAL(info) << "[DynaPin] selection begin: enabled=" << m_config.enable_dynapin_support_optimization.value
+                            << ", manual=" << DynaPin::has_manual_selection(*this)
+                            << ", selected_pins='" << m_config.dynapin_selected_pins.value << "'"
+                            << ", config_path='" << m_config.dynapin_config_path.value << "'"
+                            << ", objects=" << m_objects.size();
+    if (!m_config.enable_dynapin_support_optimization.value) {
+        BOOST_LOG_TRIVIAL(info) << "[DynaPin] selection skipped: optimization disabled";
+        m_dynapin_selection = std::move(next);
+        return;
+    }
+
+    DynaPin::Config dynapin_config;
+    std::string     config_error;
+    size_t          candidate_count = 0;
+    size_t          colliding_count = 0;
+    size_t          support_objects = 0;
+    std::string     colliding_pin_list;
+    if (!DynaPin::load_config_for_print(*this, dynapin_config, &config_error)) {
+        next.warning = config_error;
+        BOOST_LOG_TRIVIAL(warning) << "[DynaPin] selection unavailable: " << config_error
+                                   << ", selected_pins='" << m_config.dynapin_selected_pins.value << "'";
+    } else if (DynaPin::has_manual_selection(*this)) {
+        next.source = DynaPin::SelectionSource::Manual;
+        next.pins   = DynaPin::parse_pin_list(m_config.dynapin_selected_pins.value);
+        DynaPin::sort_unique_pins(next.pins, dynapin_config);
+        BOOST_LOG_TRIVIAL(debug) << "[DynaPin] manual selection parsed: pins=" << dynapin_pin_list_text(next.pins);
+    } else {
+        next.source = DynaPin::SelectionSource::Automatic;
+        const std::vector<DynaPin::Pin> candidates = DynaPin::candidate_pins(dynapin_config);
+        candidate_count = candidates.size();
+        BOOST_LOG_TRIVIAL(debug) << "[DynaPin] automatic candidates: count=" << candidate_count;
+        if (candidates.empty()) {
+            next.source  = DynaPin::SelectionSource::Unavailable;
+            next.warning = L("DynaPin automatic pin selection requires positive row_count and col_count values in the printer configuration.");
+        } else {
+            std::vector<DynaPin::Pin> colliding;
+            for (const DynaPin::Pin &pin : candidates)
+                if (DynaPin::pin_collides_with_model(*this, dynapin_config, pin))
+                    colliding.push_back(pin);
+            colliding_count = colliding.size();
+            colliding_pin_list = dynapin_pin_list_text(colliding);
+            BOOST_LOG_TRIVIAL(debug) << "[DynaPin] automatic model collision scan: colliding=" << colliding_count
+                                     << ", pins=" << colliding_pin_list;
+
+            bool skipped_tree = false;
+            size_t object_index = 0;
+            for (const PrintObject *object : m_objects) {
+                if (!object->has_support()) {
+                    BOOST_LOG_TRIVIAL(debug) << "[DynaPin] object skipped: index=" << object_index
+                                             << ", name='" << object->model_object()->name << "', has_support=0";
+                    ++object_index;
+                    continue;
+                }
+                ++support_objects;
+                BOOST_LOG_TRIVIAL(debug) << "[DynaPin] object scan begin: index=" << object_index
+                                         << ", name='" << object->model_object()->name << "', layers=" << object->layers().size()
+                                         << ", instances=" << object->instances().size()
+                                         << ", support_type=" << object->config().support_type.value;
+                if (is_tree(object->config().support_type.value)) {
+                    skipped_tree = true;
+                    BOOST_LOG_TRIVIAL(debug) << "[DynaPin] object scan skipped: index=" << object_index
+                                             << ", reason=tree_or_organic_support";
+                    ++object_index;
+                    continue;
+                }
+                PrintObjectSupportMaterial selector(object, object->slicing_parameters());
+                auto [selected, rejected] = selector.detect_dynapin_pins(*object, dynapin_config, candidates, colliding);
+                BOOST_LOG_TRIVIAL(debug) << "[DynaPin] object scan result: index=" << object_index
+                                         << ", selected=" << dynapin_pin_list_text(selected)
+                                         << ", rejected=" << dynapin_pin_list_text(rejected);
+                append(next.pins, std::move(selected));
+                append(next.rejected_collisions, std::move(rejected));
+                ++object_index;
+            }
+            DynaPin::sort_unique_pins(next.pins, dynapin_config);
+            DynaPin::sort_unique_pins(next.rejected_collisions, dynapin_config);
+
+            if (!next.rejected_collisions.empty())
+                next.warning = (boost::format(L("DynaPin automatic selection skipped pins that collide with a model: %1%")) %
+                                dynapin_pin_list_text(next.rejected_collisions)).str();
+            if (skipped_tree) {
+                if (!next.warning.empty())
+                    next.warning += "\n";
+                next.warning += L("DynaPin automatic pin selection is not available for Tree or Organic supports. Specify pins manually.");
+            }
+        }
+    }
+
+    BOOST_LOG_TRIVIAL(warning) << "[DynaPin] selection resolved: source=" << dynapin_selection_source_text(next.source)
+                               << ", selected=" << next.pins.size()
+                               << ", rejected=" << next.rejected_collisions.size()
+                               << ", candidates=" << candidate_count
+                               << ", colliding=" << colliding_count
+                               << ", support_objects=" << support_objects
+                               << ", objects=" << m_objects.size()
+                               << ", config_path='" << m_config.dynapin_config_path.value << "'"
+                               << ", debug_stage=" << m_config.dynapin_debug_stage.value
+                               << ", colliding_pins='" << colliding_pin_list << "'"
+                               << ", selected_pins='" << dynapin_pin_list_text(next.pins) << "'"
+                               << ", rejected_pins='" << dynapin_pin_list_text(next.rejected_collisions) << "'"
+                               << (next.warning.empty() ? "" : ", warning='" + next.warning + "'");
+
+    const bool changed = next.source != m_dynapin_selection.source || next.pins != m_dynapin_selection.pins ||
+                         next.rejected_collisions != m_dynapin_selection.rejected_collisions;
+    m_dynapin_selection = std::move(next);
+    if (changed)
+        for (PrintObject *object : m_objects)
+            object->invalidate_step(posSupportMaterial);
+}
 
 template class PrintState<PrintStep, psCount>;
 template class PrintState<PrintObjectStep, posCount>;
@@ -68,6 +203,7 @@ struct FilamentType {
 void Print::clear()
 {
 	std::scoped_lock<std::mutex> lock(this->state_mutex());
+    m_dynapin_selection = {};
     // The following call should stop background processing if it is running.
     this->invalidate_all_steps();
 	for (PrintObject *object : m_objects)
@@ -2212,6 +2348,8 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             }
         }
 
+        update_dynapin_selection();
+
         tbb::parallel_for(tbb::blocked_range<int>(0, int(m_objects.size())),
             [this, need_slicing_objects](const tbb::blocked_range<int>& range) {
                 for (int i = range.begin(); i < range.end(); i++) {
@@ -2259,7 +2397,15 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 obj->make_perimeters();
                 obj->infill();
                 obj->ironing();
-                obj->generate_support_material();
+            }
+        }
+
+
+        update_dynapin_selection();
+        for (PrintObject *obj : m_objects)
+            obj->generate_support_material();
+        for (PrintObject *obj : m_objects) {
+            if (re_slicing_objects.count(obj) != 0) {
                 obj->detect_overhangs_for_lift();
                 obj->estimate_curled_extrusions();
             }

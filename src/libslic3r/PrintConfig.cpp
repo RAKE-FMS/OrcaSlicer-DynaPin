@@ -5576,14 +5576,14 @@ void PrintConfigDef::init_fff_params()
     def           = this->add("enable_dynapin_support_optimization", coBool);
     def->label    = L("DynaPin support optimization");
     def->category = L("Support");
-    def->tooltip  = L("Exclude selected DynaPin pin areas before support generation.");
+    def->tooltip  = L("Exclude resolved DynaPin pin areas before support generation. With an empty pin list, Normal supports select safe pins automatically.");
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
     def             = this->add("dynapin_selected_pins", coString);
     def->label      = L("DynaPin selected pins");
     def->category   = L("Support");
-    def->tooltip    = L("Selected DynaPin pins as row,col pairs separated by spaces, semicolons, or new lines.");
+    def->tooltip    = L("Selected DynaPin pins as row,col pairs separated by spaces, semicolons, or new lines. Leave empty to select pins automatically for Normal supports; automatic results are not saved here.");
     def->multiline  = true;
     def->full_width = true;
     def->height     = 4;

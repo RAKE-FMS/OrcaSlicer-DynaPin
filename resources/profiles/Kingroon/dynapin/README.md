@@ -90,6 +90,8 @@ Z
     "y": 63.6,
     "z": 4.0
   },
+  "row_count": 10,
+  "col_count": 14,
   "pitch": {
     "row_y": 12.4,
     "col_z": 7.4
@@ -103,6 +105,8 @@ Z
 | `origin.col` | int | ○ | 原点ピンの列番号 |
 | `origin.y` | number | ○ | 原点ピンのY座標 [mm] |
 | `origin.z` | number | ○ | 原点ピンのZ座標（印刷高さ）[mm] |
+| `row_count` | int | ○ | `origin.row` から正方向に存在するピン行数 |
+| `col_count` | int | ○ | `origin.col` から正方向に存在するピン列数 |
 | `pitch.row_y` | number | ○ | 行間ピッチ（Y方向）[mm] |
 | `pitch.col_z` | number | ○ | 列間ピッチ（Z方向）[mm] |
 
@@ -111,6 +115,8 @@ Z
 pin_y = origin.y + (row - origin.row) × pitch.row_y
 pin_z = origin.z + (col - origin.col) × pitch.col_z
 ```
+
+`dynapin_selected_pins` が空の場合は、この行数・列数で列挙したピンを自動選択候補として使用します。
 
 ---
 

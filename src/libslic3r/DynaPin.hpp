@@ -18,6 +18,45 @@ struct Pin
 {
     int row = 0;
     int col = 0;
+
+    bool operator==(const Pin& rhs) const { return row == rhs.row && col == rhs.col; }
+};
+
+enum class SelectionSource
+{
+    Unavailable,
+    Manual,
+    Automatic
+};
+
+struct SelectionResult
+{
+    SelectionSource  source = SelectionSource::Unavailable;
+    std::vector<Pin> pins;
+    std::vector<Pin> rejected_collisions;
+    std::string      warning;
+};
+
+enum class ProjectionEventType
+{
+    Contact,
+    PinSurface,
+    Model
+};
+
+struct ProjectionEvent
+{
+    ProjectionEventType type = ProjectionEventType::Contact;
+    double               print_z = 0.;
+    Polygons             polygons;
+    Pin                  pin;
+    bool                 colliding = false;
+};
+
+struct ProjectionSelection
+{
+    std::vector<Pin> selected;
+    std::vector<Pin> rejected_collisions;
 };
 
 struct PullMoveConfig
@@ -38,6 +77,8 @@ struct Config
 {
     int                   origin_row = 0;
     int                   origin_col = 0;
+    int                   row_count  = 0;
+    int                   col_count  = 0;
     double                origin_y   = 0.;
     double                origin_z   = 0.;
     std::optional<double> physical_origin_y;
@@ -85,7 +126,17 @@ struct VirtualSupportSurface
 };
 
 std::vector<Pin>      parse_pin_list(const std::string& pins);
+bool                  has_manual_selection(const Print& print);
+std::vector<Pin>      candidate_pins(const Config& config);
+void                  sort_unique_pins(std::vector<Pin>& pins, const Config& config);
+ProjectionSelection   select_from_projection(std::vector<ProjectionEvent> events);
+const std::vector<Pin>& resolved_pins(const Print& print);
 bool                  load_config_for_print(const Print& print, Config& config, std::string* error = nullptr);
+LocalBlocker          blocker_for_pin_shift(const Config& config, const Pin& pin, const Point& shift);
+VirtualSupportSurface surface_for_pin_shift(const Config& config, const Pin& pin, const Point& shift);
+LocalBlocker          blocker_for_pin(const PrintObject& object, const Config& config, const Pin& pin);
+VirtualSupportSurface surface_for_pin(const PrintObject& object, const Config& config, const Pin& pin);
+bool                  pin_collides_with_model(const Print& print, const Config& config, const Pin& pin);
 std::vector<Polygons> support_blockers_for_object(const PrintObject& object);
 // Blocker prisms in object-local coordinates, used to clip already-generated
 // support layers (e.g. support columns descending through the blocked region

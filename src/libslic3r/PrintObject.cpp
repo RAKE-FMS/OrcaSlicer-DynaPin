@@ -764,6 +764,9 @@ void PrintObject::detect_overhangs_for_lift()
 void PrintObject::generate_support_material()
 {
     if (this->set_started(posSupportMaterial)) {
+        if (m_print->get_object(0) == this && !m_print->dynapin_selection().warning.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                                          m_print->dynapin_selection().warning);
         this->clear_support_layers();
 
         if(!has_support() && !m_print->get_no_check_flag()) {

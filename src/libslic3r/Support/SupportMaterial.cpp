@@ -11,6 +11,7 @@
 #include "MutablePolygon.hpp"
 
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <boost/log/trivial.hpp>
 #include <boost/container/static_vector.hpp>
@@ -463,6 +464,26 @@ static Polygons contours_simplified(const Vec2i32 &grid_size, const double pixel
 }
 #endif // SUPPORT_USE_AGG_RASTERIZER
 
+struct SupportGridParams {
+    SupportGridParams(const PrintObjectConfig &object_config, const Flow &support_material_flow) :
+        style(object_config.support_style.value),
+        grid_resolution(object_config.support_base_pattern_spacing.value + support_material_flow.spacing()),
+        support_angle(Geometry::deg2rad(object_config.support_angle.value)),
+        extrusion_width(support_material_flow.spacing()),
+        //support_closing_radius(object_config.support_closing_radius.value),
+        support_closing_radius(2.0),
+        expansion_to_slice(coord_t(support_material_flow.scaled_spacing() / 2 + 5)),
+        expansion_to_propagate(-3) {}
+
+    SupportMaterialStyle    style;
+    double                  grid_resolution;
+    double                  support_angle;
+    double                  extrusion_width;
+    double                  support_closing_radius;
+    coord_t                 expansion_to_slice;
+    coord_t                 expansion_to_propagate;
+};
+
 PrintObjectSupportMaterial::PrintObjectSupportMaterial(const PrintObject *object, const SlicingParameters &slicing_params) :
     m_print_config          (&object->print()->config()),
     m_object_config         (&object->config()),
@@ -470,6 +491,223 @@ PrintObjectSupportMaterial::PrintObjectSupportMaterial(const PrintObject *object
     m_support_params        (*object),
     m_object                (object)
 {
+}
+
+// Forward declaration. The automatic DynaPin detector uses the same raw
+// downward projection helper as normal support generation, but does not keep
+// the generated support layers or extrusion paths.
+static inline std::pair<Polygons, Polygons> project_support_to_grid(
+    const Layer &layer, const SupportGridParams &grid_params, const Polygons &overhangs,
+    Polygons *layer_buildplate_covered, const std::vector<DynaPin::LocalBlocker> &dynapin_blockers
+#ifdef SLIC3R_DEBUG
+    , size_t iRun, size_t layer_id, const char *debug_name
+#endif /* SLIC3R_DEBUG */
+);
+
+std::pair<std::vector<DynaPin::Pin>, std::vector<DynaPin::Pin>> PrintObjectSupportMaterial::detect_dynapin_pins(
+    const PrintObject &object, const DynaPin::Config &config, const std::vector<DynaPin::Pin> &candidates,
+    const std::vector<DynaPin::Pin> &colliding) const
+{
+    if (candidates.empty() || object.layers().empty()) {
+        BOOST_LOG_TRIVIAL(info) << "[DynaPin] detector skipped: candidates=" << candidates.size()
+                                << ", layers=" << object.layers().size();
+        return {};
+    }
+
+    BOOST_LOG_TRIVIAL(debug) << "[DynaPin] detector begin: object='" << object.model_object()->name
+                             << "', layers=" << object.layers().size()
+                             << ", candidates=" << candidates.size()
+                             << ", colliding_candidates=" << colliding.size()
+                             << ", support_style=" << int(m_object_config->support_style.value)
+                             << ", support_spacing_mm=" << m_support_params.support_material_flow.spacing();
+
+    SupportGeneratorLayerStorage layer_storage;
+    std::vector<Polygons>        covered = buildplate_covered(object);
+    SupportGeneratorLayersPtr    contacts = top_contact_layers(object, covered, layer_storage);
+    if (contacts.empty()) {
+        BOOST_LOG_TRIVIAL(warning) << "[DynaPin] detector found no support contacts: layers=" << object.layers().size();
+        return {};
+    }
+
+    struct ContactProjection {
+        double   print_z;
+        Polygons polygons;
+    };
+    std::vector<ContactProjection> contact_projections;
+    contact_projections.reserve(contacts.size());
+    Polygons all_contact_polygons;
+    size_t  nonempty_contacts = 0;
+    bool    have_contact_z = false;
+    double  contact_z_min = std::numeric_limits<double>::max();
+    double  contact_z_max = std::numeric_limits<double>::lowest();
+    for (const SupportGeneratorLayer *contact : contacts) {
+        Polygons polygons;
+        if (contact->contact_polygons)
+            polygons_append(polygons, *contact->contact_polygons);
+        if (contact->overhang_polygons)
+            polygons_append(polygons, expand(*contact->overhang_polygons, float(SCALED_EPSILON)));
+        if (!polygons.empty()) {
+            // A top-contact layer is printed below the object.  The normal
+            // support projection starts at the model layer that generated
+            // this contact, then descends through the contact layer's Z.
+            // Using contact->print_z here skips pin tops between the model
+            // surface and the support contact layer.
+            double projection_z = contact->print_z;
+            if (contact->idx_object_layer_above != size_t(-1) &&
+                contact->idx_object_layer_above < object.layers().size())
+                projection_z = object.layers()[contact->idx_object_layer_above]->print_z;
+            polygons = union_(std::move(polygons));
+            contact_projections.push_back({projection_z, polygons});
+            polygons_append(all_contact_polygons, polygons);
+            ++nonempty_contacts;
+            have_contact_z = true;
+            contact_z_min = std::min(contact_z_min, projection_z);
+            contact_z_max = std::max(contact_z_max, projection_z);
+            const BoundingBox contact_bbox = get_extents(polygons);
+            BOOST_LOG_TRIVIAL(debug) << "[DynaPin] contact projection: support_z=" << contact->print_z
+                                     << ", projection_z=" << projection_z
+                                     << ", object_layer_above=" << contact->idx_object_layer_above
+                                     << ", polygons=" << polygons.size()
+                                     << ", area_mm2=" << area(polygons) * SCALING_FACTOR * SCALING_FACTOR
+                                     << ", bbox_mm=x[" << unscale<double>(contact_bbox.min.x()) << ","
+                                     << unscale<double>(contact_bbox.max.x()) << "] y[" << unscale<double>(contact_bbox.min.y())
+                                     << "," << unscale<double>(contact_bbox.max.y()) << "]";
+        }
+    }
+    all_contact_polygons = union_(std::move(all_contact_polygons));
+
+    std::vector<DynaPin::VirtualSupportSurface> surfaces;
+    surfaces.reserve(candidates.size());
+    std::vector<bool> surface_colliding;
+    surface_colliding.reserve(candidates.size());
+    for (const DynaPin::Pin &pin : candidates) {
+        surfaces.push_back(DynaPin::surface_for_pin(object, config, pin));
+        surface_colliding.push_back(std::find(colliding.begin(), colliding.end(), pin) != colliding.end());
+    }
+
+    // Mirror bottom_contact_layers_and_layer_support_areas(): collect contact
+    // polygons while walking object layers downwards, inspect each raw
+    // projection at the pin-top height, then propagate through the normal
+    // support grid. This includes grid expansion/propagation that a top
+    // contact polygon alone does not contain.
+    const SupportGridParams grid_params(*m_object_config, m_support_params.support_material_flow);
+    Polygons overhangs_projection;
+    Polygons terminated_projection;
+    DynaPin::ProjectionSelection result;
+    int contact_idx = int(contact_projections.size()) - 1;
+    size_t surface_hits = 0;
+    std::vector<bool> surface_hit(candidates.size(), false);
+    size_t projection_layers = 0;
+    bool have_projection_bbox = false;
+    BoundingBox projection_bbox;
+    bool have_surface_bbox = false;
+    BoundingBox surface_bbox;
+    double surface_z_min = std::numeric_limits<double>::max();
+    double surface_z_max = std::numeric_limits<double>::lowest();
+    for (const DynaPin::VirtualSupportSurface &surface : surfaces) {
+        if (surface.poly.empty())
+            continue;
+        const BoundingBox bbox = get_extents(surface.poly);
+        if (!have_surface_bbox) {
+            surface_bbox = bbox;
+            have_surface_bbox = true;
+        } else
+            surface_bbox.merge(bbox);
+        surface_z_min = std::min(surface_z_min, surface.print_z);
+        surface_z_max = std::max(surface_z_max, surface.print_z);
+    }
+    for (int layer_id = int(object.layers().size()) - 2; layer_id >= 0; --layer_id) {
+        const Layer &layer = *object.layers()[layer_id];
+        if (!terminated_projection.empty())
+            overhangs_projection = diff(overhangs_projection, terminated_projection);
+        for (; contact_idx >= 0 && contact_projections[contact_idx].print_z > layer.print_z - EPSILON; --contact_idx)
+            polygons_append(overhangs_projection, contact_projections[contact_idx].polygons);
+        if (overhangs_projection.empty())
+            continue;
+
+        overhangs_projection = union_(std::move(overhangs_projection));
+        ++projection_layers;
+        const BoundingBox layer_projection_bbox = get_extents(overhangs_projection);
+        if (!have_projection_bbox) {
+            projection_bbox = layer_projection_bbox;
+            have_projection_bbox = true;
+        } else
+            projection_bbox.merge(layer_projection_bbox);
+        const double upper_print_z = object.layers()[layer_id + 1]->print_z;
+        for (size_t surface_idx = 0; surface_idx < surfaces.size(); ++surface_idx) {
+            const DynaPin::VirtualSupportSurface &surface = surfaces[surface_idx];
+            if (surface.print_z <= layer.print_z + EPSILON || surface.print_z > upper_print_z + EPSILON)
+                continue;
+            if (intersection(overhangs_projection, surface.poly).empty())
+                continue;
+
+            ++surface_hits;
+            surface_hit[surface_idx] = true;
+            const DynaPin::Pin &pin = candidates[surface_idx];
+            if (surface_colliding[surface_idx])
+                result.rejected_collisions.push_back(pin);
+            else {
+                result.selected.push_back(pin);
+                BOOST_LOG_TRIVIAL(debug) << "[DynaPin] detector selected pin: row=" << pin.row << ", col=" << pin.col
+                                         << ", surface_z=" << surface.print_z
+                                         << ", layer_z=" << layer.print_z << ", upper_z=" << upper_print_z;
+                // A safe pin consumes only its landing area; the remainder
+                // continues down to lower pins.
+                overhangs_projection = diff(overhangs_projection, {surface.poly});
+                terminated_projection.push_back(surface.poly);
+            }
+        }
+
+        Polygons *layer_buildplate_covered = (size_t(layer_id) < covered.size() && !covered[layer_id].empty()) ? &covered[layer_id] : nullptr;
+        auto projection_result = project_support_to_grid(layer, grid_params, overhangs_projection, layer_buildplate_covered, {});
+        overhangs_projection = std::move(projection_result.second);
+    }
+
+    DynaPin::sort_unique_pins(result.selected, config);
+    DynaPin::sort_unique_pins(result.rejected_collisions, config);
+    for (size_t surface_idx = 0; surface_idx < surfaces.size(); ++surface_idx) {
+        const DynaPin::Pin &pin = candidates[surface_idx];
+        const DynaPin::VirtualSupportSurface &surface = surfaces[surface_idx];
+        const BoundingBox bbox = get_extents(surface.poly);
+        const bool selected = std::find(result.selected.begin(), result.selected.end(), pin) != result.selected.end();
+        const bool rejected = std::find(result.rejected_collisions.begin(), result.rejected_collisions.end(), pin) != result.rejected_collisions.end();
+        BOOST_LOG_TRIVIAL(debug) << "[DynaPin] candidate result: pin=(" << pin.row << "," << pin.col << ")"
+                                 << ", physical_mm=(" << DynaPin::pin_y(config, pin) << "," << DynaPin::pin_z(config, pin) << ")"
+                                 << ", surface_z=" << surface.print_z
+                                 << ", surface_bbox_mm=x[" << unscale<double>(bbox.min.x()) << "," << unscale<double>(bbox.max.x())
+                                 << "] y[" << unscale<double>(bbox.min.y()) << "," << unscale<double>(bbox.max.y()) << "]"
+                                 << ", model_collision=" << surface_colliding[surface_idx]
+                                 << ", projection_hit=" << surface_hit[surface_idx]
+                                 << ", decision=" << (selected ? "selected" : rejected ? "rejected_collision" : "not_selected");
+    }
+    if (!all_contact_polygons.empty()) {
+        const BoundingBox bbox = get_extents(all_contact_polygons);
+        BOOST_LOG_TRIVIAL(warning) << "[DynaPin] detector summary: contacts=" << contacts.size()
+                                   << ", nonempty_contacts=" << nonempty_contacts
+                                   << ", surface_hits=" << surface_hits
+                                   << ", selected=" << result.selected.size()
+                                   << ", rejected=" << result.rejected_collisions.size()
+                                   << ", contact_z=[" << (have_contact_z ? contact_z_min : 0.) << ","
+                                   << (have_contact_z ? contact_z_max : 0.) << "]"
+                                   << ", contact_bbox_mm=x[" << unscale<double>(bbox.min.x()) << "," << unscale<double>(bbox.max.x())
+                                   << "] y[" << unscale<double>(bbox.min.y()) << "," << unscale<double>(bbox.max.y()) << "]"
+                                   << ", projection_layers=" << projection_layers
+                                   << ", projection_bbox_mm=x[" << (have_projection_bbox ? unscale<double>(projection_bbox.min.x()) : 0.) << ","
+                                   << (have_projection_bbox ? unscale<double>(projection_bbox.max.x()) : 0.) << "] y["
+                                   << (have_projection_bbox ? unscale<double>(projection_bbox.min.y()) : 0.) << ","
+                                   << (have_projection_bbox ? unscale<double>(projection_bbox.max.y()) : 0.) << "]"
+                                   << ", surface_bbox_mm=x[" << (have_surface_bbox ? unscale<double>(surface_bbox.min.x()) : 0.) << ","
+                                   << (have_surface_bbox ? unscale<double>(surface_bbox.max.x()) : 0.) << "] y["
+                                   << (have_surface_bbox ? unscale<double>(surface_bbox.min.y()) : 0.) << ","
+                                   << (have_surface_bbox ? unscale<double>(surface_bbox.max.y()) : 0.) << "] z["
+                                   << (have_surface_bbox ? surface_z_min : 0.) << "," << (have_surface_bbox ? surface_z_max : 0.) << "]";
+    } else {
+        BOOST_LOG_TRIVIAL(warning) << "[DynaPin] detector summary: contacts=" << contacts.size()
+                                   << ", nonempty_contacts=0, surface_hits=" << surface_hits
+                                   << ", selected=" << result.selected.size()
+                                   << ", rejected=" << result.rejected_collisions.size();
+    }
+    return {std::move(result.selected), std::move(result.rejected_collisions)};
 }
 
 // Using the std::deque as an allocator.
@@ -563,7 +801,7 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
 
     SupportGeneratorLayersPtr bottom_contacts = this->bottom_contact_layers_and_layer_support_areas(
         object, top_contacts, buildplate_covered,
-        layer_storage, layer_support_areas, dynapin_blockers);
+        layer_storage, layer_support_areas, dynapin_blockers, dynapin_surfaces);
 
     if (object.print()->canceled())
         return;
@@ -732,8 +970,8 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
             BOOST_LOG_TRIVIAL(warning) << "DynaPin clip " << name << ": hit_layers=" << hit
                                        << " area_before=" << area_before << "mm2 area_removed=" << area_removed << "mm2";
         };
-        clip_layers(top_contacts, "top_contacts");
-        clip_layers(bottom_contacts, "bottom_contacts");
+        // Top and bottom contact layers sit directly under overhangs and over lower model surfaces.
+        // Keep them intact; clip only intermediate/base support columns within the blocker Z span.
         clip_layers(intermediate_layers, "intermediate");
         clip_layers(interface_layers, "interface");
         clip_layers(base_interface_layers, "base_interface");
@@ -837,26 +1075,6 @@ Polygons collect_slices_outer(const Layer &layer)
         out.emplace_back(expoly.contour);
     return out;
 }
-
-struct SupportGridParams {
-    SupportGridParams(const PrintObjectConfig &object_config, const Flow &support_material_flow) :
-        style(object_config.support_style.value),
-        grid_resolution(object_config.support_base_pattern_spacing.value + support_material_flow.spacing()),
-        support_angle(Geometry::deg2rad(object_config.support_angle.value)),
-        extrusion_width(support_material_flow.spacing()),
-        //support_closing_radius(object_config.support_closing_radius.value),
-        support_closing_radius(2.0),
-        expansion_to_slice(coord_t(support_material_flow.scaled_spacing() / 2 + 5)),
-        expansion_to_propagate(-3) {}
-
-    SupportMaterialStyle    style;
-    double                  grid_resolution;
-    double                  support_angle;
-    double                  extrusion_width;
-    double                  support_closing_radius;
-    coord_t                 expansion_to_slice;
-    coord_t                 expansion_to_propagate;
-};
 
 class SupportGridPattern
 {
@@ -2829,7 +3047,9 @@ static inline std::pair<Polygons, Polygons> project_support_to_grid(const Layer 
 // otherwise set the layer height to a bridging flow of a support interface nozzle.
 SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_layer_support_areas(
     const PrintObject &object, const SupportGeneratorLayersPtr &top_contacts, std::vector<Polygons> &buildplate_covered,
-    SupportGeneratorLayerStorage &layer_storage, std::vector<Polygons> &layer_support_areas, const std::vector<DynaPin::LocalBlocker>& dynapin_blockers) const
+    SupportGeneratorLayerStorage &layer_storage, std::vector<Polygons> &layer_support_areas,
+    const std::vector<DynaPin::LocalBlocker>& dynapin_blockers,
+    const std::vector<DynaPin::VirtualSupportSurface>& dynapin_surfaces) const
 {
     if (top_contacts.empty())
         return SupportGeneratorLayersPtr();
@@ -2899,6 +3119,17 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_
         // Overhangs_projection will be filled in asynchronously, move it away.
         Polygons overhangs_projection_raw = union_(std::move(overhangs_projection));
         Polygons enforcers_projection_raw = union_(std::move(enforcers_projection));
+
+        // A selected pin top is a termination surface for downward support
+        // propagation. Apply it exactly once when the layer sweep crosses its
+        // physical height; projections outside the pin polygon keep descending.
+        const double upper_print_z = object.get_layer(layer_id + 1)->print_z;
+        for (const DynaPin::VirtualSupportSurface& surface : dynapin_surfaces) {
+            if (surface.print_z > layer.print_z + EPSILON && surface.print_z <= upper_print_z + EPSILON) {
+                overhangs_projection_raw = diff(overhangs_projection_raw, {surface.poly});
+                enforcers_projection_raw = diff(enforcers_projection_raw, {surface.poly});
+            }
+        }
 
         tbb::task_group task_group;
         const Polygons &overhangs_for_bottom_contacts = buildplate_only ? enforcers_projection_raw : overhangs_projection_raw;

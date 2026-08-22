@@ -5630,16 +5630,12 @@ std::string GCode::change_layer(coordf_t print_z)
     if (m_print != nullptr) {
         DynaPin::Config dynapin_config;
         if (m_print->config().enable_dynapin_support_optimization.value && DynaPin::load_config_for_print(*m_print, dynapin_config)) {
-            const std::vector<DynaPin::Pin> pins = DynaPin::parse_pin_list(m_print->config().dynapin_selected_pins.value);
-            for (const PrintObject* object : m_print->objects()) {
-                for (const DynaPin::Pin& pin : pins) {
-                    const double pin_z = DynaPin::pin_z(dynapin_config, pin);
-                    if (pin_z + dynapin_config.blocker_z_max <= print_z + EPSILON) {
-                        const std::string key = std::to_string(object->id().id) + ":" + std::to_string(pin.row) + ":" +
-                                                std::to_string(pin.col);
-                        if (m_dynapin_pulls_done.insert(key).second)
-                            gcode += DynaPin::pull_gcode_for_pin(dynapin_config, pin);
-                    }
+            for (const DynaPin::Pin& pin : DynaPin::resolved_pins(*m_print)) {
+                const double pin_z = DynaPin::pin_z(dynapin_config, pin);
+                if (pin_z + dynapin_config.blocker_z_max <= print_z + EPSILON) {
+                    const std::string key = std::to_string(pin.row) + ":" + std::to_string(pin.col);
+                    if (m_dynapin_pulls_done.insert(key).second)
+                        gcode += DynaPin::pull_gcode_for_pin(dynapin_config, pin);
                 }
             }
         }

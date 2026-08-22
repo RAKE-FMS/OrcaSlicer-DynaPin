@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <iomanip>
 #include <set>
@@ -51,9 +52,9 @@ static int int_or(const nlohmann::json& j, const char* key, int fallback)
     return fallback;
 }
 
-// Per-pin support block volume is shifted sideways along Y relative to the pin
-// position so the block sits next to (not on top of) the pin. The pin itself
-// (pull G-code, pin_pos) is unaffected.
+// The physical blocker/pin landing region is shifted along Y from the grid's
+// configured reference coordinate. Pull G-code keeps its existing coordinate
+// calculation and is intentionally independent of this support geometry.
 static constexpr double support_block_y_offset = -7.2;
 
 double pin_y(const Config& config, const Pin& pin)
@@ -90,6 +91,82 @@ std::vector<Pin> parse_pin_list(const std::string& pins)
         }
     }
     return out;
+}
+
+bool has_manual_selection(const Print& print)
+{
+    const std::string& value = print.config().dynapin_selected_pins.value;
+    return std::any_of(value.begin(), value.end(), [](unsigned char ch) { return !std::isspace(ch); });
+}
+
+std::vector<Pin> candidate_pins(const Config& config)
+{
+    std::vector<Pin> out;
+    if (config.row_count <= 0 || config.col_count <= 0)
+        return out;
+    out.reserve(size_t(config.row_count) * size_t(config.col_count));
+    for (int row = config.origin_row; row < config.origin_row + config.row_count; ++row)
+        for (int col = config.origin_col; col < config.origin_col + config.col_count; ++col)
+            out.push_back({row, col});
+    return out;
+}
+
+void sort_unique_pins(std::vector<Pin>& pins, const Config& config)
+{
+    std::sort(pins.begin(), pins.end(), [&config](const Pin& lhs, const Pin& rhs) {
+        const double lhs_z = pin_z(config, lhs);
+        const double rhs_z = pin_z(config, rhs);
+        if (lhs_z != rhs_z)
+            return lhs_z < rhs_z;
+        if (lhs.row != rhs.row)
+            return lhs.row < rhs.row;
+        return lhs.col < rhs.col;
+    });
+    pins.erase(std::unique(pins.begin(), pins.end()), pins.end());
+}
+
+ProjectionSelection select_from_projection(std::vector<ProjectionEvent> events)
+{
+    auto type_order = [](ProjectionEventType type) {
+        switch (type) {
+        case ProjectionEventType::Contact:    return 0;
+        case ProjectionEventType::PinSurface: return 1;
+        case ProjectionEventType::Model:      return 2;
+        }
+        return 3;
+    };
+    std::stable_sort(events.begin(), events.end(), [&type_order](const ProjectionEvent& lhs, const ProjectionEvent& rhs) {
+        if (lhs.print_z != rhs.print_z)
+            return lhs.print_z > rhs.print_z;
+        return type_order(lhs.type) < type_order(rhs.type);
+    });
+
+    ProjectionSelection result;
+    Polygons             projection;
+    for (const ProjectionEvent& event : events) {
+        if (event.type == ProjectionEventType::Contact) {
+            polygons_append(projection, event.polygons);
+            projection = union_(projection);
+        } else if (event.type == ProjectionEventType::Model) {
+            if (!projection.empty())
+                projection = diff(projection, offset(event.polygons, float(SCALED_EPSILON)));
+        } else if (!projection.empty() && !intersection(projection, event.polygons).empty()) {
+            if (event.colliding)
+                result.rejected_collisions.push_back(event.pin);
+            else {
+                result.selected.push_back(event.pin);
+                // This is the downward-propagation termination point. A safe
+                // upper pin consumes only the projection landing on its top.
+                projection = diff(projection, event.polygons);
+            }
+        }
+    }
+    return result;
+}
+
+const std::vector<Pin>& resolved_pins(const Print& print)
+{
+    return print.dynapin_selection().pins;
 }
 
 static std::vector<fs::path> config_candidates(const std::string& path)
@@ -150,6 +227,8 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
     const nlohmann::json grid   = j.contains("grid") && j["grid"].is_object() ? j["grid"] : nlohmann::json::object();
     config.origin_row           = int_or(grid, "origin_row", config.origin_row);
     config.origin_col           = int_or(grid, "origin_col", config.origin_col);
+    config.row_count            = int_or(grid, "row_count", config.row_count);
+    config.col_count            = int_or(grid, "col_count", config.col_count);
     config.origin_y             = number_or(grid, "origin_y", config.origin_y);
     config.origin_z             = number_or(grid, "origin_z", config.origin_z);
     config.row_pitch_y          = number_or(grid, "row_pitch_y", config.row_pitch_y);
@@ -206,6 +285,19 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
             *error = "DynaPin config is missing required grid or support_exclusion dimensions";
         return false;
     }
+
+    BOOST_LOG_TRIVIAL(debug) << "[DynaPin] config loaded: requested='" << config_path << "', resolved='" << resolved.string()
+                             << "', grid_origin=(" << config.origin_row << "," << config.origin_col << ")"
+                             << ", grid_size=" << config.row_count << "x" << config.col_count
+                             << ", origin_mm=(" << config.origin_y << "," << config.origin_z << ")"
+                             << ", physical_origin_mm=(" << config.physical_origin_y.value_or(config.origin_y) << ","
+                             << config.physical_origin_z.value_or(config.origin_z) << ")"
+                             << ", pitch_mm=(" << config.row_pitch_y << "," << config.col_pitch_z << ")"
+                             << ", exclusion_center_mm=(" << config.blocker_center_x << ","
+                             << config.physical_origin_y.value_or(config.origin_y) + support_block_y_offset << ")"
+                             << ", exclusion_size_mm=(" << config.blocker_width_x << "," << config.blocker_width_y << ")"
+                             << ", z_range_mm=(" << config.physical_origin_z.value_or(config.origin_z) - config.pin_z_height
+                             << "," << config.physical_origin_z.value_or(config.origin_z) + config.blocker_z_max << ")";
     return true;
 }
 
@@ -224,6 +316,98 @@ static double bed_max_x(const Print& print, const Config& config)
     return unscale_(max_x);
 }
 
+LocalBlocker blocker_for_pin_shift(const Config& config, const Pin& pin, const Point& shift, double max_x_bed)
+{
+    const double y       = pin_y(config, pin);
+    const double z       = pin_z(config, pin);
+    const double block_y = y + support_block_y_offset;
+    const double min_x   = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
+    const double max_x   = (max_x_bed > 0.0) ? max_x_bed : (config.blocker_center_x + 0.5 * config.blocker_width_x);
+    const double min_y   = block_y - 0.5 * config.blocker_width_y;
+    const double max_y   = block_y + 0.5 * config.blocker_width_y;
+
+    LocalBlocker blocker;
+    blocker.z_min       = z - config.pin_z_height;
+    blocker.z_max       = z + config.blocker_z_max;
+    blocker.poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
+                           Point(scale_(max_x) - shift.x(), scale_(min_y) - shift.y()),
+                           Point(scale_(max_x) - shift.x(), scale_(max_y) - shift.y()),
+                           Point(scale_(min_x) - shift.x(), scale_(max_y) - shift.y())};
+    return blocker;
+}
+
+LocalBlocker blocker_for_pin_shift(const Config& config, const Pin& pin, const Point& shift)
+{
+    return blocker_for_pin_shift(config, pin, shift, 0.0);
+}
+
+LocalBlocker blocker_for_pin(const PrintObject& object, const Config& config, const Pin& pin)
+{
+    const Print& print = *object.print();
+    const Point shift = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
+    return blocker_for_pin_shift(config, pin, shift, bed_max_x(print, config));
+}
+
+VirtualSupportSurface surface_for_pin_shift(const Config& config, const Pin& pin, const Point& shift)
+{
+    const double block_y = pin_y(config, pin) + support_block_y_offset;
+    const double min_x   = config.blocker_center_x - 0.5 * config.blocker_width_x;
+    const double max_x   = config.blocker_center_x + 0.5 * config.blocker_width_x;
+    const double min_y   = block_y - 0.5 * config.blocker_width_y;
+    const double max_y   = block_y + 0.5 * config.blocker_width_y;
+
+    VirtualSupportSurface surface;
+    surface.print_z     = pin_z(config, pin) + config.blocker_z_max;
+    surface.poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
+                           Point(scale_(max_x) - shift.x(), scale_(min_y) - shift.y()),
+                           Point(scale_(max_x) - shift.x(), scale_(max_y) - shift.y()),
+                           Point(scale_(min_x) - shift.x(), scale_(max_y) - shift.y())};
+    return surface;
+}
+
+VirtualSupportSurface surface_for_pin(const PrintObject& object, const Config& config, const Pin& pin)
+{
+    const Point shift = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
+    return surface_for_pin_shift(config, pin, shift);
+}
+
+bool pin_collides_with_model(const Print& print, const Config& config, const Pin& pin)
+{
+    const double max_x_bed = bed_max_x(print, config);
+    for (const PrintObject* object : print.objects()) {
+        const auto check_instance = [&](const Point& shift) {
+            const LocalBlocker blocker = blocker_for_pin_shift(config, pin, shift, max_x_bed);
+            for (const Layer* layer : object->layers()) {
+                if (layer->print_z + EPSILON < blocker.z_min || layer->print_z - EPSILON > blocker.z_max)
+                    continue;
+                const Polygons overlap = intersection(to_polygons(layer->lslices), {blocker.poly});
+                if (!overlap.empty()) {
+                    BOOST_LOG_TRIVIAL(debug) << "[DynaPin] model collision: pin=(" << pin.row << "," << pin.col << ")"
+                                             << ", layer_id=" << layer->id() << ", layer_z=" << layer->print_z
+                                             << ", instance_shift_mm=(" << unscale<double>(shift.x()) << ","
+                                             << unscale<double>(shift.y()) << ")"
+                                             << ", blocker_x_mm=[" << unscale<double>(blocker.poly.points.front().x() + shift.x())
+                                             << "," << unscale<double>(blocker.poly.points[1].x() + shift.x()) << "]"
+                                             << ", overlap_area_mm2=" << area(overlap) * SCALING_FACTOR * SCALING_FACTOR;
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        if (object->instances().empty()) {
+            if (check_instance(Point(0, 0)))
+                return true;
+        } else {
+            for (const PrintInstance &instance : object->instances()) {
+                if (check_instance(instance.shift_without_plate_offset()))
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
 std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
 {
     std::vector<Polygons> out(object.layer_count());
@@ -238,7 +422,7 @@ std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
         return out;
     }
 
-    const std::vector<Pin> pins = parse_pin_list(print.config().dynapin_selected_pins.value);
+    const std::vector<Pin>& pins = resolved_pins(print);
     // The blocker geometry above is expressed in world (machine/bed) coordinates,
     // matching the G-code preview overlay. The support polygons we subtract it from
     // (layer.lslices etc.) live in object-local coordinates: world = local + instance.shift.
@@ -248,27 +432,11 @@ std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
     // transform PrintObject uses to bring world polygons into object coords, see
     // PrintObject.cpp), because instance.shift also carries the large multi-plate
     // offset which would push the blocker far off the bed.
-    const Point  shift     = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
-    const double max_x_bed = bed_max_x(print, config);
     for (const Pin& pin : pins) {
-        const double y       = pin_y(config, pin);
-        const double z       = pin_z(config, pin);
-        const double z_min   = std::max(0.0, z - config.pin_z_height - 2.0);
-        const double z_max   = z + config.blocker_z_max;
-        const double block_y = y + support_block_y_offset;
-        const double min_x   = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
-        const double max_x   = max_x_bed;
-        const double min_y   = block_y - 0.5 * config.blocker_width_y;
-        const double max_y   = block_y + 0.5 * config.blocker_width_y;
-
-        Polygon poly;
-        poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
-                       Point(scale_(max_x) - shift.x(), scale_(min_y) - shift.y()),
-                       Point(scale_(max_x) - shift.x(), scale_(max_y) - shift.y()),
-                       Point(scale_(min_x) - shift.x(), scale_(max_y) - shift.y())};
+        const LocalBlocker blocker = blocker_for_pin(object, config, pin);
         for (const Layer* layer : object.layers()) {
-            if (layer->print_z + EPSILON >= z_min && layer->print_z - EPSILON <= z_max)
-                out[layer->id()].push_back(poly);
+            if (layer->print_z + EPSILON >= blocker.z_min && layer->print_z - EPSILON <= blocker.z_max)
+                out[layer->id()].push_back(blocker.poly);
         }
     }
     return out;
@@ -288,31 +456,10 @@ std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject& objec
         return out;
     }
 
-    // World (machine) -> object-local: subtract the instance shift without the
-    // multi-plate offset (same transform PrintObject uses, see PrintObject.cpp).
-    const Point shift = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
-
-    const std::vector<Pin> pins      = parse_pin_list(print.config().dynapin_selected_pins.value);
-    const double           max_x_bed = bed_max_x(print, config);
+    const std::vector<Pin>& pins     = resolved_pins(print);
     out.reserve(pins.size());
-    for (const Pin& pin : pins) {
-        const double y       = pin_y(config, pin);
-        const double z       = pin_z(config, pin);
-        const double block_y = y + support_block_y_offset;
-        const double min_x   = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
-        const double max_x   = max_x_bed;
-        const double min_y   = block_y - 0.5 * config.blocker_width_y;
-        const double max_y   = block_y + 0.5 * config.blocker_width_y;
-
-        LocalBlocker blocker;
-        blocker.z_min       = std::max(0.0, z - config.pin_z_height - 2.0);
-        blocker.z_max       = z + config.blocker_z_max;
-        blocker.poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
-                               Point(scale_(max_x) - shift.x(), scale_(min_y) - shift.y()),
-                               Point(scale_(max_x) - shift.x(), scale_(max_y) - shift.y()),
-                               Point(scale_(min_x) - shift.x(), scale_(max_y) - shift.y())};
-        out.push_back(std::move(blocker));
-    }
+    for (const Pin& pin : pins)
+        out.push_back(blocker_for_pin(object, config, pin));
     return out;
 }
 
@@ -330,31 +477,10 @@ std::vector<VirtualSupportSurface> pin_top_surfaces_for_object(const PrintObject
         return out;
     }
 
-    // World (machine) -> object-local: subtract the instance shift without the
-    // multi-plate offset (same transform PrintObject uses, see PrintObject.cpp).
-    const Point shift = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
-
-    const std::vector<Pin> pins      = parse_pin_list(print.config().dynapin_selected_pins.value);
-    const double           max_x_bed = bed_max_x(print, config);
+    const std::vector<Pin>& pins     = resolved_pins(print);
     out.reserve(pins.size());
-    for (const Pin& pin : pins) {
-        const double y       = pin_y(config, pin);
-        const double z       = pin_z(config, pin);
-        const double block_y = y + support_block_y_offset;
-        const double min_x   = config.blocker_center_x - 0.5 * config.blocker_width_x;
-        const double max_x   = config.blocker_center_x + 0.5 * config.blocker_width_x;
-        const double min_y   = block_y - 0.5 * config.blocker_width_y;
-        const double max_y   = block_y + 0.5 * config.blocker_width_y;
-
-        // 仮想サポート面はブロッカー柱の最上面（=ピンの上面）に位置する。
-        VirtualSupportSurface surface;
-        surface.print_z     = z + config.blocker_z_max;
-        surface.poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
-                               Point(scale_(max_x) - shift.x(), scale_(min_y) - shift.y()),
-                               Point(scale_(max_x) - shift.x(), scale_(max_y) - shift.y()),
-                               Point(scale_(min_x) - shift.x(), scale_(max_y) - shift.y())};
-        out.push_back(std::move(surface));
-    }
+    for (const Pin& pin : pins)
+        out.push_back(surface_for_pin(object, config, pin));
     return out;
 }
 
@@ -371,7 +497,7 @@ std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
         return out;
     }
 
-    const std::vector<Pin> pins      = parse_pin_list(print.config().dynapin_selected_pins.value);
+    const std::vector<Pin>& pins     = resolved_pins(print);
     const double           max_x_bed = bed_max_x(print, config);
     out.reserve(pins.size());
     for (const Pin& pin : pins) {
@@ -382,14 +508,14 @@ std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
         const double max_x   = max_x_bed;
         const double min_y   = block_y - 0.5 * config.blocker_width_y;
         const double max_y   = block_y + 0.5 * config.blocker_width_y;
-        const double z_min   = std::max(0.0, z - config.pin_z_height);
+        const double z_min   = z - config.pin_z_height;
         const double z_max   = z + config.blocker_z_max;
 
         BlockerBox box;
         box.pin     = pin;
         box.min     = Vec3d(min_x, min_y, z_min);
         box.max     = Vec3d(max_x, max_y, z_max);
-        box.pin_pos = Vec3d(config.blocker_center_x, y, z);
+        box.pin_pos = Vec3d(config.blocker_center_x, block_y, z);
         out.push_back(box);
     }
     return out;

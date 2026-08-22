@@ -1799,6 +1799,19 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         m_support_used |= object->config().enable_support;
     }
 
+    // Manual DynaPin selections are immediately available to preview/support
+    // helpers even before process(). Automatic selections require sliced layers
+    // and are resolved later by Print::update_dynapin_selection().
+    m_dynapin_selection = {};
+    if (m_config.enable_dynapin_support_optimization.value && DynaPin::has_manual_selection(*this)) {
+        DynaPin::Config dynapin_config;
+        if (DynaPin::load_config_for_print(*this, dynapin_config)) {
+            m_dynapin_selection.source = DynaPin::SelectionSource::Manual;
+            m_dynapin_selection.pins   = DynaPin::parse_pin_list(m_config.dynapin_selected_pins.value);
+            DynaPin::sort_unique_pins(m_dynapin_selection.pins, dynapin_config);
+        }
+    }
+
 #ifdef _DEBUG
     check_model_ids_equal(m_model, model);
 #endif /* _DEBUG */

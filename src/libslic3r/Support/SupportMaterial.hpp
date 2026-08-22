@@ -37,6 +37,12 @@ public:
 	// with extrusion paths and islands filled in for each support layer.
 	void 		generate(PrintObject &object);
 
+    // Runs only the polygon projection needed to decide which DynaPin surfaces
+    // would receive support. No support layers or extrusion paths are emitted.
+    std::pair<std::vector<DynaPin::Pin>, std::vector<DynaPin::Pin>> detect_dynapin_pins(
+        const PrintObject &object, const DynaPin::Config &config, const std::vector<DynaPin::Pin> &candidates,
+        const std::vector<DynaPin::Pin> &colliding) const;
+
 private:
 	std::vector<Polygons> buildplate_covered(const PrintObject &object) const;
 
@@ -51,7 +57,8 @@ private:
 	SupportGeneratorLayersPtr bottom_contact_layers_and_layer_support_areas(
 		const PrintObject &object, const SupportGeneratorLayersPtr &top_contacts, std::vector<Polygons> &buildplate_covered, 
 		SupportGeneratorLayerStorage &layer_storage, std::vector<Polygons> &layer_support_areas,
-		const std::vector<DynaPin::LocalBlocker> &dynapin_blockers = {}) const;
+		const std::vector<DynaPin::LocalBlocker> &dynapin_blockers = {},
+        const std::vector<DynaPin::VirtualSupportSurface> &dynapin_surfaces = {}) const;
 
 	// Trim the top_contacts layers with the bottom_contacts layers if they overlap, so there would not be enough vertical space for both of them.
 	void trim_top_contacts_by_bottom_contacts(const PrintObject &object, const SupportGeneratorLayersPtr &bottom_contacts, SupportGeneratorLayersPtr &top_contacts) const;

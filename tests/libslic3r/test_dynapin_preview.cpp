@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <fstream>
+#include <unistd.h>
 
 using namespace Slic3r;
 
@@ -12,10 +13,13 @@ namespace {
 
 std::string write_gcode(const std::string& body)
 {
-    char path[L_tmpnam];
-    std::tmpnam(path);
+    char path[] = "/tmp/orcaslicer-dynapin-XXXXXX";
+    const int fd = ::mkstemp(path);
+    REQUIRE(fd >= 0);
+    ::close(fd);
     std::ofstream file(path);
     file << body;
+    file.close();
     return path;
 }
 
@@ -30,14 +34,12 @@ std::vector<size_t> line_ends(const std::string& body)
     return ends;
 }
 
-GCodeProcessorResult make_result(const std::string& filename)
+void initialize_result(GCodeProcessorResult& result, const std::string& filename)
 {
-    GCodeProcessorResult result;
     result.filename = filename;
     result.moves.push_back({2, EMoveType::Travel, erNone, 0, 0, Vec3f(0.f, 0.f, 0.f)});
     result.moves.push_back({5, EMoveType::Travel, erNone, 0, 0, Vec3f(10.f, 0.f, 0.f)});
     result.moves.push_back({6, EMoveType::Travel, erNone, 0, 0, Vec3f(20.f, 0.f, 0.f)});
-    return result;
 }
 
 } // namespace
@@ -100,6 +102,84 @@ TEST_CASE("DynaPin physical and pull coordinates are independent", "[DynaPin]")
     CHECK(gcode.find("G1 X165.0000") != std::string::npos);
 }
 
+TEST_CASE("DynaPin candidate grid starts at the configured origin", "[DynaPin]")
+{
+    DynaPin::Config config;
+    config.origin_row = 0;
+    config.origin_col = 0;
+    config.row_count  = 10;
+    config.col_count  = 14;
+
+    const std::vector<DynaPin::Pin> pins = DynaPin::candidate_pins(config);
+    REQUIRE(pins.size() == 140);
+    CHECK(pins.front() == DynaPin::Pin{0, 0});
+    CHECK(pins.back() == DynaPin::Pin{9, 13});
+
+    config.row_count = 0;
+    CHECK(DynaPin::candidate_pins(config).empty());
+    config.row_count = 10;
+    config.col_count = -1;
+    CHECK(DynaPin::candidate_pins(config).empty());
+}
+
+TEST_CASE("DynaPin pins are sorted by physical height and deduplicated", "[DynaPin]")
+{
+    DynaPin::Config config;
+    config.origin_z   = 5.;
+    config.col_pitch_z = 7.4;
+    std::vector<DynaPin::Pin> pins{{2, 3}, {1, 3}, {2, 3}, {0, 5}};
+
+    DynaPin::sort_unique_pins(pins, config);
+    REQUIRE(pins.size() == 3);
+    CHECK(pins[0] == DynaPin::Pin{1, 3});
+    CHECK(pins[1] == DynaPin::Pin{2, 3});
+    CHECK(pins[2] == DynaPin::Pin{0, 5});
+}
+
+TEST_CASE("DynaPin downward projection stops at the highest safe pin", "[DynaPin]")
+{
+    const Polygon landing{{0, 0}, {1000, 0}, {1000, 1000}, {0, 1000}};
+    std::vector<DynaPin::ProjectionEvent> events{
+        {DynaPin::ProjectionEventType::Contact, 30., {landing}, {}, false},
+        {DynaPin::ProjectionEventType::PinSurface, 20., {landing}, {0, 2}, false},
+        {DynaPin::ProjectionEventType::PinSurface, 10., {landing}, {0, 1}, false},
+    };
+
+    const DynaPin::ProjectionSelection result = DynaPin::select_from_projection(std::move(events));
+    REQUIRE(result.selected.size() == 1);
+    CHECK(result.selected.front() == DynaPin::Pin{0, 2});
+    CHECK(result.rejected_collisions.empty());
+}
+
+TEST_CASE("DynaPin downward projection continues past a colliding pin", "[DynaPin]")
+{
+    const Polygon landing{{0, 0}, {1000, 0}, {1000, 1000}, {0, 1000}};
+    std::vector<DynaPin::ProjectionEvent> events{
+        {DynaPin::ProjectionEventType::Contact, 30., {landing}, {}, false},
+        {DynaPin::ProjectionEventType::PinSurface, 20., {landing}, {0, 2}, true},
+        {DynaPin::ProjectionEventType::PinSurface, 10., {landing}, {0, 1}, false},
+    };
+
+    const DynaPin::ProjectionSelection result = DynaPin::select_from_projection(std::move(events));
+    REQUIRE(result.rejected_collisions.size() == 1);
+    CHECK(result.rejected_collisions.front() == DynaPin::Pin{0, 2});
+    REQUIRE(result.selected.size() == 1);
+    CHECK(result.selected.front() == DynaPin::Pin{0, 1});
+}
+
+TEST_CASE("DynaPin selection ignores pin surfaces outside the support projection", "[DynaPin]")
+{
+    const Polygon support{{0, 0}, {1000, 0}, {1000, 1000}, {0, 1000}};
+    const Polygon remote{{2000, 0}, {3000, 0}, {3000, 1000}, {2000, 1000}};
+    const DynaPin::ProjectionSelection result = DynaPin::select_from_projection({
+        {DynaPin::ProjectionEventType::Contact, 30., {support}, {}, false},
+        {DynaPin::ProjectionEventType::PinSurface, 20., {remote}, {0, 2}, false},
+    });
+
+    CHECK(result.selected.empty());
+    CHECK(result.rejected_collisions.empty());
+}
+
 TEST_CASE("DynaPin pull comments create events", "[DynaPinPreview]")
 {
     const std::string    body   = "G1 X0\n"
@@ -109,7 +189,8 @@ TEST_CASE("DynaPin pull comments create events", "[DynaPinPreview]")
                                   "G1 X10\n"
                                   "; END_DYNAPIN_PULL\n";
     const std::string    path   = write_gcode(body);
-    GCodeProcessorResult result = make_result(path);
+    GCodeProcessorResult result;
+    initialize_result(result, path);
     result.lines_ends           = line_ends(body);
 
     DynaPinPreviewState state;
@@ -134,7 +215,8 @@ TEST_CASE("DynaPin preview state applies only matching selections", "[DynaPinPre
                                   "G1 X10\n"
                                   "; END_DYNAPIN_PULL\n";
     const std::string    path   = write_gcode(body);
-    GCodeProcessorResult result = make_result(path);
+    GCodeProcessorResult result;
+    initialize_result(result, path);
     result.lines_ends           = line_ends(body);
 
     DynaPinPreviewState state;
@@ -159,7 +241,8 @@ TEST_CASE("DynaPin incomplete blocks are ignored", "[DynaPinPreview]")
                                   "G1 X10\n"
                                   "; DYNAPIN_PULL_MOVE\n";
     const std::string    path   = write_gcode(body);
-    GCodeProcessorResult result = make_result(path);
+    GCodeProcessorResult result;
+    initialize_result(result, path);
     result.lines_ends           = line_ends(body);
 
     DynaPinPreviewState state;

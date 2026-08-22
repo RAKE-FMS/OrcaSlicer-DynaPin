@@ -6,6 +6,7 @@
 #include "Fill/FillLightning.hpp"
 
 #include "BoundingBox.hpp"
+#include "DynaPin.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include "Flow.hpp"
 #include "Point.hpp"
@@ -943,6 +944,9 @@ public:
     void                auto_assign_extruders(ModelObject* model_object) const;
 
     const PrintConfig&          config() const { return m_config; }
+    const DynaPin::SelectionResult& dynapin_selection() const { return m_dynapin_selection; }
+    void set_dynapin_selection(DynaPin::SelectionResult selection) { m_dynapin_selection = std::move(selection); }
+    void update_dynapin_selection();
     const PrintObjectConfig&    default_object_config() const { return m_default_object_config; }
     const PrintRegionConfig& default_region_config() const { return m_default_region_config; }
     ConstPrintObjectPtrsAdaptor objects() const { return ConstPrintObjectPtrsAdaptor(&m_objects); }
@@ -1127,6 +1131,7 @@ private:
     Polygons            first_layer_islands() const;
 
     PrintConfig                             m_config;
+    DynaPin::SelectionResult                m_dynapin_selection;
     PrintObjectConfig                       m_default_object_config;
     PrintRegionConfig                       m_default_region_config;
     PrintObjectPtrs                         m_objects;
