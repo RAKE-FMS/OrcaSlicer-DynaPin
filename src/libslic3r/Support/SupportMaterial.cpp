@@ -71,6 +71,59 @@ namespace Slic3r {
 
 static constexpr bool support_with_sheath = false;
 
+// Add the portion of the first real support layer above each selected pin top to the
+// regular interface layers.  The pin top is a virtual support surface, not a printable
+// support layer, so this must not create a BottomContact at surface.print_z.
+static void add_dynapin_interface_layers(
+    const std::vector<DynaPin::VirtualSupportSurface> &dynapin_surfaces,
+    SupportGeneratorLayersPtr                         &intermediate_layers,
+    SupportGeneratorLayersPtr                         &interface_layers,
+    SupportGeneratorLayerStorage                      &layer_storage)
+{
+    for (const DynaPin::VirtualSupportSurface &surface : dynapin_surfaces) {
+        for (SupportGeneratorLayer *intermediate_layer : intermediate_layers) {
+            if (intermediate_layer == nullptr || intermediate_layer->polygons.empty() ||
+                intermediate_layer->bottom_print_z() <= surface.print_z + EPSILON)
+                continue;
+
+            Polygons pin_interface = intersection(intermediate_layer->polygons, { surface.poly });
+            if (pin_interface.empty())
+                continue;
+
+            // The normal interface generator may already have produced an interface at
+            // this Z.  Merge into it so the support toolpath generator sees one layer.
+            SupportGeneratorLayer *interface_layer = nullptr;
+            for (SupportGeneratorLayer *candidate : interface_layers) {
+                if (candidate != nullptr && std::abs(candidate->print_z - intermediate_layer->print_z) < EPSILON) {
+                    interface_layer = candidate;
+                    break;
+                }
+            }
+
+            // Do not print the same material once more as base support.
+            intermediate_layer->polygons = diff(std::move(intermediate_layer->polygons), pin_interface);
+
+            if (interface_layer != nullptr)
+                interface_layer->polygons = union_(std::move(interface_layer->polygons), std::move(pin_interface));
+            else {
+                SupportGeneratorLayer &layer_new = layer_storage.allocate_unguarded(SupporLayerType::BottomInterface);
+                layer_new.print_z  = intermediate_layer->print_z;
+                layer_new.bottom_z = intermediate_layer->bottom_z;
+                layer_new.height   = intermediate_layer->height;
+                layer_new.bridging = intermediate_layer->bridging;
+                layer_new.polygons = std::move(pin_interface);
+                interface_layers.push_back(&layer_new);
+            }
+            break;
+        }
+    }
+
+    std::sort(interface_layers.begin(), interface_layers.end(),
+              [](const SupportGeneratorLayer *lhs, const SupportGeneratorLayer *rhs) {
+                  return lhs->print_z < rhs->print_z;
+              });
+}
+
 #ifdef SLIC3R_DEBUG
 const char* support_surface_type_to_color_name(const SupporLayerType surface_type)
 {
@@ -844,54 +897,6 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
                 union_ex((*it)->polygons));
 #endif /* SLIC3R_DEBUG */
 
-    // DynaPin: ピン上面に合成的な BottomContact レイヤーを注入する。
-    // これにより generate_interface_layers() がピン直上に密なインターフェース層を
-    // 生成するようになり、サポートがピンに着地する部分の表面品質が向上する。
-    if (!dynapin_surfaces.empty()) {
-        // 生成された全サポートレイヤー（top contacts + intermediate）を収集し、
-        // 各ピンの XY 領域に pin_top_z で重なるサポートポリゴンを見つける。
-        // ピン上面の print_z のすぐ上にある最初の intermediate/top-contact レイヤーを探す。
-        for (const DynaPin::VirtualSupportSurface &surface : dynapin_surfaces) {
-            // ピン上面のすぐ上のレイヤーにあるサポートポリゴンを見つける。
-            Polygons support_at_pin_top;
-            for (const SupportGeneratorLayer *layer : intermediate_layers) {
-                if (layer && layer->print_z > surface.print_z + EPSILON) {
-                    Polygons overlap = intersection(layer->polygons, {surface.poly});
-                    if (!overlap.empty()) {
-                        support_at_pin_top = std::move(overlap);
-                        break;
-                    }
-                }
-            }
-            if (support_at_pin_top.empty()) {
-                // ピン上面のすぐ上のレイヤーが intermediate ではなく
-                // top contact である可能性もあるため、top_contacts も確認する。
-                for (const SupportGeneratorLayer *layer : top_contacts) {
-                    if (layer && layer->print_z > surface.print_z + EPSILON) {
-                        Polygons overlap = intersection(layer->polygons, {surface.poly});
-                        if (!overlap.empty()) {
-                            support_at_pin_top = std::move(overlap);
-                            break;
-                        }
-                    }
-                }
-            }
-            if (!support_at_pin_top.empty()) {
-                SupportGeneratorLayer &pin_bottom = layer_storage.allocate_unguarded(SupporLayerType::BottomContact);
-                pin_bottom.print_z  = surface.print_z;
-                pin_bottom.height   = object.layers().front()->height;  // 妥当なデフォルト値として第1層の高さを使用
-                pin_bottom.bottom_z = surface.print_z - pin_bottom.height;
-                pin_bottom.polygons = std::move(support_at_pin_top);
-                bottom_contacts.push_back(&pin_bottom);
-                BOOST_LOG_TRIVIAL(info) << "DynaPin: injected BottomContact at z=" << surface.print_z
-                                        << " area=" << (area(pin_bottom.polygons) * SCALING_FACTOR * SCALING_FACTOR) << "mm2";
-            }
-        }
-        // 注入後、print_z で bottom_contacts を再ソートする。
-        std::sort(bottom_contacts.begin(), bottom_contacts.end(),
-                  [](const SupportGeneratorLayer *a, const SupportGeneratorLayer *b) { return a->print_z < b->print_z; });
-    }
-
     BOOST_LOG_TRIVIAL(info) << "Support generator - Trimming top contacts by bottom contacts";
 
     // Because the top and bottom contacts are thick slabs, they may overlap causing over extrusion
@@ -907,6 +912,8 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     // and base interface layers (for soluble interface / non souble base only)
     SupportGeneratorLayersPtr empty_layers;
     auto [interface_layers, base_interface_layers] = generate_interface_layers(*m_object_config, m_support_params, bottom_contacts, top_contacts, empty_layers, empty_layers, intermediate_layers, layer_storage);
+    if (m_support_params.has_interfaces())
+        add_dynapin_interface_layers(dynapin_surfaces, intermediate_layers, interface_layers, layer_storage);
 
     BOOST_LOG_TRIVIAL(info) << "Support generator - Creating raft";
 
@@ -941,7 +948,7 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     // レイヤーごとのオーバーハング/コンタクトブロッカーは、領域内で「検出」された
     // サポートのみを停止させるが、領域より上にあるオーバーハングから降りてくる
     // サポート柱はそのまま領域を通過してしまう。
-    // そのため、print_z がブロッカー領域内に含まれるすべてのサポートレイヤーをトリムし、
+    // そのため、実際のレイヤー範囲がブロッカー領域と交差するすべてのサポートレイヤーをトリムし、
     // その領域ではプリントされるサポート材の代わりにピンが支えるようにする。
     if (dynapin_debug_stage >= 2 && !dynapin_blockers.empty()) {
 
@@ -958,7 +965,7 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
                     continue;
                 Polygons blockers;
                 for (const DynaPin::LocalBlocker &b : dynapin_blockers)
-                    if (layer->print_z + EPSILON >= b.z_min && layer->print_z - EPSILON <= b.z_max)
+                    if (layer->bottom_print_z() <= b.z_max + EPSILON && layer->print_z + EPSILON >= b.z_min)
                         blockers.push_back(b.poly);
                 if (!blockers.empty()) {
                     double a0 = 0.; for (const Polygon &p : layer->polygons) a0 += p.area();
@@ -3524,7 +3531,7 @@ void PrintObjectSupportMaterial::generate_base_layers(
             // 異なる高さにある複数のピンは独立して処理される：各ピンは
             // 自身の上面の高さ以下のレイヤーのみをトリムする。
             for (const DynaPin::VirtualSupportSurface& surface : dynapin_surfaces) {
-                if (layer_intermediate.print_z <= surface.print_z + EPSILON)
+                if (layer_intermediate.bottom_print_z() <= surface.print_z + EPSILON)
                     polygons_trimming.push_back(surface.poly);
             }
 #ifdef SLIC3R_DEBUG

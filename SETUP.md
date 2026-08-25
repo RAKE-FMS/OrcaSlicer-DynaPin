@@ -39,7 +39,7 @@ brew install texinfo
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target OrcaSlicer --config Release --parallel
-cmake --build build --target OrcaSlicer --config Release --parallel 4
+cmake --build build/arm64 --target OrcaSlicer --config Release --parallel 4
 ```
 - Windows (Visual Studio) では `--config Release` が必要な場合があります。
 - ビルドターゲット名は環境によって `OrcaSlicer` となります。

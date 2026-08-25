@@ -1,12 +1,145 @@
 #include <catch2/catch_all.hpp>
 
+#include "libslic3r/DynaPin.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/utils.hpp"
 
 #include "test_data.hpp" // get access to init_print, etc
 
+#include <boost/filesystem.hpp>
+
+#include <cmath>
+#include <string>
+
 using namespace Slic3r::Test;
 using namespace Slic3r;
+
+namespace {
+
+class ResourcesDirGuard
+{
+public:
+    explicit ResourcesDirGuard(const std::string &path) : m_previous(resources_dir()) { set_resources_dir(path); }
+    ~ResourcesDirGuard() { set_resources_dir(m_previous); }
+
+private:
+    std::string m_previous;
+};
+
+class DataDirGuard
+{
+public:
+    DataDirGuard() : m_previous(data_dir()), m_path(boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("orcaslicer-dynapin-test-%%%%%%"))
+    {
+        boost::filesystem::create_directories(m_path / "SVG");
+        set_data_dir(m_path.string());
+    }
+
+    ~DataDirGuard()
+    {
+        set_data_dir(m_previous);
+        boost::filesystem::remove_all(m_path);
+    }
+
+private:
+    std::string m_previous;
+    boost::filesystem::path m_path;
+};
+
+std::string test_resources_dir()
+{
+    return (boost::filesystem::path(TEST_DATA_DIR).parent_path().parent_path() / "resources").string();
+}
+
+bool support_interface_at_z(const PrintObject &object, double target_z)
+{
+    for (const SupportLayer *layer : object.support_layers()) {
+        if (std::abs(layer->print_z - target_z) < 1e-4) {
+            for (const ExtrusionEntity *entity : layer->support_fills.flatten().entities)
+                if (entity->role() == erSupportMaterialInterface)
+                    return true;
+            return false;
+        }
+    }
+    return false;
+}
+
+bool support_interface_above_z(const PrintObject &object, double lower_z)
+{
+    for (const SupportLayer *layer : object.support_layers()) {
+        if (layer->print_z <= lower_z + 1e-4)
+            continue;
+        for (const ExtrusionEntity *entity : layer->support_fills.flatten().entities)
+            if (entity->role() == erSupportMaterialInterface)
+                return true;
+    }
+    return false;
+}
+
+bool support_exists_at_z(const PrintObject &object, double target_z)
+{
+    for (const SupportLayer *layer : object.support_layers())
+        if (std::abs(layer->print_z - target_z) < 1e-4)
+            return !layer->support_fills.empty();
+    return false;
+}
+
+} // namespace
+
+SCENARIO("SupportMaterial: DynaPin keeps normal interfaces without a synthetic pin contact", "[SupportMaterial][DynaPin]")
+{
+    ResourcesDirGuard resources_guard(test_resources_dir());
+    DataDirGuard      data_dir_guard;
+
+    TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
+    TriangleMesh floating_slab = Test::mesh(TestMesh::cube_20x20x20);
+    floating_slab.scale(Vec3f(10.f, 5.f, 0.1f));
+    floating_slab.translate(0.f, 0.f, 50.f);
+    mesh.merge(floating_slab);
+
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(std::move(mesh));
+    object->add_instance();
+    object->ensure_on_bed();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_support", true},
+        {"enable_dynapin_support_optimization", true},
+        {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+        {"dynapin_selected_pins", "0,5"},
+        {"dynapin_debug_stage", 2},
+        {"support_type", "normal(auto)"},
+        {"support_interface_top_layers", 2},
+        {"support_interface_bottom_layers", 2},
+    });
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+
+    print.process();
+    const PrintObject &print_object = *print.objects().front();
+
+    THEN("No synthetic interface is printed at the pin top") {
+        CHECK_FALSE(support_interface_at_z(print_object, 43.15));
+    }
+    THEN("The regular support interface remains above the pin top") {
+        CHECK(support_interface_above_z(print_object, 43.15));
+    }
+
+    THEN("The first real support layer above the pin top has a regular interface") {
+        CHECK(support_interface_at_z(print_object, 43.5));
+    }
+
+    THEN("The layer spanning the pin top is still generated") {
+        CHECK(support_exists_at_z(print_object, 43.2));
+    }
+}
 
 TEST_CASE("SupportMaterial: Three raft layers created", "[SupportMaterial][.]")
 {
