@@ -58,8 +58,8 @@ TEST_CASE("DynaPin model names are parsed", "[DynaPinPreview]")
 TEST_CASE("DynaPin pull G-code comments match preview contract", "[DynaPin]")
 {
     DynaPin::Config config;
-    config.origin_y            = 10.;
-    config.origin_z            = 20.;
+    config.pull_origin_y       = 10.;
+    config.pull_origin_z       = 20.;
     config.row_pitch_y         = 1.;
     config.col_pitch_z         = 2.;
     config.pull_gcode.x_hook   = 100.;
@@ -78,13 +78,13 @@ TEST_CASE("DynaPin pull G-code comments match preview contract", "[DynaPin]")
     CHECK(gcode.find("G1 X100.0000 Z30.0000") != std::string::npos);
 }
 
-TEST_CASE("DynaPin physical and pull coordinates are independent", "[DynaPin]")
+TEST_CASE("DynaPin support and pull coordinates are independent", "[DynaPin]")
 {
     DynaPin::Config config;
-    config.origin_y            = 14.;
-    config.origin_z            = 5.;
-    config.physical_origin_y   = 18.;
-    config.physical_origin_z   = 4.;
+    config.pull_origin_y       = 14.;
+    config.pull_origin_z       = 5.;
+    config.support_origin_y    = 18.;
+    config.support_origin_z    = 4.;
     config.row_pitch_y         = 12.4;
     config.col_pitch_z         = 7.4;
     config.pull_gcode.x_hook   = 160.;
@@ -102,13 +102,11 @@ TEST_CASE("DynaPin physical and pull coordinates are independent", "[DynaPin]")
     CHECK(gcode.find("G1 X165.0000") != std::string::npos);
 }
 
-TEST_CASE("DynaPin candidate grid starts at the configured origin", "[DynaPin]")
+TEST_CASE("DynaPin candidate grid starts at zero", "[DynaPin]")
 {
     DynaPin::Config config;
-    config.origin_row = 0;
-    config.origin_col = 0;
-    config.row_count  = 10;
-    config.col_count  = 14;
+    config.row_count = 10;
+    config.col_count = 14;
 
     const std::vector<DynaPin::Pin> pins = DynaPin::candidate_pins(config);
     REQUIRE(pins.size() == 140);
@@ -125,8 +123,8 @@ TEST_CASE("DynaPin candidate grid starts at the configured origin", "[DynaPin]")
 TEST_CASE("DynaPin pins are sorted by physical height and deduplicated", "[DynaPin]")
 {
     DynaPin::Config config;
-    config.origin_z   = 5.;
-    config.col_pitch_z = 7.4;
+    config.support_origin_z = 5.;
+    config.col_pitch_z      = 7.4;
     std::vector<DynaPin::Pin> pins{{2, 3}, {1, 3}, {2, 3}, {0, 5}};
 
     DynaPin::sort_unique_pins(pins, config);

@@ -3,7 +3,6 @@
 
 #include "ExPolygon.hpp"
 
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -75,21 +74,19 @@ struct PullMoveConfig
 
 struct Config
 {
-    int                   origin_row = 0;
-    int                   origin_col = 0;
-    int                   row_count  = 0;
-    int                   col_count  = 0;
-    double                origin_y   = 0.;
-    double                origin_z   = 0.;
-    std::optional<double> physical_origin_y;
-    std::optional<double> physical_origin_z;
-    double                row_pitch_y      = 0.;
-    double                col_pitch_z      = 0.;
-    double                blocker_width_y = 0.;
-    double                blocker_z_min   = 0.;
-    double                blocker_z_max   = 0.;
-    double                pin_z_height    = 0.;
-    PullMoveConfig        pull_gcode;
+    int            row_count        = 0;
+    int            col_count        = 0;
+    double         pull_origin_y    = 0.;
+    double         pull_origin_z    = 0.;
+    double         support_origin_y = 0.;
+    double         support_origin_z = 0.;
+    double         row_pitch_y      = 0.;
+    double         col_pitch_z      = 0.;
+    double         blocker_width_y  = 0.;
+    double         blocker_z_min    = 0.;
+    double         blocker_z_max    = 0.;
+    double         pin_z_height     = 0.;
+    PullMoveConfig pull_gcode;
 };
 
 // Axis-aligned 3D region (machine/world coordinates, mm) in which support

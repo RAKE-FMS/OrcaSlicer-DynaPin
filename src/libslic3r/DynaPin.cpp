@@ -52,22 +52,22 @@ static int int_or(const nlohmann::json& j, const char* key, int fallback)
     return fallback;
 }
 
-// The physical blocker/pin landing region is shifted along Y from the grid's
-// configured reference coordinate. Pull G-code keeps its existing coordinate
-// calculation and is intentionally independent of this support geometry.
+// The physical blocker/pin landing region is shifted along Y from the support
+// origin. Pull G-code keeps its own origin and is intentionally independent of
+// this support geometry.
 static constexpr double support_block_y_offset = -7.2;
 
 double pin_y(const Config& config, const Pin& pin)
-{ return config.physical_origin_y.value_or(config.origin_y) + double(pin.row - config.origin_row) * config.row_pitch_y; }
+{ return config.support_origin_y + double(pin.row) * config.row_pitch_y; }
 
 double pin_z(const Config& config, const Pin& pin)
-{ return config.physical_origin_z.value_or(config.origin_z) + double(pin.col - config.origin_col) * config.col_pitch_z; }
+{ return config.support_origin_z + double(pin.col) * config.col_pitch_z; }
 
 static double pull_y(const Config& config, const Pin& pin)
-{ return config.origin_y + double(pin.row - config.origin_row) * config.row_pitch_y + config.pull_gcode.y_offset; }
+{ return config.pull_origin_y + double(pin.row) * config.row_pitch_y + config.pull_gcode.y_offset; }
 
 static double pull_z(const Config& config, const Pin& pin)
-{ return config.origin_z + double(pin.col - config.origin_col) * config.col_pitch_z; }
+{ return config.pull_origin_z + double(pin.col) * config.col_pitch_z; }
 
 std::vector<Pin> parse_pin_list(const std::string& pins)
 {
@@ -105,8 +105,8 @@ std::vector<Pin> candidate_pins(const Config& config)
     if (config.row_count <= 0 || config.col_count <= 0)
         return out;
     out.reserve(size_t(config.row_count) * size_t(config.col_count));
-    for (int row = config.origin_row; row < config.origin_row + config.row_count; ++row)
-        for (int col = config.origin_col; col < config.origin_col + config.col_count; ++col)
+    for (int row = 0; row < config.row_count; ++row)
+        for (int col = 0; col < config.col_count; ++col)
             out.push_back({row, col});
     return out;
 }
@@ -255,30 +255,20 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
         return false;
     }
 
-    const nlohmann::json grid   = j.contains("grid") && j["grid"].is_object() ? j["grid"] : nlohmann::json::object();
-    config.origin_row           = int_or(grid, "origin_row", config.origin_row);
-    config.origin_col           = int_or(grid, "origin_col", config.origin_col);
-    config.row_count            = int_or(grid, "row_count", config.row_count);
-    config.col_count            = int_or(grid, "col_count", config.col_count);
-    config.origin_y             = number_or(grid, "origin_y", config.origin_y);
-    config.origin_z             = number_or(grid, "origin_z", config.origin_z);
-    config.row_pitch_y          = number_or(grid, "row_pitch_y", config.row_pitch_y);
-    config.col_pitch_z          = number_or(grid, "col_pitch_z", config.col_pitch_z);
-    const nlohmann::json origin = grid.contains("origin") && grid["origin"].is_object() ? grid["origin"] : nlohmann::json::object();
-    config.origin_row           = int_or(origin, "row", config.origin_row);
-    config.origin_col           = int_or(origin, "col", config.origin_col);
-    config.origin_y             = number_or(origin, "y", config.origin_y);
-    config.origin_z             = number_or(origin, "z", config.origin_z);
-    const nlohmann::json pitch  = grid.contains("pitch") && grid["pitch"].is_object() ? grid["pitch"] : nlohmann::json::object();
-    config.row_pitch_y          = number_or(pitch, "row_y", config.row_pitch_y);
-    config.col_pitch_z          = number_or(pitch, "col_z", config.col_pitch_z);
-    const nlohmann::json physical_origin = grid.contains("physical_origin") && grid["physical_origin"].is_object() ?
-                                               grid["physical_origin"] :
-                                               nlohmann::json::object();
-    if (physical_origin.contains("y"))
-        config.physical_origin_y = number_or(physical_origin, "y", config.origin_y);
-    if (physical_origin.contains("z"))
-        config.physical_origin_z = number_or(physical_origin, "z", config.origin_z);
+    const nlohmann::json grid           = j.contains("grid") && j["grid"].is_object() ? j["grid"] : nlohmann::json::object();
+    config.row_count                    = int_or(grid, "row_count", config.row_count);
+    config.col_count                    = int_or(grid, "col_count", config.col_count);
+    const nlohmann::json pull_origin    = grid.contains("pull_origin") && grid["pull_origin"].is_object() ? grid["pull_origin"] :
+                                                                                                            nlohmann::json::object();
+    config.pull_origin_y                = number_or(pull_origin, "y", config.pull_origin_y);
+    config.pull_origin_z                = number_or(pull_origin, "z", config.pull_origin_z);
+    const nlohmann::json support_origin = grid.contains("support_origin") && grid["support_origin"].is_object() ? grid["support_origin"] :
+                                                                                                                  nlohmann::json::object();
+    config.support_origin_y             = number_or(support_origin, "y", config.support_origin_y);
+    config.support_origin_z             = number_or(support_origin, "z", config.support_origin_z);
+    const nlohmann::json pitch          = grid.contains("pitch") && grid["pitch"].is_object() ? grid["pitch"] : nlohmann::json::object();
+    config.row_pitch_y                  = number_or(pitch, "row_y", config.row_pitch_y);
+    config.col_pitch_z                  = number_or(pitch, "col_z", config.col_pitch_z);
 
     const nlohmann::json exclusion = j.contains("support_exclusion") && j["support_exclusion"].is_object() ? j["support_exclusion"] :
                                                                                                              nlohmann::json::object();
@@ -320,17 +310,15 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
     }
 
     BOOST_LOG_TRIVIAL(debug) << "[DynaPin] config loaded: requested='" << config_path << "', resolved='" << resolved.string()
-                             << "', grid_origin=(" << config.origin_row << "," << config.origin_col << ")"
-                             << ", grid_size=" << config.row_count << "x" << config.col_count
-                             << ", origin_mm=(" << config.origin_y << "," << config.origin_z << ")"
-                             << ", physical_origin_mm=(" << config.physical_origin_y.value_or(config.origin_y) << ","
-                             << config.physical_origin_z.value_or(config.origin_z) << ")"
+                             << "', grid_size=" << config.row_count << "x" << config.col_count << ", pull_origin_mm=("
+                             << config.pull_origin_y << "," << config.pull_origin_z << ")"
+                             << ", support_origin_mm=(" << config.support_origin_y << "," << config.support_origin_z << ")"
                              << ", pitch_mm=(" << config.row_pitch_y << "," << config.col_pitch_z << ")"
                              << ", exclusion_x_mm=[" << config.pull_gcode.x_front << "," << *max_x_bed << "]"
-                             << ", exclusion_y_center_mm=" << config.physical_origin_y.value_or(config.origin_y) + support_block_y_offset
-                             << ", exclusion_width_y_mm=" << config.blocker_width_y
-                             << ", z_range_mm=(" << config.physical_origin_z.value_or(config.origin_z) - config.pin_z_height
-                             << "," << config.physical_origin_z.value_or(config.origin_z) + config.blocker_z_max << ")";
+                             << ", exclusion_y_center_mm=" << config.support_origin_y + support_block_y_offset
+                             << ", exclusion_width_y_mm=" << config.blocker_width_y << ", z_range_mm=("
+                             << config.support_origin_z - config.pin_z_height << "," << config.support_origin_z + config.blocker_z_max
+                             << ")";
     return true;
 }
 

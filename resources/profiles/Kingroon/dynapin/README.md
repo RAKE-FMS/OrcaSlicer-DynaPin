@@ -11,8 +11,8 @@ DynaPinはプリンタのY軸側面に取り付けたピンアレイを使って
 Y軸 (プリンタ手前 ←→ 奥)
   ↑
   │  [ピンアレイ]  row=0  row=1  row=2 ...
-  │              ○      ○      ○       ← col=0  (Z=origin_z)
-  │              ○      ○      ○       ← col=1  (Z=origin_z + col_pitch_z)
+  │              ○      ○      ○       ← col=0  (Z=support_origin.z)
+  │              ○      ○      ○       ← col=1  (Z=support_origin.z + col_pitch_z)
   │              ○      ○      ○       ← col=2
   │
   └─────────────────────────────────── Z軸 (印刷高さ)
@@ -31,15 +31,15 @@ x_hook  x_latch             x_front
   ↓       ↓                    ↓
 ─────── ───────         ─────────────── (X軸)
 
-1. G1 Y(pin_y + y_offset + approach_y_offset)       ← ピンをよけてY接近（早送り）
-2. G1 X(x_hook) Z(pin_z)                            ← XZ同時移動でフック高さへ（早送り）
+1. G1 Y(pull_y + approach_y_offset)                 ← ピンをよけてY接近（早送り）
+2. G1 X(x_hook) Z(pull_z)                           ← XZ同時移動でフック高さへ（早送り）
 3. G1 X(x_latch)                                    ← ラッチをかける（低速）
-4. G1 Y(pin_y + y_offset)                           ← Yをピンに当てる（低速）
+4. G1 Y(pull_y)                                      ← Yをピンに当てる（低速）
 ── ; DYNAPIN_PULL_MOVE ──
 5. G1 X(x_front)                                    ← 前面まで引き出す（高速）
-6. G1 X(x_front + disengage_x_offset) Y(pin_y + y_offset + approach_y_offset)
+6. G1 X(x_front + disengage_x_offset) Y(pull_y + approach_y_offset)
                                                     ← XY同時移動でピンを外す（低速）
-7. G1 Z(pin_z + z_offset)                           ← Z退避（低速）
+7. G1 Z(pull_z + z_offset)                           ← Z退避（低速）
 ```
 
 ### サポート材の除外領域
@@ -85,10 +85,12 @@ Z
 
 ```json
 "grid": {
-  "origin": {
-    "row": 0,
-    "col": 0,
-    "y": 63.6,
+  "pull_origin": {
+    "y": 14.0,
+    "z": 5.0
+  },
+  "support_origin": {
+    "y": 18.0,
     "z": 4.0
   },
   "row_count": 10,
@@ -102,19 +104,27 @@ Z
 
 | フィールド | 型 | 必須 | 説明 |
 |---|---|---|---|
-| `origin.row` | int | ○ | 原点ピンの行番号 |
-| `origin.col` | int | ○ | 原点ピンの列番号 |
-| `origin.y` | number | ○ | 原点ピンのY座標 [mm] |
-| `origin.z` | number | ○ | 原点ピンのZ座標（印刷高さ）[mm] |
-| `row_count` | int | ○ | `origin.row` から正方向に存在するピン行数 |
-| `col_count` | int | ○ | `origin.col` から正方向に存在するピン列数 |
+| `pull_origin.y` | number | ○ | 引き抜きG-codeのY基準座標 [mm] |
+| `pull_origin.z` | number | ○ | 引き抜きG-codeのZ基準座標 [mm] |
+| `support_origin.y` | number | ○ | 実ピン配列・サポート形状のY基準座標 [mm] |
+| `support_origin.z` | number | ○ | 実ピン配列・サポート形状のZ基準座標 [mm] |
+| `row_count` | int | ○ | `row=0` から存在するピン行数 |
+| `col_count` | int | ○ | `col=0` から存在するピン列数 |
 | `pitch.row_y` | number | ○ | 行間ピッチ（Y方向）[mm] |
 | `pitch.col_z` | number | ○ | 列間ピッチ（Z方向）[mm] |
 
-ピン `(row, col)` の実座標：
+ピン `(row, col)` の座標は、論理的な行・列ともに0始まりです。
+
+引き抜きG-codeの座標：
 ```
-pin_y = origin.y + (row - origin.row) × pitch.row_y
-pin_z = origin.z + (col - origin.col) × pitch.col_z
+pull_y = pull_origin.y + row × pitch.row_y + pull_gcode.y_offset
+pull_z = pull_origin.z + col × pitch.col_z
+```
+
+実ピン位置とサポート形状の基準座標：
+```
+support_pin_y = support_origin.y + row × pitch.row_y
+support_pin_z = support_origin.z + col × pitch.col_z
 ```
 
 `dynapin_selected_pins` が空の場合は、この行数・列数で列挙したピンを自動選択候補として使用します。
@@ -201,11 +211,13 @@ X範囲は `pull_gcode.x_front` とプリンタの `printable_area` から自動
 
 ---
 
-## 設定の移行
+## 旧設定からの変更点
 
 `center_x`、`width_x`、`x_min`、`x_max` は使用しません。X範囲は必ず `pull_gcode.x_front..bed_max_x` になります。
 
-X以外の旧フィールドには、次の読み替えが残っています。
+`grid.origin`、`grid.physical_origin`、`origin_row`、`origin_col`、`origin_y`、`origin_z` は読み込まれません。新しい設定では必ず `pull_origin` と `support_origin` を使用してください。
+
+以下の既存エイリアスは、originの変更とは別に引き続き使用できます。
 
 | 旧フィールド | 現在の解釈 |
 |---|---|
