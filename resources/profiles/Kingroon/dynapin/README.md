@@ -53,16 +53,17 @@ Z
 │  ┌──────────────────────┐
 │  │   サポート除外領域    │
 │  │                      │
-│  │  x_front ← ─ ─ → center_x ± width_x/2
+│  │  x_front ─────────────────── bed_max_x
 │  │                      │
 │  └──────────────────────┘
 │  z_min = max(0, pin_z - pin_z_height)
 │
 └──────────────────────────── X
-   x_front          center_x
+   x_front          bed_max_x
 ```
 
-- **X範囲**: `x_front` ～ `center_x + width_x/2`（引き出し経路の全域）
+- **X範囲**: `x_front` ～ `bed_max_x`（引き出し経路およびサポートブロック全域）
+  - `bed_max_x` はプリンタの `printable_area` に記載された最大X座標から自動取得します。KP3Sでは `x_front=20`、`bed_max_x=180` なので `20..180` です。
 - **Y範囲**: `pin_y ± width_y/2`（ピン周囲の幅）
 - **Z範囲**: `pin_z - pin_z_height`（ピン下面）から `pin_z + z_above`（ピン上面のクリアランス）まで。
   - `pin_z_height`（ピンの厚さ）が設定されていない、または0の場合は、底面（Z=0）から除外されます。これにより、ピンより下の安全な領域にはサポート材が正しく生成されます。
@@ -71,8 +72,8 @@ Z
 
 ピンの上面（`pin_z + z_above`）は「仮想ビルドプレート」として機能します。ピンの上にあるモデルのオーバーハングから生成されたサポート材は、ベッド（Z=0）まで降りる代わりにピンの上面で「着地」します。
 
-- **仮想サポート面のXY範囲**: ピンが実際に配置されているX座標（`center_x - width_x/2` ～ `center_x + width_x/2`）の範囲のみに限定されます。
-- **引き出し経路の真上**: 引き出し経路（`x_front` から `center_x - width_x/2` まで）の真上にあるサポート材は、この仮想サポート面で止まることなくベッド（または下のモデル表面）まで生成されます。これにより、引き出し経路の真上にあるサポートが宙に浮いてしまう問題を防ぎます。
+- **仮想サポート面のXY範囲**: サポートブロックと同じ `x_front..bed_max_x`、および `pin_y ± width_y/2` です。
+- **引き出し経路の真上**: 引き出し経路全体を仮想支持面として扱い、上のサポート材がピン上面で着地できるようにします。
 
 ---
 
@@ -126,8 +127,6 @@ pin_z = origin.z + (col - origin.col) × pitch.col_z
 
 ```json
 "support_exclusion": {
-  "center_x": 110,
-  "width_x": 20,
   "width_y": 8,
   "z_above": 4,
   "pin_z_height": 5
@@ -136,23 +135,11 @@ pin_z = origin.z + (col - origin.col) × pitch.col_z
 
 | フィールド | 型 | 必須 | 説明 |
 |---|---|---|---|
-| `center_x` | number | △ | ピン本体のX中心座標 [mm]。`x_min`/`x_max` で代替可 |
-| `width_x` | number | △ | ピン本体のX方向幅 [mm]。`x_min`/`x_max` で代替可 |
 | `width_y` | number | ○ | ピン周囲のY方向幅 [mm] |
 | `z_above` | number | – | ピン位置より上へ除外を延ばす量 [mm]（省略時 0） |
 | `pin_z_height` | number | – | ピン本体の厚さ（Z高さ）[mm]。省略された場合は 0 となり、Z=0（ベッド面）から除外されます。 |
 
-**代替記法**（`center_x`/`width_x` の代わりに使用可）：
-
-```json
-"support_exclusion": {
-  "x_min": 100,
-  "x_max": 120,
-  ...
-}
-```
-
-> **注意**: `x_min`/`x_max` が両方指定されている場合、`center_x`/`width_x` より優先されます。
+X範囲は `pull_gcode.x_front` とプリンタの `printable_area` から自動計算されるため、X位置やX幅をここへ記述しません。
 
 ---
 
@@ -214,20 +201,20 @@ pin_z = origin.z + (col - origin.col) × pitch.col_z
 
 ---
 
-## 後方互換性
+## 設定の移行
 
-旧フォーマットのフィールドも読み込み可能です。
+`center_x`、`width_x`、`x_min`、`x_max` は使用しません。X範囲は必ず `pull_gcode.x_front..bed_max_x` になります。
+
+X以外の旧フィールドには、次の読み替えが残っています。
 
 | 旧フィールド | 現在の解釈 |
 |---|---|
 | `support_exclusion.z_range` | `z_above = z_range / 2` として扱う（`z_above` が未指定の場合のみ） |
-| `support_exclusion.x_center` | `center_x` の代替名 |
-| `support_exclusion.x_width` | `width_x` の代替名 |
 | `support_exclusion.y_width` | `width_y` の代替名 |
 | `pull_gcode.pull_feedrate` | `feed_rate` の代替名 |
 | `pull_gcode.travel_feedrate` | `fast_feed_rate` の代替名 |
 
-新フィールドを省略した場合はデフォルト値が使われます（後方互換あり）。
+旧形式のJSONを使う場合は、`support_exclusion` からX関連フィールドを削除し、プリンタの `printable_area` が正しく設定されていることを確認してください。
 
 | フィールド | 省略時のデフォルト |
 |---|---|

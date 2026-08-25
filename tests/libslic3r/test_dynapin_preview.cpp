@@ -64,13 +64,13 @@ TEST_CASE("DynaPin pull G-code comments match preview contract", "[DynaPin]")
     config.col_pitch_z         = 2.;
     config.pull_gcode.x_hook   = 100.;
     config.pull_gcode.x_latch  = 110.;
-    config.pull_gcode.x_front  = 120.;
+    config.pull_gcode.x_front  = 20.;
     config.pull_gcode.y_offset = -3.5;
 
     const std::string gcode = DynaPin::pull_gcode_for_pin(config, {2, 5});
 
     CHECK(gcode.find("; BEGIN_DYNAPIN_PULL ROW=2 COL=5\n") != std::string::npos);
-    CHECK(gcode.find("; DYNAPIN_PULL_MOVE\nG1 X120") != std::string::npos);
+    CHECK(gcode.find("; DYNAPIN_PULL_MOVE\nG1 X20") != std::string::npos);
     CHECK(gcode.find("; END_DYNAPIN_PULL\n") != std::string::npos);
     CHECK(gcode.find("row=") == std::string::npos);
     CHECK(gcode.find("col=") == std::string::npos);

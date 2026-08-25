@@ -384,7 +384,8 @@ SCENARIO("Print: DynaPin copies keep independent fixed-coordinate supports", "[P
             { "enable_support", true },
             { "enable_dynapin_support_optimization", true },
             { "dynapin_config_path", "Kingroon/dynapin/kp3s.json" },
-            { "dynapin_selected_pins", "0,1" }
+            { "dynapin_selected_pins", "0,1" },
+            { "printable_area", "0x0,180x0,180x180,0x180" }
         });
         init_dynapin_print(print, model, config);
 
@@ -406,6 +407,18 @@ SCENARIO("Print: DynaPin copies keep independent fixed-coordinate supports", "[P
         REQUIRE(first_blockers.size() == 1);
         REQUIRE(second_blockers.size() == 1);
         CHECK(first_blockers.front().z_min == Catch::Approx(6.4));
+
+        const Point first_shift = first_object->instances().front().shift_without_plate_offset();
+        const BoundingBox first_blocker_box = get_extents(first_blockers.front().poly);
+        CHECK(unscale<double>(first_blocker_box.min.x() + first_shift.x()) == Catch::Approx(20.0));
+        CHECK(unscale<double>(first_blocker_box.max.x() + first_shift.x()) == Catch::Approx(180.0));
+
+        const auto first_surfaces = DynaPin::pin_top_surfaces_for_object(*first_object);
+        REQUIRE(first_surfaces.size() == 1);
+        const BoundingBox first_surface_box = get_extents(first_surfaces.front().poly);
+        CHECK(unscale<double>(first_surface_box.min.x() + first_shift.x()) == Catch::Approx(20.0));
+        CHECK(unscale<double>(first_surface_box.max.x() + first_shift.x()) == Catch::Approx(180.0));
+
         REQUIRE(first_blockers.front().poly.points.front() != second_blockers.front().poly.points.front());
 
         const Point first_world_point = first_blockers.front().poly.points.front() +
@@ -421,6 +434,8 @@ SCENARIO("Print: DynaPin copies keep independent fixed-coordinate supports", "[P
             const std::vector<DynaPin::BlockerBox> boxes = DynaPin::selected_blocker_boxes(print);
             REQUIRE(boxes.size() == 1);
             CHECK(boxes.front().pin == DynaPin::Pin{0, 1});
+            CHECK(boxes.front().min.x() == Catch::Approx(20.0));
+            CHECK(boxes.front().max.x() == Catch::Approx(180.0));
         }
 
         WHEN("The second model copy is moved") {

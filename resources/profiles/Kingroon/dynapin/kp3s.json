@@ -18,8 +18,6 @@
     }
   },
   "support_exclusion": {
-    "center_x": 110,
-    "width_x": 100,
     "width_y": 12.4,
     "z_above": 2.15,
     "pin_z_height": 5
