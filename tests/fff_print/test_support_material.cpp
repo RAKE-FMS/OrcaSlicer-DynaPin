@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/DynaPin.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
@@ -86,6 +87,34 @@ bool support_exists_at_z(const PrintObject &object, double target_z)
     return false;
 }
 
+bool support_coverage_intersects_below_z(const PrintObject &object, const Polygon &region, double upper_z)
+{
+    for (const SupportLayer *layer : object.support_layers()) {
+        if (layer->print_z >= upper_z - EPSILON)
+            continue;
+
+        Polygons covered;
+        layer->support_fills.polygons_covered_by_width(covered, float(SCALED_EPSILON));
+        if (!intersection(covered, { region }).empty())
+            return true;
+    }
+    return false;
+}
+
+bool support_coverage_intersects_z_range(const PrintObject &object, const Polygon &region, double z_min, double z_max)
+{
+    for (const SupportLayer *layer : object.support_layers()) {
+        if (layer->bottom_z() > z_max + EPSILON || layer->print_z + EPSILON < z_min)
+            continue;
+
+        Polygons covered;
+        layer->support_fills.polygons_covered_by_width(covered, float(SCALED_EPSILON));
+        if (!intersection(covered, { region }).empty())
+            return true;
+    }
+    return false;
+}
+
 } // namespace
 
 SCENARIO("SupportMaterial: DynaPin keeps normal interfaces without a synthetic pin contact", "[SupportMaterial][DynaPin]")
@@ -138,6 +167,65 @@ SCENARIO("SupportMaterial: DynaPin keeps normal interfaces without a synthetic p
 
     THEN("The layer spanning the pin top is still generated") {
         CHECK(support_exists_at_z(print_object, 43.2));
+    }
+
+    THEN("Support from lower geometry remains below the selected pin body") {
+        DynaPin::Config dynapin_config;
+        REQUIRE(DynaPin::load_config_for_print(print, dynapin_config));
+        const DynaPin::Pin pin{ 0, 5 };
+        const DynaPin::VirtualSupportSurface surface = DynaPin::surface_for_pin(print_object, dynapin_config, pin);
+        const DynaPin::LocalBlocker blocker = DynaPin::blocker_for_pin(print_object, dynapin_config, pin);
+        // The pin must not globally erase support from lower geometry. This
+        // coverage is supplied by the lower model contact, not by restarting
+        // the upper floating-slab projection below the pin.
+        CHECK(support_coverage_intersects_below_z(print_object, surface.poly, blocker.z_min));
+    }
+}
+
+SCENARIO("SupportMaterial: DynaPin blocks stacked pin spans", "[SupportMaterial][DynaPin]")
+{
+    ResourcesDirGuard resources_guard(test_resources_dir());
+    DataDirGuard      data_dir_guard;
+
+    TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
+    TriangleMesh floating_slab = Test::mesh(TestMesh::cube_20x20x20);
+    floating_slab.scale(Vec3f(10.f, 5.f, 0.1f));
+    floating_slab.translate(0.f, 0.f, 60.f);
+    mesh.merge(floating_slab);
+
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(std::move(mesh));
+    object->add_instance();
+    object->ensure_on_bed();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_support", true},
+        {"enable_dynapin_support_optimization", true},
+        {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+        {"dynapin_selected_pins", "0,5 0,6"},
+        {"dynapin_debug_stage", 2},
+        {"support_type", "normal(auto)"},
+        {"support_interface_top_layers", 2},
+        {"support_interface_bottom_layers", 2},
+    });
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    print.process();
+
+    const PrintObject &print_object = *print.objects().front();
+    DynaPin::Config dynapin_config;
+    REQUIRE(DynaPin::load_config_for_print(print, dynapin_config));
+    REQUIRE(print.dynapin_selection().pins == std::vector<DynaPin::Pin>{{0, 5}, {0, 6}});
+    REQUIRE_FALSE(print_object.support_layers().empty());
+
+    for (const DynaPin::Pin pin : { DynaPin::Pin{0, 5}, DynaPin::Pin{0, 6} }) {
+        const DynaPin::LocalBlocker blocker = DynaPin::blocker_for_pin(print_object, dynapin_config, pin);
+        CHECK_FALSE(support_coverage_intersects_z_range(print_object, blocker.poly, blocker.z_min, blocker.z_max));
     }
 }
 
