@@ -152,6 +152,40 @@ SCENARIO("Print: Moving a DynaPin model invalidates support material", "[Print][
     }
 }
 
+SCENARIO("Print: Rotating a DynaPin model invalidates slicing", "[Print][DynaPin]") {
+    GIVEN("A processed model with DynaPin support optimization enabled") {
+        ResourcesDirGuard resources_guard(test_resources_dir());
+        Slic3r::Print print;
+        Slic3r::Model model;
+        Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            { "enable_dynapin_support_optimization", true },
+            { "enable_support",                    true },
+            { "dynapin_config_path",               "Kingroon/dynapin/kp3s.json" },
+            { "dynapin_selected_pins",              "0,1" }
+        });
+        init_dynapin_print(print, model, config);
+        print.process();
+        REQUIRE(print.is_step_done(posSlice));
+
+        const Transform3d initial_trafo = print.objects().front()->trafo();
+
+        WHEN("The model is rotated around the Z axis and applied again") {
+            model.objects.front()->instances.front()->set_rotation(Z, Geometry::deg2rad(45.0));
+            print.apply(model, config);
+
+            THEN("The changed transform invalidates slicing") {
+                REQUIRE(print.objects().size() == 1);
+                CHECK_FALSE(print.objects().front()->trafo().matrix().isApprox(initial_trafo.matrix()));
+                CHECK_FALSE(print.is_step_done(posSlice));
+
+                print.process();
+                CHECK(print.is_step_done(posSlice));
+            }
+        }
+    }
+}
+
 SCENARIO("Print: Empty DynaPin selection is resolved automatically without writeback", "[Print][DynaPin]") {
     GIVEN("Normal supports and a printer DynaPin candidate grid") {
         ResourcesDirGuard resources_guard(test_resources_dir());
