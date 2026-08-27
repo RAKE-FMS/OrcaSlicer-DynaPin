@@ -97,3 +97,14 @@
 - [x] Preserve the existing regression coverage for blocker Z ranges and upper-support termination at pin tops.
 - [x] Run the focused libslic3r/FFF tests and rebuild the GUI library.
 - [ ] Slice `gymnast.3mf` manually and record before/after support geometry volume, Δy, rotation, selected pins, and elapsed time.
+
+## Review follow-ups
+
+The staged implementation review found the following items still open. The placement optimization work must not be considered fully validated until these are addressed:
+
+- [x] Prove that splitting projections per contact cannot reintroduce an upper overhang below a selected pin's `blocker.z_min`, while preserving genuinely independent lower overhangs. Safe pin landings now terminate their projection permanently; only later independent contacts create new states.
+- [ ] Replace the current DynaPin support fixtures with fixtures whose support geometry actually overlaps the selected pin landing/blocker regions; assert both blocked and intentionally preserved support.
+- [ ] Verify that the per-contact grid projection does not change standard-support geometry or cause an unacceptable runtime increase; retain the aggregate fast path when DynaPin is disabled if needed.
+- [ ] Make automatic pin detection side-effect-free with respect to `Layer::sharp_tails`, or deduplicate repeated registrations.
+- [ ] Apply `dynapin_debug_stage` consistently to selection, support generation, and pull G-code emission, including environment-variable overrides.
+- [ ] Correct the diagnostic per-layer BoundingBox aggregation.
