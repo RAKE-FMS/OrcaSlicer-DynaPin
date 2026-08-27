@@ -765,8 +765,10 @@ std::pair<std::vector<DynaPin::Pin>, std::vector<DynaPin::Pin>> PrintObjectSuppo
         const BoundingBox bbox = get_extents(surface.poly);
         const bool selected = std::find(result.selected.begin(), result.selected.end(), pin) != result.selected.end();
         const bool rejected = std::find(result.rejected_collisions.begin(), result.rejected_collisions.end(), pin) != result.rejected_collisions.end();
+        const DynaPin::BlockerZRange z_range = DynaPin::blocker_z_range(config, pin);
         BOOST_LOG_TRIVIAL(debug) << "[DynaPin] candidate result: pin=(" << pin.row << "," << pin.col << ")"
-                                 << ", physical_mm=(" << DynaPin::pin_y(config, pin) << "," << DynaPin::pin_z(config, pin) << ")"
+                                 << ", physical_y_mm=" << DynaPin::pin_y(config, pin)
+                                 << ", support_z=[" << z_range.z_min << "," << z_range.z_max << "]"
                                  << ", surface_z=" << surface.print_z
                                  << ", surface_bbox_mm=x[" << unscale<double>(bbox.min.x()) << "," << unscale<double>(bbox.max.x())
                                  << "] y[" << unscale<double>(bbox.min.y()) << "," << unscale<double>(bbox.max.y()) << "]"

@@ -83,10 +83,14 @@ struct Config
     double         row_pitch_y      = 0.;
     double         col_pitch_z      = 0.;
     double         blocker_width_y  = 0.;
-    double         blocker_z_min    = 0.;
-    double         blocker_z_max    = 0.;
-    double         pin_z_height     = 0.;
+    double         blocker_height_z = 0.;
     PullMoveConfig pull_gcode;
+};
+
+struct BlockerZRange
+{
+    double z_min = 0.;
+    double z_max = 0.;
 };
 
 // Axis-aligned 3D region (machine/world coordinates, mm) in which support
@@ -144,7 +148,7 @@ std::vector<VirtualSupportSurface> pin_top_surfaces_for_object(const PrintObject
 std::vector<BlockerBox> selected_blocker_boxes(const Print& print);
 std::string             pull_gcode_for_pin(const Config& config, const Pin& pin);
 double                  pin_y(const Config& config, const Pin& pin);
-double                  pin_z(const Config& config, const Pin& pin);
+BlockerZRange            blocker_z_range(const Config& config, const Pin& pin);
 
 } // namespace DynaPin
 } // namespace Slic3r

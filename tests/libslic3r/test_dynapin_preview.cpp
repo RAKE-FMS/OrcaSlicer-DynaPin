@@ -1,4 +1,4 @@
-#include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_all.hpp>
 
 #include "libslic3r/DynaPin.hpp"
 #include "libslic3r/DynaPinPreview.hpp"
@@ -84,9 +84,10 @@ TEST_CASE("DynaPin support and pull coordinates are independent", "[DynaPin]")
     config.pull_origin_y       = 14.;
     config.pull_origin_z       = 5.;
     config.support_origin_y    = 18.;
-    config.support_origin_z    = 4.;
+    config.support_origin_z    = 7.55;
     config.row_pitch_y         = 12.4;
     config.col_pitch_z         = 7.4;
+    config.blocker_height_z    = 5.;
     config.pull_gcode.x_hook   = 160.;
     config.pull_gcode.x_latch  = 165.;
     config.pull_gcode.x_front  = 30.;
@@ -94,7 +95,9 @@ TEST_CASE("DynaPin support and pull coordinates are independent", "[DynaPin]")
 
     const DynaPin::Pin pin{1, 1};
     CHECK(DynaPin::pin_y(config, pin) == 30.4);
-    CHECK(DynaPin::pin_z(config, pin) == 11.4);
+    const DynaPin::BlockerZRange range = DynaPin::blocker_z_range(config, pin);
+    CHECK(range.z_max == Catch::Approx(14.95));
+    CHECK(range.z_min == Catch::Approx(9.95));
 
     const std::string gcode = DynaPin::pull_gcode_for_pin(config, pin);
     CHECK(gcode.find("G1 Y22.9000") != std::string::npos);

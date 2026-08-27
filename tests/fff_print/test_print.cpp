@@ -249,7 +249,7 @@ SCENARIO("Print: Automatic DynaPin selection starts at the model overhang", "[Pr
         mesh.translate(30.f, 30.f, 0.f);
         TriangleMesh top = Test::mesh(TestMesh::cube_20x20x20);
         top.scale(Vec3f(1.f, 1.f, 0.1f));
-        top.translate(0.f, 0.f, 22.f);
+        top.translate(0.f, 0.f, 23.f);
         mesh.merge(top);
 
         ModelObject *object = model.add_object();
@@ -290,14 +290,14 @@ SCENARIO("Print: Automatic DynaPin selection keeps independent lower overhangs",
 
         // Keep a bed-connected base outside the pin landing area, then add two
         // separate overhang stages in the same XY region.  The lower stage is
-        // above the col=2 pin top (20.95 mm), while the upper stage is above
-        // the col=4 pin top (35.75 mm).
+        // above the col=2 pin top (22.35 mm), while the upper stage is above
+        // the col=4 pin top (37.15 mm).
         TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
         mesh.scale(Vec3f(1.f, 1.f, 0.25f));
         mesh.translate(30.f, 150.f, 0.f);
         TriangleMesh lower = Test::mesh(TestMesh::cube_20x20x20);
         lower.scale(Vec3f(1.f, 1.f, 0.1f));
-        lower.translate(0.f, 0.f, 22.f);
+        lower.translate(0.f, 0.f, 23.f);
         mesh.merge(lower);
         TriangleMesh upper = Test::mesh(TestMesh::cube_20x20x20);
         upper.scale(Vec3f(1.f, 1.f, 0.1f));
@@ -500,7 +500,8 @@ SCENARIO("Print: DynaPin copies keep independent fixed-coordinate supports", "[P
         const auto second_blockers = DynaPin::support_blocker_regions_local(*second_object);
         REQUIRE(first_blockers.size() == 1);
         REQUIRE(second_blockers.size() == 1);
-        CHECK(first_blockers.front().z_min == Catch::Approx(6.4));
+        CHECK(first_blockers.front().z_min == Catch::Approx(9.95));
+        CHECK(first_blockers.front().z_max == Catch::Approx(14.95));
 
         const Point first_shift = first_object->instances().front().shift_without_plate_offset();
         const BoundingBox first_blocker_box = get_extents(first_blockers.front().poly);

@@ -5631,8 +5631,8 @@ std::string GCode::change_layer(coordf_t print_z)
         DynaPin::Config dynapin_config;
         if (m_print->config().enable_dynapin_support_optimization.value && DynaPin::load_config_for_print(*m_print, dynapin_config)) {
             for (const DynaPin::Pin& pin : DynaPin::resolved_pins(*m_print)) {
-                const double pin_z = DynaPin::pin_z(dynapin_config, pin);
-                if (pin_z + dynapin_config.blocker_z_max <= print_z + EPSILON) {
+                const DynaPin::BlockerZRange range = DynaPin::blocker_z_range(dynapin_config, pin);
+                if (range.z_max <= print_z + EPSILON) {
                     const std::string key = std::to_string(pin.row) + ":" + std::to_string(pin.col);
                     if (m_dynapin_pulls_done.insert(key).second)
                         gcode += DynaPin::pull_gcode_for_pin(dynapin_config, pin);

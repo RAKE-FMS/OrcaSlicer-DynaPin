@@ -60,8 +60,11 @@ static constexpr double support_block_y_offset = -7.2;
 double pin_y(const Config& config, const Pin& pin)
 { return config.support_origin_y + double(pin.row) * config.row_pitch_y; }
 
-double pin_z(const Config& config, const Pin& pin)
-{ return config.support_origin_z + double(pin.col) * config.col_pitch_z; }
+BlockerZRange blocker_z_range(const Config& config, const Pin& pin)
+{
+    const double z_max = config.support_origin_z + double(pin.col) * config.col_pitch_z;
+    return { z_max - config.blocker_height_z, z_max };
+}
 
 static double pull_y(const Config& config, const Pin& pin)
 { return config.pull_origin_y + double(pin.row) * config.row_pitch_y + config.pull_gcode.y_offset; }
@@ -114,8 +117,8 @@ std::vector<Pin> candidate_pins(const Config& config)
 void sort_unique_pins(std::vector<Pin>& pins, const Config& config)
 {
     std::sort(pins.begin(), pins.end(), [&config](const Pin& lhs, const Pin& rhs) {
-        const double lhs_z = pin_z(config, lhs);
-        const double rhs_z = pin_z(config, rhs);
+        const double lhs_z = blocker_z_range(config, lhs).z_max;
+        const double rhs_z = blocker_z_range(config, rhs).z_max;
         if (lhs_z != rhs_z)
             return lhs_z < rhs_z;
         if (lhs.row != rhs.row)
@@ -272,12 +275,8 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
 
     const nlohmann::json exclusion = j.contains("support_exclusion") && j["support_exclusion"].is_object() ? j["support_exclusion"] :
                                                                                                              nlohmann::json::object();
-    config.blocker_width_y         = number_or(exclusion, "width_y", number_or(exclusion, "y_width", config.blocker_width_y));
-    config.blocker_z_max = number_or(exclusion, "z_above", number_or(exclusion, "z_max", config.blocker_z_max));
-    config.pin_z_height  = number_or(exclusion, "pin_z_height", config.pin_z_height);
-    const double z_range = number_or(exclusion, "z_range", 0.);
-    if (z_range > 0. && config.blocker_z_max == 0.)
-        config.blocker_z_max = 0.5 * z_range;
+    config.blocker_width_y  = number_or(exclusion, "blocker_width_y", config.blocker_width_y);
+    config.blocker_height_z = number_or(exclusion, "blocker_height_z", config.blocker_height_z);
 
     const nlohmann::json pull  = j.contains("pull_gcode") && j["pull_gcode"].is_object() ? j["pull_gcode"] : nlohmann::json::object();
     config.pull_gcode.x_hook   = number_or(pull, "x_hook", config.pull_gcode.x_hook);
@@ -309,6 +308,7 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
         return false;
     }
 
+    const BlockerZRange zero_pin_range = blocker_z_range(config, { 0, 0 });
     BOOST_LOG_TRIVIAL(debug) << "[DynaPin] config loaded: requested='" << config_path << "', resolved='" << resolved.string()
                              << "', grid_size=" << config.row_count << "x" << config.col_count << ", pull_origin_mm=("
                              << config.pull_origin_y << "," << config.pull_origin_z << ")"
@@ -316,16 +316,15 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
                              << ", pitch_mm=(" << config.row_pitch_y << "," << config.col_pitch_z << ")"
                              << ", exclusion_x_mm=[" << config.pull_gcode.x_front << "," << *max_x_bed << "]"
                              << ", exclusion_y_center_mm=" << config.support_origin_y + support_block_y_offset
-                             << ", exclusion_width_y_mm=" << config.blocker_width_y << ", z_range_mm=("
-                             << config.support_origin_z - config.pin_z_height << "," << config.support_origin_z + config.blocker_z_max
-                             << ")";
+                             << ", exclusion_width_y_mm=" << config.blocker_width_y << ", zero_column_blocker_z_range_mm=["
+                             << zero_pin_range.z_min << "," << zero_pin_range.z_max << "]";
     return true;
 }
 
 static LocalBlocker blocker_for_pin_shift(const Config& config, const Pin& pin, const Point& shift, double max_x_bed)
 {
     const double y       = pin_y(config, pin);
-    const double z       = pin_z(config, pin);
+    const BlockerZRange z_range = blocker_z_range(config, pin);
     const double block_y = y + support_block_y_offset;
     const double min_x   = config.pull_gcode.x_front;
     const double max_x   = max_x_bed;
@@ -333,8 +332,8 @@ static LocalBlocker blocker_for_pin_shift(const Config& config, const Pin& pin, 
     const double max_y   = block_y + 0.5 * config.blocker_width_y;
 
     LocalBlocker blocker;
-    blocker.z_min       = z - config.pin_z_height;
-    blocker.z_max       = z + config.blocker_z_max;
+    blocker.z_min       = z_range.z_min;
+    blocker.z_max       = z_range.z_max;
     blocker.poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
                            Point(scale_(max_x) - shift.x(), scale_(min_y) - shift.y()),
                            Point(scale_(max_x) - shift.x(), scale_(max_y) - shift.y()),
@@ -361,7 +360,7 @@ static VirtualSupportSurface surface_for_pin_shift(const Config& config, const P
     const double max_y   = block_y + 0.5 * config.blocker_width_y;
 
     VirtualSupportSurface surface;
-    surface.print_z     = pin_z(config, pin) + config.blocker_z_max;
+    surface.print_z     = blocker_z_range(config, pin).z_max;
     surface.poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
                            Point(scale_(max_x) - shift.x(), scale_(min_y) - shift.y()),
                            Point(scale_(max_x) - shift.x(), scale_(max_y) - shift.y()),
@@ -516,20 +515,17 @@ std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
     out.reserve(pins.size());
     for (const Pin& pin : pins) {
         const double y       = pin_y(config, pin);
-        const double z       = pin_z(config, pin);
+        const BlockerZRange z_range = blocker_z_range(config, pin);
         const double block_y = y + support_block_y_offset;
         const double min_x   = config.pull_gcode.x_front;
         const double max_x   = *max_x_bed;
         const double min_y   = block_y - 0.5 * config.blocker_width_y;
         const double max_y   = block_y + 0.5 * config.blocker_width_y;
-        const double z_min   = z - config.pin_z_height;
-        const double z_max   = z + config.blocker_z_max;
-
         BlockerBox box;
         box.pin     = pin;
-        box.min     = Vec3d(min_x, min_y, z_min);
-        box.max     = Vec3d(max_x, max_y, z_max);
-        box.pin_pos = Vec3d(min_x, block_y, z);
+        box.min     = Vec3d(min_x, min_y, z_range.z_min);
+        box.max     = Vec3d(max_x, max_y, z_range.z_max);
+        box.pin_pos = Vec3d(min_x, block_y, z_range.z_max);
         out.push_back(box);
     }
     return out;

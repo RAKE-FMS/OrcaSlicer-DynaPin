@@ -8,7 +8,7 @@
     "col_count": 14,
     "support_origin": {
       "y": "18.0",
-      "z": "4.0"
+      "z": "6.15"
     },
     "pitch": {
       "row_y": "12.4",
@@ -16,9 +16,8 @@
     }
   },
   "support_exclusion": {
-    "width_y": 12.4,
-    "z_above": 2.15,
-    "pin_z_height": 5
+    "blocker_width_y": 12.4,
+    "blocker_height_z": 5
   },
   "pull_gcode": {
     "x_hook": "160",
