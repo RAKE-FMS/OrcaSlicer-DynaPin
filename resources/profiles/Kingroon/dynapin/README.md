@@ -11,8 +11,8 @@ DynaPinはプリンタのY軸側面に取り付けたピンアレイを使って
 Y軸 (プリンタ手前 ←→ 奥)
   ↑
   │  [ピンアレイ]  row=0  row=1  row=2 ...
-  │              ○      ○      ○       ← col=0  (Z=support_origin.z)
-  │              ○      ○      ○       ← col=1  (Z=support_origin.z + col_pitch_z)
+  │              ○      ○      ○       ← col=0  (ブロッカー上端Z=support_origin.z)
+  │              ○      ○      ○       ← col=1  (ブロッカー上端Z=support_origin.z + col_pitch_z)
   │              ○      ○      ○       ← col=2
   │
   └─────────────────────────────────── Z軸 (印刷高さ)
@@ -49,14 +49,14 @@ x_hook  x_latch             x_front
 ```
 Z
 ↑
-│  z_max = pin_z + z_above
+│  z_max = support_origin.z + col × col_pitch_z
 │  ┌──────────────────────┐
 │  │   サポート除外領域    │
 │  │                      │
 │  │  x_front ─────────────────── bed_max_x
 │  │                      │
 │  └──────────────────────┘
-│  z_min = max(0, pin_z - pin_z_height)
+│  z_min = z_max - blocker_height_z
 │
 └──────────────────────────── X
    x_front          bed_max_x
@@ -64,15 +64,15 @@ Z
 
 - **X範囲**: `x_front` ～ `bed_max_x`（引き出し経路およびサポートブロック全域）
   - `bed_max_x` はプリンタの `printable_area` に記載された最大X座標から自動取得します。KP3Sでは `x_front=20`、`bed_max_x=180` なので `20..180` です。
-- **Y範囲**: `pin_y ± width_y/2`（ピン周囲の幅）
-- **Z範囲**: `pin_z - pin_z_height`（ピン下面）から `pin_z + z_above`（ピン上面のクリアランス）まで。
-  - `pin_z_height`（ピンの厚さ）が設定されていない、または0の場合は、底面（Z=0）から除外されます。これにより、ピンより下の安全な領域にはサポート材が正しく生成されます。
+- **Y範囲**: `pin_y ± blocker_width_y/2`（ブロッカーのY方向幅）
+- **Z範囲**: `z_max - blocker_height_z`（ピン下面）から `z_max`（ピン上面）まで。
+  - `blocker_height_z` が設定されていない、または0の場合は、Z方向の下側延長はありません。
 
 ### 仮想サポート面（着地面）の生成
 
-ピンの上面（`pin_z + z_above`）は「仮想ビルドプレート」として機能します。ピンの上にあるモデルのオーバーハングから生成されたサポート材は、ベッド（Z=0）まで降りる代わりにピンの上面で「着地」します。
+ピンの上面（`z_max`）は「仮想ビルドプレート」として機能します。ピンの上にあるモデルのオーバーハングから生成されたサポート材は、ベッド（Z=0）まで降りる代わりにピンの上面で「着地」します。
 
-- **仮想サポート面のXY範囲**: サポートブロックと同じ `x_front..bed_max_x`、および `pin_y ± width_y/2` です。
+- **仮想サポート面のXY範囲**: サポートブロックと同じ `x_front..bed_max_x`、および `pin_y ± blocker_width_y/2` です。
 - **引き出し経路の真上**: 引き出し経路全体を仮想支持面として扱い、上のサポート材がピン上面で着地できるようにします。
 
 ---
@@ -91,7 +91,7 @@ Z
   },
   "support_origin": {
     "y": 18.0,
-    "z": 4.0
+    "z": 7.55
   },
   "row_count": 10,
   "col_count": 14,
@@ -107,7 +107,7 @@ Z
 | `pull_origin.y` | number | ○ | 引き抜きG-codeのY基準座標 [mm] |
 | `pull_origin.z` | number | ○ | 引き抜きG-codeのZ基準座標 [mm] |
 | `support_origin.y` | number | ○ | 実ピン配列・サポート形状のY基準座標 [mm] |
-| `support_origin.z` | number | ○ | 実ピン配列・サポート形状のZ基準座標 [mm] |
+| `support_origin.z` | number | ○ | col=0 のサポートブロッカー上端のZ座標 [mm] |
 | `row_count` | int | ○ | `row=0` から存在するピン行数 |
 | `col_count` | int | ○ | `col=0` から存在するピン列数 |
 | `pitch.row_y` | number | ○ | 行間ピッチ（Y方向）[mm] |
@@ -121,10 +121,11 @@ pull_y = pull_origin.y + row × pitch.row_y + pull_gcode.y_offset
 pull_z = pull_origin.z + col × pitch.col_z
 ```
 
-実ピン位置とサポート形状の基準座標：
+サポートブロッカー上端の座標：
 ```
-support_pin_y = support_origin.y + row × pitch.row_y
-support_pin_z = support_origin.z + col × pitch.col_z
+blocker_y   = support_origin.y + row × pitch.row_y
+blocker_z_max = support_origin.z + col × pitch.col_z
+blocker_z_min = blocker_z_max - blocker_height_z
 ```
 
 `dynapin_selected_pins` が空の場合は、この行数・列数で列挙したピンを自動選択候補として使用します。
@@ -137,17 +138,15 @@ support_pin_z = support_origin.z + col × pitch.col_z
 
 ```json
 "support_exclusion": {
-  "width_y": 8,
-  "z_above": 4,
-  "pin_z_height": 5
+  "blocker_width_y": 8,
+  "blocker_height_z": 5
 }
 ```
 
 | フィールド | 型 | 必須 | 説明 |
 |---|---|---|---|
-| `width_y` | number | ○ | ピン周囲のY方向幅 [mm] |
-| `z_above` | number | – | ピン位置より上へ除外を延ばす量 [mm]（省略時 0） |
-| `pin_z_height` | number | – | ピン本体の厚さ（Z高さ）[mm]。省略された場合は 0 となり、Z=0（ベッド面）から除外されます。 |
+| `blocker_width_y` | number | ○ | サポートブロッカーのY方向幅 [mm] |
+| `blocker_height_z` | number | – | サポートブロッカーの上端から下方向への高さ [mm]（省略時 0） |
 
 X範囲は `pull_gcode.x_front` とプリンタの `printable_area` から自動計算されるため、X位置やX幅をここへ記述しません。
 
@@ -179,7 +178,7 @@ X範囲は `pull_gcode.x_front` とプリンタの `printable_area` から自動
 | `x_latch` | number | ○ | ラッチ位置のX座標 [mm]（ピンを捕捉する位置） |
 | `x_front` | number | ○ | 最終引き出し位置のX座標 [mm] |
 | `y_offset` | number | – | ピンY座標へのオフセット [mm]（省略時 0） |
-| `z_offset` | number | – | 引き出し完了後の退避Z量 [mm]（省略時 0）。`pin_z + z_offset` の高さまでZを上げる |
+| `z_offset` | number | – | 引き出し完了後の退避Z量 [mm]（省略時 0）。`pull_z + z_offset` の高さまでZを上げる |
 | `approach_y_offset` | number | – | 接近時にY座標をさらにずらす量 [mm]（省略時 -4）。フック進入時にピンと干渉しないよう手前にずれる |
 | `pull_feedrate_fast` | number | – | 引き出し（`x_front`への移動）時の送り速度 [mm/min]（省略時 3000） |
 | `disengage_x_offset` | number | – | 外し動作でXを `x_front` から追加移動する量 [mm]（省略時 1.5） |
@@ -217,12 +216,8 @@ X範囲は `pull_gcode.x_front` とプリンタの `printable_area` から自動
 
 `grid.origin`、`grid.physical_origin`、`origin_row`、`origin_col`、`origin_y`、`origin_z` は読み込まれません。新しい設定では必ず `pull_origin` と `support_origin` を使用してください。
 
-以下の既存エイリアスは、originの変更とは別に引き続き使用できます。
-
 | 旧フィールド | 現在の解釈 |
 |---|---|
-| `support_exclusion.z_range` | `z_above = z_range / 2` として扱う（`z_above` が未指定の場合のみ） |
-| `support_exclusion.y_width` | `width_y` の代替名 |
 | `pull_gcode.pull_feedrate` | `feed_rate` の代替名 |
 | `pull_gcode.travel_feedrate` | `fast_feed_rate` の代替名 |
 

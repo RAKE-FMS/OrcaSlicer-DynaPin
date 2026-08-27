@@ -23,7 +23,7 @@ The history favors concise, sentence-style subject lines with optional issue ref
 Follow `SECURITY.md` for vulnerability reporting. Keep API tokens and printer credentials out of tracked configs; use `sandboxes/` for experimental settings. When touching third-party code in `deps_src/`, record the upstream commit or release in your PR description and run the relevant platform build script to confirm integration.
 
 ## DynaPin Support Optimization Guidelines
-- **Blocker Z Range (`z_min`) Rule**: NEVER set `blocker.z_min = 0.0` for DynaPin blockers. Setting `z_min = 0.0` extends upper pin blockers all the way to the build plate, incorrectly destroying legitimate support needed for lower overhangs on multi-stage or zigzag overhang structures. Each pin blocker must strictly cover only its own vertical span `[z - pin_z_height, z + blocker_z_max]`.
+- **Blocker Z Range (`z_min`) Rule**: NEVER set `blocker.z_min = 0.0` for DynaPin blockers. Setting `z_min = 0.0` extends upper pin blockers all the way to the build plate, incorrectly destroying legitimate support needed for lower overhangs on multi-stage or zigzag overhang structures. Each pin blocker must strictly cover only its own computed vertical span `[z_min, z_max]`, where `z_min = z_max - blocker_height_z`.
 - **Support Downward Propagation Termination**: To stop an upper overhang's support column at the pin top (`surface.print_z`) without affecting lower overhangs, subtract (`diff`) the pin top surface polygon (`surface.poly`) from the descending support projection (`overhangs_projection_raw`) at `surface.print_z`. This terminates the upper overhang's support column at the pin top while allowing lower overhangs to generate their own support down to the build plate.
 
 ## SVG Debug Guidelines
