@@ -11,6 +11,7 @@
 
 #include <boost/filesystem.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 
@@ -113,6 +114,20 @@ bool support_coverage_intersects_z_range(const PrintObject &object, const Polygo
             return true;
     }
     return false;
+}
+
+double maximum_support_coverage_area_in_z_range(const PrintObject &object, const Polygon &region, double z_min, double z_max)
+{
+    double maximum_area = 0.;
+    for (const SupportLayer *layer : object.support_layers()) {
+        if (layer->bottom_z() > z_max + EPSILON || layer->print_z + EPSILON < z_min)
+            continue;
+
+        Polygons covered;
+        layer->support_fills.polygons_covered_by_width(covered, float(SCALED_EPSILON));
+        maximum_area = std::max(maximum_area, area(intersection(covered, { region })));
+    }
+    return maximum_area;
 }
 
 } // namespace
@@ -226,6 +241,71 @@ SCENARIO("SupportMaterial: DynaPin blocks stacked pin spans", "[SupportMaterial]
     for (const DynaPin::Pin pin : { DynaPin::Pin{0, 5}, DynaPin::Pin{0, 6} }) {
         const DynaPin::LocalBlocker blocker = DynaPin::blocker_for_pin(print_object, dynapin_config, pin);
         CHECK_FALSE(support_coverage_intersects_z_range(print_object, blocker.poly, blocker.z_min, blocker.z_max));
+    }
+}
+
+SCENARIO("SupportMaterial: DynaPin propagates a connected blocker cutout downward", "[SupportMaterial][DynaPin]")
+{
+    ResourcesDirGuard resources_guard(test_resources_dir());
+    DataDirGuard      data_dir_guard;
+
+    // Keep the bed-supported body away from the DynaPin corridor so the
+    // assertion below observes only the floating upper support projection.
+    TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
+    mesh.translate(-100.f, 0.f, 0.f);
+    TriangleMesh floating_slab = Test::mesh(TestMesh::cube_20x20x20);
+    floating_slab.scale(Vec3f(10.f, 5.f, 0.1f));
+    floating_slab.translate(0.f, 0.f, 50.f);
+    mesh.merge(floating_slab);
+
+    Print baseline_print;
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(std::move(mesh));
+    object->add_instance();
+    object->ensure_on_bed();
+
+    DynamicPrintConfig baseline_config = DynamicPrintConfig::full_print_config();
+    baseline_config.set_deserialize_strict({
+        {"enable_support", true},
+        {"enable_dynapin_support_optimization", false},
+        {"support_type", "normal(auto)"},
+    });
+    baseline_print.auto_assign_extruders(object);
+    baseline_print.apply(model, baseline_config);
+    baseline_print.validate();
+    baseline_print.set_status_silent();
+    baseline_print.process();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_support", true},
+        {"enable_dynapin_support_optimization", true},
+        {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+        {"dynapin_selected_pins", "0,5"},
+        {"dynapin_debug_stage", 2},
+        {"support_type", "normal(auto)"},
+    });
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    print.process();
+
+    const PrintObject &print_object = *print.objects().front();
+    DynaPin::Config dynapin_config;
+    REQUIRE(DynaPin::load_config_for_print(print, dynapin_config));
+    const DynaPin::LocalBlocker blocker = DynaPin::blocker_for_pin(print_object, dynapin_config, { 0, 5 });
+    Polygon side_region = blocker.poly;
+    side_region.translate(0., scaled<coord_t>(20.));
+    const double baseline_area = maximum_support_coverage_area_in_z_range(
+        *baseline_print.objects().front(), blocker.poly, blocker.z_min - 5., blocker.z_min - 0.05);
+    const double optimized_area = maximum_support_coverage_area_in_z_range(
+        print_object, blocker.poly, blocker.z_min - 5., blocker.z_min - 0.05);
+    THEN("The connected support keeps the propagated blocker boundary below the pin") {
+        CHECK(support_coverage_intersects_z_range(print_object, side_region, blocker.z_min - 5., blocker.z_min - 0.05));
+        CHECK(optimized_area < baseline_area * 0.9);
     }
 }
 

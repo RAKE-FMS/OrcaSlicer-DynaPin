@@ -551,7 +551,8 @@ PrintObjectSupportMaterial::PrintObjectSupportMaterial(const PrintObject *object
 // the generated support layers or extrusion paths.
 static inline std::pair<Polygons, Polygons> project_support_to_grid(
     const Layer &layer, const SupportGridParams &grid_params, const Polygons &overhangs,
-    Polygons *layer_buildplate_covered, const std::vector<DynaPin::LocalBlocker> &dynapin_blockers
+    Polygons *layer_buildplate_covered, const std::vector<DynaPin::LocalBlocker> &dynapin_blockers,
+    const Polygons &propagated_dynapin_exclusions
 #ifdef SLIC3R_DEBUG
     , size_t iRun, size_t layer_id, const char *debug_name
 #endif /* SLIC3R_DEBUG */
@@ -747,7 +748,7 @@ std::pair<std::vector<DynaPin::Pin>, std::vector<DynaPin::Pin>> PrintObjectSuppo
 
             Polygons covered_for_projection = layer_buildplate_covered;
             Polygons *covered_for_projection_ptr = covered_for_projection.empty() ? nullptr : &covered_for_projection;
-            auto projection_result = project_support_to_grid(layer, grid_params, projection.projection, covered_for_projection_ptr, {});
+            auto projection_result = project_support_to_grid(layer, grid_params, projection.projection, covered_for_projection_ptr, {}, {});
             projection.projection = diff(std::move(projection_result.second), projection.terminated);
         }
         projections.erase(std::remove_if(projections.begin(), projections.end(), [](const ProjectionState &projection) {
@@ -3000,7 +3001,7 @@ static inline SupportGeneratorLayer* detect_bottom_contacts(
 
 // Returns polygons to print + polygons to propagate downwards.
 // Called twice: First for normal supports, possibly trimmed by "on build plate only", second for support enforcers not trimmed by "on build plate only".
-static inline std::pair<Polygons, Polygons> project_support_to_grid(const Layer &layer, const SupportGridParams &grid_params, const Polygons &overhangs, Polygons *layer_buildplate_covered, const std::vector<DynaPin::LocalBlocker>& dynapin_blockers
+static inline std::pair<Polygons, Polygons> project_support_to_grid(const Layer &layer, const SupportGridParams &grid_params, const Polygons &overhangs, Polygons *layer_buildplate_covered, const std::vector<DynaPin::LocalBlocker>& dynapin_blockers, const Polygons &propagated_dynapin_exclusions
 #ifdef SLIC3R_DEBUG
     , size_t iRun, size_t layer_id, const char *debug_name
 #endif /* SLIC3R_DEBUG */
@@ -3017,6 +3018,10 @@ static inline std::pair<Polygons, Polygons> project_support_to_grid(const Layer 
             polygons_append(trimming, {b.poly});
         }
     }
+    // A propagated exclusion is deliberately independent from the original
+    // blocker Z range. It is the cutout carried by a connected support
+    // projection below a pin; the original blockers above remain unchanged.
+    polygons_append(trimming, propagated_dynapin_exclusions);
 
     Polygons overhangs_projection = diff(overhangs, trimming);
 
@@ -3120,14 +3125,109 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_
     // Keep contact projections independent while descending. A selected pin top
     // may terminate one projection, but must not remove a lower overhang that
     // was introduced later in the sweep at the same XY location.
+    struct DynapinBlockerGroup {
+        Polygons cutout;
+        double   z_min = 0.;
+        double   z_max = 0.;
+    };
+    struct DynapinPropagation {
+        size_t   group_id = 0;
+        Polygons side_support;
+    };
     struct ProjectionState {
         Polygons projection;
         Polygons terminated;
+        std::vector<DynapinPropagation> dynapin_propagations;
+        Polygons dynapin_exclusions;
     };
+
+    // Blockers that touch in XY and overlap in Z must be treated as one
+    // cutout. Otherwise the gap between two pin rectangles can incorrectly
+    // terminate propagation even though the support remains connected around
+    // the combined pin region.
+    std::vector<DynapinBlockerGroup> dynapin_blocker_groups;
+    for (const DynaPin::LocalBlocker &blocker : dynapin_blockers) {
+        if (blocker.poly.empty())
+            continue;
+        dynapin_blocker_groups.push_back({{blocker.poly}, blocker.z_min, blocker.z_max});
+    }
+    for (size_t group_id = 0; group_id < dynapin_blocker_groups.size();) {
+        bool merged = false;
+        for (size_t candidate_id = group_id + 1; candidate_id < dynapin_blocker_groups.size(); ++candidate_id) {
+            DynapinBlockerGroup &group = dynapin_blocker_groups[group_id];
+            const DynapinBlockerGroup &candidate = dynapin_blocker_groups[candidate_id];
+            if (candidate.z_min > group.z_max + EPSILON || candidate.z_max + EPSILON < group.z_min)
+                continue;
+            if (intersection(offset(group.cutout, float(SCALED_EPSILON)), candidate.cutout).empty())
+                continue;
+            group.z_min = std::min(group.z_min, candidate.z_min);
+            group.z_max = std::max(group.z_max, candidate.z_max);
+            group.cutout = union_(group.cutout, candidate.cutout);
+            dynapin_blocker_groups.erase(dynapin_blocker_groups.begin() + candidate_id);
+            merged = true;
+            break;
+        }
+        if (!merged)
+            ++group_id;
+    }
+
+    const float dynapin_clip_margin = float(0.5 * std::max({
+        m_support_params.support_material_flow.scaled_width(),
+        m_support_params.support_material_interface_flow.scaled_width(),
+        m_support_params.support_material_bottom_interface_flow.scaled_width()
+    })) + float(SCALED_EPSILON);
+    const float dynapin_connection_margin = dynapin_clip_margin;
+
     std::vector<ProjectionState> overhangs_projections;
     // Unsupported enforcer contact areas above the current layer.print_z.
     // Only used if "supports on build plate only" is enabled and both automatic and support enforcers are enabled.
     std::vector<ProjectionState> enforcers_projections;
+
+    auto prepare_dynapin_state = [&](ProjectionState &state, const Layer &layer) {
+        state.dynapin_exclusions.clear();
+        if (state.projection.empty() || dynapin_blocker_groups.empty())
+            return;
+
+        // An existing propagation survives only while the support present on
+        // the current layer remains directly connected to the previous side
+        // support. The margin accounts for the widest support path that can
+        // be emitted around the grid projection.
+        for (auto it = state.dynapin_propagations.begin(); it != state.dynapin_propagations.end();) {
+            const DynapinBlockerGroup &group = dynapin_blocker_groups[it->group_id];
+            const bool directly_connected = !intersection(it->side_support, state.projection).empty();
+            if (!directly_connected && intersection(offset(it->side_support, dynapin_connection_margin), state.projection).empty()) {
+                it = state.dynapin_propagations.erase(it);
+                continue;
+            }
+            polygons_append(state.dynapin_exclusions, offset(group.cutout, dynapin_clip_margin));
+            ++it;
+        }
+
+        // Seed a propagation only when the current projection crosses a
+        // blocker and still has support outside that blocker. A projection
+        // fully contained by the blocker has no side support to carry down.
+        for (size_t group_id = 0; group_id < dynapin_blocker_groups.size(); ++group_id) {
+            const DynapinBlockerGroup &group = dynapin_blocker_groups[group_id];
+            if (layer.print_z + EPSILON < group.z_min || layer.print_z - EPSILON > group.z_max)
+                continue;
+            if (intersection(state.projection, group.cutout).empty())
+                continue;
+            if (std::any_of(state.dynapin_propagations.begin(), state.dynapin_propagations.end(),
+                            [group_id](const DynapinPropagation &propagation) { return propagation.group_id == group_id; }))
+                continue;
+
+            Polygons side_support = diff(state.projection, group.cutout);
+            if (side_support.empty())
+                continue;
+            state.dynapin_propagations.push_back({group_id, std::move(side_support)});
+            polygons_append(state.dynapin_exclusions, offset(group.cutout, dynapin_clip_margin));
+        }
+
+        if (!state.dynapin_exclusions.empty())
+            state.dynapin_exclusions = union_(std::move(state.dynapin_exclusions));
+        state.projection = diff(std::move(state.projection), state.dynapin_exclusions);
+    };
+
     // Last top contact layer visited when collecting the projection of contact areas.
     int       contact_idx = int(top_contacts.size()) - 1;
     for (int layer_id = int(object.total_layer_count()) - 2; layer_id >= 0; -- layer_id) {
@@ -3175,6 +3275,12 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_
                 state.projection = diff(std::move(state.projection), state.terminated);
                 if (state.projection.empty())
                     continue;
+
+                // Seed/carry the blocker cutout before a pin-top surface is
+                // subtracted below. The pin-top subtraction removes exactly
+                // the blocker area, so doing this afterward would make the
+                // first propagation layer impossible to detect.
+                prepare_dynapin_state(state, layer);
 
                 // A selected pin top is a termination surface for downward
                 // support propagation. Apply it only to this independent
@@ -3226,7 +3332,7 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_
         const Polygons layer_buildplate_covered = buildplate_covered.empty() ? Polygons() : buildplate_covered[layer_id];
         // Filtering the propagated support columns to two extrusions, overlapping by maximum 20%.
 //        float column_propagation_filtering_radius = scaled<float>(0.8 * 0.5 * (m_support_params.support_material_flow.spacing() + m_support_params.support_material_flow.width()));
-        task_group.run([&grid_params, &overhangs_projections, &layer, &layer_support_area, layer_buildplate_covered, &dynapin_blockers
+        task_group.run([&grid_params, &overhangs_projections, &layer, &layer_support_area, layer_buildplate_covered, &dynapin_blockers, &dynapin_blocker_groups
 #ifdef SLIC3R_DEBUG
         , iRun, layer_id
 #endif /* SLIC3R_DEBUG */
@@ -3237,13 +3343,21 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_
                     continue;
                 Polygons covered_for_projection = layer_buildplate_covered;
                 Polygons *covered_for_projection_ptr = covered_for_projection.empty() ? nullptr : &covered_for_projection;
-                auto projection_result = project_support_to_grid(layer, grid_params, state.projection, covered_for_projection_ptr, dynapin_blockers
+                auto projection_result = project_support_to_grid(layer, grid_params, state.projection, covered_for_projection_ptr, dynapin_blockers, state.dynapin_exclusions
 #ifdef SLIC3R_DEBUG
                 , iRun, layer_id, "general"
 #endif /* SLIC3R_DEBUG */
                 );
                 polygons_append(layer_support_area_new, std::move(projection_result.first));
-                state.projection = diff(std::move(projection_result.second), state.terminated);
+                Polygons next_projection = diff(std::move(projection_result.second), state.terminated);
+                for (auto it = state.dynapin_propagations.begin(); it != state.dynapin_propagations.end();) {
+                    it->side_support = diff(next_projection, dynapin_blocker_groups[it->group_id].cutout);
+                    if (it->side_support.empty()) {
+                        it = state.dynapin_propagations.erase(it);
+                    } else
+                        ++it;
+                }
+                state.projection = std::move(next_projection);
             }
             layer_support_area = union_(std::move(layer_support_area_new));
             // When propagating support areas downwards, stop propagating the support column if it becomes too thin to be printable.
@@ -3254,7 +3368,7 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_
         Polygons layer_support_area_enforcers;
         if (! enforcers_projections.empty())
             // Project the enforcers polygons downwards, don't trim them with the "buildplate only" polygons.
-            task_group.run([&grid_params, &enforcers_projections, &layer, &layer_support_area_enforcers, &dynapin_blockers
+            task_group.run([&grid_params, &enforcers_projections, &layer, &layer_support_area_enforcers, &dynapin_blockers, &dynapin_blocker_groups
 #ifdef SLIC3R_DEBUG
                 , iRun, layer_id
 #endif /* SLIC3R_DEBUG */
@@ -3262,13 +3376,21 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_
                 for (ProjectionState &state : enforcers_projections) {
                     if (state.projection.empty())
                         continue;
-                    auto projection_result = project_support_to_grid(layer, grid_params, state.projection, nullptr, dynapin_blockers
+                    auto projection_result = project_support_to_grid(layer, grid_params, state.projection, nullptr, dynapin_blockers, state.dynapin_exclusions
 #ifdef SLIC3R_DEBUG
                 , iRun, layer_id, "enforcers"
 #endif /* SLIC3R_DEBUG */
                     );
                     polygons_append(layer_support_area_enforcers, std::move(projection_result.first));
-                    state.projection = diff(std::move(projection_result.second), state.terminated);
+                    Polygons next_projection = diff(std::move(projection_result.second), state.terminated);
+                    for (auto it = state.dynapin_propagations.begin(); it != state.dynapin_propagations.end();) {
+                        it->side_support = diff(next_projection, dynapin_blocker_groups[it->group_id].cutout);
+                        if (it->side_support.empty())
+                            it = state.dynapin_propagations.erase(it);
+                        else
+                            ++it;
+                    }
+                    state.projection = std::move(next_projection);
                 }
                 layer_support_area_enforcers = union_(std::move(layer_support_area_enforcers));
             });
