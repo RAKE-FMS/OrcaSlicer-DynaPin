@@ -1564,20 +1564,23 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
             if (separate_dynapin_instances) {
                 // Once DynaPin is enabled, each PrintObject contains exactly one
-                // instance. Match old objects by instance ID so moving or
-                // reordering copies does not attach cached support to another
-                // physical copy. This also handles the transition from the
-                // legacy grouped representation, where one old object may still
-                // contain several instances.
+                // instance. Match old objects by instance ID and unchanged
+                // transform so moving or reordering copies does not attach
+                // cached support to another physical copy, while rotation
+                // creates a new PrintObject with the new transform. This also
+                // handles the transition from the legacy grouped
+                // representation, where one old object may still contain
+                // several instances.
                 for (PrintObjectTrafoAndInstances &new_instances : model_object_status.print_instances) {
                     assert(new_instances.instances.size() == 1);
                     const ObjectID instance_id = new_instances.instances.front().model_instance->id();
-                    auto it_old = std::find_if(old.begin(), old.end(), [instance_id](const PrintObjectStatus *status) {
+                    auto it_old = std::find_if(old.begin(), old.end(), [instance_id, &new_instances](const PrintObjectStatus *status) {
                         if (status->status != PrintObjectStatus::Unknown)
                             return false;
                         const PrintObject *old_object = status->print_object;
                         if (old_object->instances().empty() ||
-                            ! transform3d_equal(status->trafo, old_object->trafo()))
+                            ! transform3d_equal(status->trafo, old_object->trafo()) ||
+                            ! transform3d_equal(status->trafo, new_instances.trafo))
                             return false;
                         return std::any_of(old_object->instances().begin(), old_object->instances().end(),
                                            [instance_id](const PrintInstance &instance) {

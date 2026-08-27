@@ -52,22 +52,22 @@ static int int_or(const nlohmann::json& j, const char* key, int fallback)
     return fallback;
 }
 
-// The physical blocker/pin landing region is shifted along Y from the grid's
-// configured reference coordinate. Pull G-code keeps its existing coordinate
-// calculation and is intentionally independent of this support geometry.
+// The physical blocker/pin landing region is shifted along Y from the support
+// origin. Pull G-code keeps its own origin and is intentionally independent of
+// this support geometry.
 static constexpr double support_block_y_offset = -7.2;
 
 double pin_y(const Config& config, const Pin& pin)
-{ return config.physical_origin_y.value_or(config.origin_y) + double(pin.row - config.origin_row) * config.row_pitch_y; }
+{ return config.support_origin_y + double(pin.row) * config.row_pitch_y; }
 
 double pin_z(const Config& config, const Pin& pin)
-{ return config.physical_origin_z.value_or(config.origin_z) + double(pin.col - config.origin_col) * config.col_pitch_z; }
+{ return config.support_origin_z + double(pin.col) * config.col_pitch_z; }
 
 static double pull_y(const Config& config, const Pin& pin)
-{ return config.origin_y + double(pin.row - config.origin_row) * config.row_pitch_y + config.pull_gcode.y_offset; }
+{ return config.pull_origin_y + double(pin.row) * config.row_pitch_y + config.pull_gcode.y_offset; }
 
 static double pull_z(const Config& config, const Pin& pin)
-{ return config.origin_z + double(pin.col - config.origin_col) * config.col_pitch_z; }
+{ return config.pull_origin_z + double(pin.col) * config.col_pitch_z; }
 
 std::vector<Pin> parse_pin_list(const std::string& pins)
 {
@@ -105,8 +105,8 @@ std::vector<Pin> candidate_pins(const Config& config)
     if (config.row_count <= 0 || config.col_count <= 0)
         return out;
     out.reserve(size_t(config.row_count) * size_t(config.col_count));
-    for (int row = config.origin_row; row < config.origin_row + config.row_count; ++row)
-        for (int col = config.origin_col; col < config.origin_col + config.col_count; ++col)
+    for (int row = 0; row < config.row_count; ++row)
+        for (int col = 0; col < config.col_count; ++col)
             out.push_back({row, col});
     return out;
 }
@@ -188,6 +188,37 @@ static std::vector<fs::path> config_candidates(const std::string& path)
     return out;
 }
 
+static bool has_number_value(const nlohmann::json& object, const char* key)
+{
+    if (!object.contains(key))
+        return false;
+    const nlohmann::json& value = object[key];
+    if (value.is_number())
+        return true;
+    if (!value.is_string())
+        return false;
+
+    try {
+        size_t consumed = 0;
+        std::stod(value.get<std::string>(), &consumed);
+        return consumed == value.get<std::string>().size();
+    } catch (...) {
+        return false;
+    }
+}
+
+static std::optional<double> bed_max_x(const Print& print)
+{
+    const Points bed = get_bed_shape(print.config());
+    if (bed.empty())
+        return std::nullopt;
+
+    coord_t max_x = bed.front().x();
+    for (const Point& point : bed)
+        max_x = std::max(max_x, point.x());
+    return unscale_(max_x);
+}
+
 bool load_config_for_print(const Print& print, Config& config, std::string* error)
 {
     const std::string config_path = print.config().dynapin_config_path.value;
@@ -224,42 +255,24 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
         return false;
     }
 
-    const nlohmann::json grid   = j.contains("grid") && j["grid"].is_object() ? j["grid"] : nlohmann::json::object();
-    config.origin_row           = int_or(grid, "origin_row", config.origin_row);
-    config.origin_col           = int_or(grid, "origin_col", config.origin_col);
-    config.row_count            = int_or(grid, "row_count", config.row_count);
-    config.col_count            = int_or(grid, "col_count", config.col_count);
-    config.origin_y             = number_or(grid, "origin_y", config.origin_y);
-    config.origin_z             = number_or(grid, "origin_z", config.origin_z);
-    config.row_pitch_y          = number_or(grid, "row_pitch_y", config.row_pitch_y);
-    config.col_pitch_z          = number_or(grid, "col_pitch_z", config.col_pitch_z);
-    const nlohmann::json origin = grid.contains("origin") && grid["origin"].is_object() ? grid["origin"] : nlohmann::json::object();
-    config.origin_row           = int_or(origin, "row", config.origin_row);
-    config.origin_col           = int_or(origin, "col", config.origin_col);
-    config.origin_y             = number_or(origin, "y", config.origin_y);
-    config.origin_z             = number_or(origin, "z", config.origin_z);
-    const nlohmann::json pitch  = grid.contains("pitch") && grid["pitch"].is_object() ? grid["pitch"] : nlohmann::json::object();
-    config.row_pitch_y          = number_or(pitch, "row_y", config.row_pitch_y);
-    config.col_pitch_z          = number_or(pitch, "col_z", config.col_pitch_z);
-    const nlohmann::json physical_origin = grid.contains("physical_origin") && grid["physical_origin"].is_object() ?
-                                               grid["physical_origin"] :
-                                               nlohmann::json::object();
-    if (physical_origin.contains("y"))
-        config.physical_origin_y = number_or(physical_origin, "y", config.origin_y);
-    if (physical_origin.contains("z"))
-        config.physical_origin_z = number_or(physical_origin, "z", config.origin_z);
+    const nlohmann::json grid           = j.contains("grid") && j["grid"].is_object() ? j["grid"] : nlohmann::json::object();
+    config.row_count                    = int_or(grid, "row_count", config.row_count);
+    config.col_count                    = int_or(grid, "col_count", config.col_count);
+    const nlohmann::json pull_origin    = grid.contains("pull_origin") && grid["pull_origin"].is_object() ? grid["pull_origin"] :
+                                                                                                            nlohmann::json::object();
+    config.pull_origin_y                = number_or(pull_origin, "y", config.pull_origin_y);
+    config.pull_origin_z                = number_or(pull_origin, "z", config.pull_origin_z);
+    const nlohmann::json support_origin = grid.contains("support_origin") && grid["support_origin"].is_object() ? grid["support_origin"] :
+                                                                                                                  nlohmann::json::object();
+    config.support_origin_y             = number_or(support_origin, "y", config.support_origin_y);
+    config.support_origin_z             = number_or(support_origin, "z", config.support_origin_z);
+    const nlohmann::json pitch          = grid.contains("pitch") && grid["pitch"].is_object() ? grid["pitch"] : nlohmann::json::object();
+    config.row_pitch_y                  = number_or(pitch, "row_y", config.row_pitch_y);
+    config.col_pitch_z                  = number_or(pitch, "col_z", config.col_pitch_z);
 
     const nlohmann::json exclusion = j.contains("support_exclusion") && j["support_exclusion"].is_object() ? j["support_exclusion"] :
                                                                                                              nlohmann::json::object();
-    config.blocker_center_x        = number_or(exclusion, "center_x", number_or(exclusion, "x_center", config.blocker_center_x));
-    config.blocker_width_x         = number_or(exclusion, "width_x", number_or(exclusion, "x_width", config.blocker_width_x));
     config.blocker_width_y         = number_or(exclusion, "width_y", number_or(exclusion, "y_width", config.blocker_width_y));
-    if (exclusion.contains("x_min") && exclusion.contains("x_max") && exclusion["x_min"].is_number() && exclusion["x_max"].is_number()) {
-        const double x_min      = exclusion["x_min"].get<double>();
-        const double x_max      = exclusion["x_max"].get<double>();
-        config.blocker_center_x = 0.5 * (x_min + x_max);
-        config.blocker_width_x  = std::abs(x_max - x_min);
-    }
     config.blocker_z_max = number_or(exclusion, "z_above", number_or(exclusion, "z_max", config.blocker_z_max));
     config.pin_z_height  = number_or(exclusion, "pin_z_height", config.pin_z_height);
     const double z_range = number_or(exclusion, "z_range", 0.);
@@ -280,49 +293,42 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
     config.pull_gcode.pull_feedrate_fast = number_or(pull, "pull_feedrate_fast", config.pull_gcode.pull_feedrate_fast);
     config.pull_gcode.disengage_x_offset = number_or(pull, "disengage_x_offset", config.pull_gcode.disengage_x_offset);
 
-    if (config.blocker_width_x <= 0. || config.blocker_width_y <= 0. || config.row_pitch_y == 0. || config.col_pitch_z == 0.) {
+    const std::optional<double> max_x_bed = bed_max_x(print);
+    if (!max_x_bed) {
+        const std::string message = "DynaPin config requires a printable bed X range";
         if (error)
-            *error = "DynaPin config is missing required grid or support_exclusion dimensions";
+            *error = message;
+        else
+            BOOST_LOG_TRIVIAL(warning) << "[DynaPin] cannot generate geometry: " << message;
+        return false;
+    }
+    if (!has_number_value(pull, "x_front") || !std::isfinite(config.pull_gcode.x_front) || config.pull_gcode.x_front >= *max_x_bed ||
+        config.blocker_width_y <= 0. || config.row_pitch_y == 0. || config.col_pitch_z == 0.) {
+        if (error)
+            *error = "DynaPin config requires pull_gcode.x_front and valid grid/support_exclusion dimensions";
         return false;
     }
 
     BOOST_LOG_TRIVIAL(debug) << "[DynaPin] config loaded: requested='" << config_path << "', resolved='" << resolved.string()
-                             << "', grid_origin=(" << config.origin_row << "," << config.origin_col << ")"
-                             << ", grid_size=" << config.row_count << "x" << config.col_count
-                             << ", origin_mm=(" << config.origin_y << "," << config.origin_z << ")"
-                             << ", physical_origin_mm=(" << config.physical_origin_y.value_or(config.origin_y) << ","
-                             << config.physical_origin_z.value_or(config.origin_z) << ")"
+                             << "', grid_size=" << config.row_count << "x" << config.col_count << ", pull_origin_mm=("
+                             << config.pull_origin_y << "," << config.pull_origin_z << ")"
+                             << ", support_origin_mm=(" << config.support_origin_y << "," << config.support_origin_z << ")"
                              << ", pitch_mm=(" << config.row_pitch_y << "," << config.col_pitch_z << ")"
-                             << ", exclusion_center_mm=(" << config.blocker_center_x << ","
-                             << config.physical_origin_y.value_or(config.origin_y) + support_block_y_offset << ")"
-                             << ", exclusion_size_mm=(" << config.blocker_width_x << "," << config.blocker_width_y << ")"
-                             << ", z_range_mm=(" << config.physical_origin_z.value_or(config.origin_z) - config.pin_z_height
-                             << "," << config.physical_origin_z.value_or(config.origin_z) + config.blocker_z_max << ")";
+                             << ", exclusion_x_mm=[" << config.pull_gcode.x_front << "," << *max_x_bed << "]"
+                             << ", exclusion_y_center_mm=" << config.support_origin_y + support_block_y_offset
+                             << ", exclusion_width_y_mm=" << config.blocker_width_y << ", z_range_mm=("
+                             << config.support_origin_z - config.pin_z_height << "," << config.support_origin_z + config.blocker_z_max
+                             << ")";
     return true;
 }
 
-// Maximum X (in mm) reachable on the bed, taken from the printer's printable
-// area. The support blocker is extended out to this edge so the pin can be
-// pulled clear of the print. Falls back to the blocker's own right edge when
-// the bed shape is unavailable.
-static double bed_max_x(const Print& print, const Config& config)
-{
-    const Points bed = get_bed_shape(print.config());
-    if (bed.empty())
-        return config.blocker_center_x + 0.5 * config.blocker_width_x;
-    coord_t max_x = bed.front().x();
-    for (const Point& p : bed)
-        max_x = std::max(max_x, p.x());
-    return unscale_(max_x);
-}
-
-LocalBlocker blocker_for_pin_shift(const Config& config, const Pin& pin, const Point& shift, double max_x_bed)
+static LocalBlocker blocker_for_pin_shift(const Config& config, const Pin& pin, const Point& shift, double max_x_bed)
 {
     const double y       = pin_y(config, pin);
     const double z       = pin_z(config, pin);
     const double block_y = y + support_block_y_offset;
-    const double min_x   = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
-    const double max_x   = (max_x_bed > 0.0) ? max_x_bed : (config.blocker_center_x + 0.5 * config.blocker_width_x);
+    const double min_x   = config.pull_gcode.x_front;
+    const double max_x   = max_x_bed;
     const double min_y   = block_y - 0.5 * config.blocker_width_y;
     const double max_y   = block_y + 0.5 * config.blocker_width_y;
 
@@ -336,23 +342,21 @@ LocalBlocker blocker_for_pin_shift(const Config& config, const Pin& pin, const P
     return blocker;
 }
 
-LocalBlocker blocker_for_pin_shift(const Config& config, const Pin& pin, const Point& shift)
-{
-    return blocker_for_pin_shift(config, pin, shift, 0.0);
-}
-
 LocalBlocker blocker_for_pin(const PrintObject& object, const Config& config, const Pin& pin)
 {
     const Print& print = *object.print();
     const Point shift = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
-    return blocker_for_pin_shift(config, pin, shift, bed_max_x(print, config));
+    const std::optional<double> max_x_bed = bed_max_x(print);
+    if (!max_x_bed)
+        return {};
+    return blocker_for_pin_shift(config, pin, shift, *max_x_bed);
 }
 
-VirtualSupportSurface surface_for_pin_shift(const Config& config, const Pin& pin, const Point& shift)
+static VirtualSupportSurface surface_for_pin_shift(const Config& config, const Pin& pin, const Point& shift, double max_x_bed)
 {
     const double block_y = pin_y(config, pin) + support_block_y_offset;
-    const double min_x   = config.blocker_center_x - 0.5 * config.blocker_width_x;
-    const double max_x   = config.blocker_center_x + 0.5 * config.blocker_width_x;
+    const double min_x   = config.pull_gcode.x_front;
+    const double max_x   = max_x_bed;
     const double min_y   = block_y - 0.5 * config.blocker_width_y;
     const double max_y   = block_y + 0.5 * config.blocker_width_y;
 
@@ -367,16 +371,24 @@ VirtualSupportSurface surface_for_pin_shift(const Config& config, const Pin& pin
 
 VirtualSupportSurface surface_for_pin(const PrintObject& object, const Config& config, const Pin& pin)
 {
-    const Point shift = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
-    return surface_for_pin_shift(config, pin, shift);
+    const Print& print = *object.print();
+    const Point shift  = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
+    const std::optional<double> max_x_bed = bed_max_x(print);
+    if (!max_x_bed)
+        return {};
+    return surface_for_pin_shift(config, pin, shift, *max_x_bed);
 }
 
 bool pin_collides_with_model(const Print& print, const Config& config, const Pin& pin)
 {
-    const double max_x_bed = bed_max_x(print, config);
+    const std::optional<double> max_x_bed = bed_max_x(print);
+    if (!max_x_bed) {
+        BOOST_LOG_TRIVIAL(warning) << "[DynaPin] cannot check pin collision without a printable bed X range";
+        return true;
+    }
     for (const PrintObject* object : print.objects()) {
         const auto check_instance = [&](const Point& shift) {
-            const LocalBlocker blocker = blocker_for_pin_shift(config, pin, shift, max_x_bed);
+            const LocalBlocker blocker = blocker_for_pin_shift(config, pin, shift, *max_x_bed);
             for (const Layer* layer : object->layers()) {
                 if (layer->print_z + EPSILON < blocker.z_min || layer->print_z - EPSILON > blocker.z_max)
                     continue;
@@ -497,15 +509,17 @@ std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
         return out;
     }
 
-    const std::vector<Pin>& pins     = resolved_pins(print);
-    const double           max_x_bed = bed_max_x(print, config);
+    const std::vector<Pin>& pins = resolved_pins(print);
+    const std::optional<double> max_x_bed = bed_max_x(print);
+    if (!max_x_bed)
+        return out;
     out.reserve(pins.size());
     for (const Pin& pin : pins) {
         const double y       = pin_y(config, pin);
         const double z       = pin_z(config, pin);
         const double block_y = y + support_block_y_offset;
-        const double min_x   = std::min(config.blocker_center_x - 0.5 * config.blocker_width_x, config.pull_gcode.x_front);
-        const double max_x   = max_x_bed;
+        const double min_x   = config.pull_gcode.x_front;
+        const double max_x   = *max_x_bed;
         const double min_y   = block_y - 0.5 * config.blocker_width_y;
         const double max_y   = block_y + 0.5 * config.blocker_width_y;
         const double z_min   = z - config.pin_z_height;
@@ -515,7 +529,7 @@ std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
         box.pin     = pin;
         box.min     = Vec3d(min_x, min_y, z_min);
         box.max     = Vec3d(max_x, max_y, z_max);
-        box.pin_pos = Vec3d(config.blocker_center_x, block_y, z);
+        box.pin_pos = Vec3d(min_x, block_y, z);
         out.push_back(box);
     }
     return out;

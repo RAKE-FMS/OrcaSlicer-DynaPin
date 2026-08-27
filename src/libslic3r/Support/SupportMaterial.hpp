@@ -76,9 +76,7 @@ private:
 	    const SupportGeneratorLayersPtr   &bottom_contacts,
 	    const SupportGeneratorLayersPtr   &top_contacts,
 	    SupportGeneratorLayersPtr         &intermediate_layers,
-	    const std::vector<Polygons> &layer_support_areas,
-	    // DynaPin: ピン上面を仮想的なサポート着地面として渡す
-	    const std::vector<DynaPin::VirtualSupportSurface> &dynapin_surfaces = {}) const;
+	    const std::vector<Polygons> &layer_support_areas) const;
 
 
 

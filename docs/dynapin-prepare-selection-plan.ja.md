@@ -61,12 +61,16 @@ DynaPin の物理ピンは、造形物でもシーン上の3Dボリュームで�
 ```json
 {
   "grid": {
-    "origin": {
-      "row": 0,
-      "col": 0,
+    "pull_origin": {
       "y": "63.6",
       "z": "4.0"
     },
+    "support_origin": {
+      "y": "63.6",
+      "z": "4.0"
+    },
+    "row_count": 10,
+    "col_count": 14,
     "pitch": {
       "row_y": "12.4",
       "col_z": "7.4"
@@ -128,21 +132,15 @@ DynaPin の物理ピンは、造形物でもシーン上の3Dボリュームで�
 
 ## 現状実装との差分
 
-ただし、現状の実装は上記 JSON をそのままは読めない。
+現行の `load_config_for_print()` は `grid.pull_origin`、`grid.support_origin`、`grid.pitch`、`row_count`、`col_count` を読み込む。数値はJSONのnumberとnumeric stringの両方に対応する。
 
-- 現状の `load_config_for_print()` は `grid.origin_row` ではなく `grid.origin_row` のようなフラットキーを期待している。
-- `grid.origin.y` や `grid.pitch.row_y` のようなネスト構造は未対応である。
-- 数値を文字列で持つ形式にも未対応である。
+ただし、現状の実装は上記 JSON の拡張部分をすべては読まない。
+
 - `pull_gcode.feed_rate` / `middle_feed_rate` / `fast_feed_rate` という命名は未対応で、現状は `travel_feedrate` と `pull_feedrate` だけを読んでいる。
 - `insertion` は未使用である。
 - `remove_rules` も未使用で、現状は `support_exclusion` という単一矩形ベースの設定だけを読んでいる。
 
-したがって、将来この参照 JSON を正式採用する場合は、次のいずれかが必要になる。
-
-- JSON ローダーを新スキーマに合わせて拡張する
-- 互換レイヤーを設けて、旧スキーマと新スキーマの両方を読めるようにする
-
-推奨は後者である。既存開発物を壊さず、段階的に移行できるためである。
+`grid.origin`、`grid.physical_origin`、`origin_row`、`origin_col`、`origin_y`、`origin_z` は現行スキーマでは使用しない。row/colは常に0始まりとする。
 
 ## 参照 JSON を踏まえた方針補強
 

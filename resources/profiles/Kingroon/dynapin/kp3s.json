@@ -1,14 +1,12 @@
 {
   "grid": {
-    "origin": {
-      "row": 0,
-      "col": 0,
+    "pull_origin": {
       "y": "14",
       "z": "5.0"
     },
     "row_count": 10,
     "col_count": 14,
-    "physical_origin": {
+    "support_origin": {
       "y": "18.0",
       "z": "4.0"
     },
@@ -18,8 +16,6 @@
     }
   },
   "support_exclusion": {
-    "center_x": 110,
-    "width_x": 100,
     "width_y": 12.4,
     "z_above": 2.15,
     "pin_z_height": 5
