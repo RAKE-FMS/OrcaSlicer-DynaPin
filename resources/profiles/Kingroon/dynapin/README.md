@@ -8,18 +8,17 @@ DynaPinはプリンタのY軸側面に取り付けたピンアレイを使って
 ## 動作の概要
 
 ```
-Y軸 (プリンタ手前 ←→ 奥)
+Z軸 (印刷高さ)
   ↑
-  │  [ピンアレイ]  row=0  row=1  row=2 ...
-  │              ○      ○      ○       ← col=0  (ブロッカー上端Z=support_origin.z)
-  │              ○      ○      ○       ← col=1  (ブロッカー上端Z=support_origin.z + col_pitch_z)
-  │              ○      ○      ○       ← col=2
-  │
-  └─────────────────────────────────── Z軸 (印刷高さ)
+  │  row=2  ○      ○      ○
+  │  row=1  ○      ○      ○
+  │  row=0  ○      ○      ○
+  │         col=0  col=1  col=2 ...
+  └──────────────────────────────────→ Y軸 (プリンタ手前 ←→ 奥)
 ```
 
-- **行 (row)** … Y軸方向に並ぶピン。`row_pitch_y` ごとに配置。
-- **列 (col)** … Z軸（高さ）方向に並ぶピン。`col_pitch_z` ごとに配置。
+- **行 (row)** … Z軸（高さ）方向に並ぶピン。`row_pitch_z` ごとに配置。
+- **列 (col)** … Y軸方向に並ぶピン。`col_pitch_y` ごとに配置。
 
 指定したレイヤー（ピンのZ高さ）に達したとき、ノズルがX軸を移動してピンを引き出す。
 
@@ -49,7 +48,7 @@ x_hook  x_latch             x_front
 ```
 Z
 ↑
-│  z_max = support_origin.z + col × col_pitch_z
+│  z_max = support_origin.z + row × row_pitch_z
 │  ┌──────────────────────┐
 │  │   サポート除外領域    │
 │  │                      │
@@ -96,8 +95,8 @@ Z
   "row_count": 10,
   "col_count": 14,
   "pitch": {
-    "row_y": 12.4,
-    "col_z": 7.4
+    "row_z": 7.4,
+    "col_y": 12.4
   }
 }
 ```
@@ -107,28 +106,28 @@ Z
 | `pull_origin.y` | number | ○ | 引き抜きG-codeのY基準座標 [mm] |
 | `pull_origin.z` | number | ○ | 引き抜きG-codeのZ基準座標 [mm] |
 | `support_origin.y` | number | ○ | 実ピン配列・サポート形状のY基準座標 [mm] |
-| `support_origin.z` | number | ○ | col=0 のサポートブロッカー上端のZ座標 [mm] |
-| `row_count` | int | ○ | `row=0` から存在するピン行数 |
-| `col_count` | int | ○ | `col=0` から存在するピン列数 |
-| `pitch.row_y` | number | ○ | 行間ピッチ（Y方向）[mm] |
-| `pitch.col_z` | number | ○ | 列間ピッチ（Z方向）[mm] |
+| `support_origin.z` | number | ○ | row=0 のサポートブロッカー上端のZ座標 [mm] |
+| `row_count` | int | ○ | `row=0` から存在するピン行数（Z方向） |
+| `col_count` | int | ○ | `col=0` から存在するピン列数（Y方向） |
+| `pitch.row_z` | number | ○ | 行間ピッチ（Z方向）[mm] |
+| `pitch.col_y` | number | ○ | 列間ピッチ（Y方向）[mm] |
 
 ピン `(row, col)` の座標は、論理的な行・列ともに0始まりです。
 
 引き抜きG-codeの座標：
 ```
-pull_y = pull_origin.y + row × pitch.row_y + pull_gcode.y_offset
-pull_z = pull_origin.z + col × pitch.col_z
+pull_y = pull_origin.y + col × pitch.col_y + pull_gcode.y_offset
+pull_z = pull_origin.z + row × pitch.row_z
 ```
 
 サポートブロッカー上端の座標：
 ```
-blocker_y   = support_origin.y + row × pitch.row_y
-blocker_z_max = support_origin.z + col × pitch.col_z
+blocker_y   = support_origin.y + col × pitch.col_y
+blocker_z_max = support_origin.z + row × pitch.row_z
 blocker_z_min = blocker_z_max - blocker_height_z
 ```
 
-`dynapin_selected_pins` が空の場合は、この行数・列数で列挙したピンを自動選択候補として使用します。
+`dynapin_selected_pins` が空の場合は、この行数・列数で列挙したピンを自動選択候補として使用します。`row` はZ方向の高さ、`col` はY方向の位置を表します。
 
 ---
 
@@ -215,6 +214,8 @@ X範囲は `pull_gcode.x_front` とプリンタの `printable_area` から自動
 `center_x`、`width_x`、`x_min`、`x_max` は使用しません。X範囲は必ず `pull_gcode.x_front..bed_max_x` になります。
 
 `grid.origin`、`grid.physical_origin`、`origin_row`、`origin_col`、`origin_y`、`origin_z` は読み込まれません。新しい設定では必ず `pull_origin` と `support_origin` を使用してください。
+
+旧 `pitch.row_y` と `pitch.col_z` も読み込まれません。新しい設定では `pitch.row_z` と `pitch.col_y` を使用してください。
 
 | 旧フィールド | 現在の解釈 |
 |---|---|

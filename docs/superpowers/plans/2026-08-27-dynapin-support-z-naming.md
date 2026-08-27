@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Steps use [ ] syntax and must be completed task-by-task.
 
-**Goal:** Make support_origin.z the per-column blocker-top origin, remove the relative z_above/pin_z concepts, and use consistent blocker dimension names.
+**Goal:** Make support_origin.z the per-row blocker-top origin, remove the relative z_above/pin_z concepts, and use consistent blocker dimension names.
 
-**Architecture:** DynaPin will expose one BlockerZRange calculation per (row, col) pin. The range is z_max = support_origin.z + col * col_pitch_z and z_min = z_max - blocker_height_z; blocker geometry, virtual landing surfaces, preview boxes, sorting, and G-code scheduling consume this range. SupportMaterial.cpp continues to consume computed z_min, z_max, and surface.print_z.
+**Architecture:** DynaPin will expose one BlockerZRange calculation per (row, col) pin. The range is z_max = support_origin.z + row * row_pitch_z and z_min = z_max - blocker_height_z; blocker geometry, virtual landing surfaces, preview boxes, sorting, and G-code scheduling consume this range. SupportMaterial.cpp continues to consume computed z_min, z_max, and surface.print_z.
 
 **Tech Stack:** C++17, nlohmann::json, Catch2, CMake/CTest, Markdown, JSON printer profiles.
 
@@ -35,7 +35,7 @@ Replace the direct pin_z() assertion in the existing “DynaPin support and pull
 
 ~~~cpp
     config.support_origin_z    = 7.55;
-    config.col_pitch_z         = 7.4;
+    config.row_pitch_z         = 7.4;
     config.blocker_height_z    = 5.;
 
     const DynaPin::Pin pin{1, 1};
@@ -99,12 +99,12 @@ Replace pin_z() with:
 ~~~cpp
 BlockerZRange blocker_z_range(const Config& config, const Pin& pin)
 {
-    const double z_max = config.support_origin_z + double(pin.col) * config.col_pitch_z;
+    const double z_max = config.support_origin_z + double(pin.row) * config.row_pitch_z;
     return { z_max - config.blocker_height_z, z_max };
 }
 ~~~
 
-Here support_origin.z is the blocker top origin for column zero.
+Here support_origin.z is the blocker top origin for row zero.
 
 - [ ] **Step 2: Parse only the new JSON keys**
 
@@ -210,11 +210,11 @@ For pin 4,4 this yields z_min=32.15 and z_max=37.15.
 Document:
 
 ~~~text
-blocker_z_max = support_origin.z + col × pitch.col_z
+blocker_z_max = support_origin.z + row × pitch.row_z
 blocker_z_min = blocker_z_max - blocker_height_z
 ~~~
 
-State that support_origin.z is the blocker-top origin for column zero, blocker_height_z extends downward, the virtual support surface is at blocker_z_max, and pull coordinates remain controlled by pull_origin. Replace all removed-name examples and schema entries.
+State that support_origin.z is the blocker-top origin for row zero, blocker_height_z extends downward, the virtual support surface is at blocker_z_max, and pull coordinates remain controlled by pull_origin. Replace all removed-name examples and schema entries.
 
 - [ ] **Step 3: Align AGENTS.md with the new safety invariant**
 

@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make DynaPin support-blocker geometry express its upper Z boundary directly: `support_origin.z` becomes the blocker-top origin for column zero, `z_above` is removed, and blocker dimensions follow one consistent `<object>_<dimension>_<axis>` naming rule.
+Make DynaPin support-blocker geometry express its upper Z boundary directly: `support_origin.z` becomes the blocker-top origin for row zero, `z_above` is removed, and blocker dimensions follow one consistent `<object>_<dimension>_<axis>` naming rule.
 
 ## Scope
 
@@ -10,7 +10,7 @@ This change covers the DynaPin runtime configuration, support geometry, automati
 
 ## Current problem
 
-The current implementation calculates a pin reference height with `pin_z = support_origin.z + col * pitch.col_z`, then derives the blocker range as:
+The current implementation calculates a pin reference height with `pin_z = support_origin.z + row * pitch.row_z`, then derives the blocker range as:
 
 ```text
 z_min = pin_z - pin_z_height
@@ -31,8 +31,8 @@ The bundled configuration uses the following schema:
       "z": 7.55
     },
     "pitch": {
-      "row_y": 12.4,
-      "col_z": 7.4
+      "row_z": 7.4,
+      "col_y": 12.4
     }
   },
   "support_exclusion": {
@@ -42,10 +42,10 @@ The bundled configuration uses the following schema:
 }
 ```
 
-`support_origin.z` is the upper Z boundary of the support blocker for `col=0`. The upper boundary for a pin is:
+`support_origin.z` is the upper Z boundary of the support blocker for `row=0`. The upper boundary for a pin is:
 
 ```text
-z_max = support_origin.z + col * pitch.col_z
+z_max = support_origin.z + row * pitch.row_z
 ```
 
 `blocker_height_z` is the downward height of the blocker from that upper boundary:
@@ -54,13 +54,13 @@ z_max = support_origin.z + col * pitch.col_z
 z_min = z_max - blocker_height_z
 ```
 
-For the KP3S configuration, `support_origin.z = 7.55` gives the selected `4,4` pin an upper boundary of `7.55 + 4 * 7.4 = 37.15 mm`, and a lower boundary of `32.15 mm` with `blocker_height_z = 5.0`.
+For the KP3S configuration, `support_origin.z = 7.55` gives the selected `4,4` pin an upper boundary of `7.55 + 4 * 7.4 = 37.15 mm`, and a lower boundary of `32.15 mm` with `blocker_height_z = 5.0`. The first coordinate is the Z row and the second is the Y column.
 
 The naming rule is `<object>_<dimension>_<axis>`:
 
 - `blocker_width_y`: blocker width along Y.
 - `blocker_height_z`: blocker height along Z.
-- Existing `row_pitch_y` and `col_pitch_z` already follow the same axis-suffix convention.
+- `row_pitch_z` and `col_pitch_y` follow the same axis-suffix convention.
 
 The old `z_above`, `z_max`, `z_range`, `width_y`, `y_width`, and `pin_z_height` configuration keys are not read as aliases. This is an intentional schema change; the bundled configuration and documentation are updated together.
 
@@ -102,10 +102,10 @@ The pull path continues to use `pull_origin` and `pull_z`; it is not derived fro
 
 Update focused DynaPin tests to verify:
 
-1. `blocker_z_range()` calculates the expected top-origin range for multiple columns.
+1. `blocker_z_range()` calculates the expected top-origin range for multiple rows.
 2. The KP3S configuration produces `z=32.15..37.15` for pin `4,4`.
 3. Support blocker and virtual surface use the same `z_max`.
-4. Pin sorting still follows physical column height without `pin_z()`.
+4. Pin sorting still follows physical row height without `pin_z()`.
 5. G-code pull scheduling uses the range top and pull motion still uses `pull_origin`.
 6. Existing stacked-pin and downward-propagation tests preserve their intended isolation and termination behavior with the updated fixture heights.
 
@@ -113,6 +113,6 @@ Run the focused DynaPin and support-material tests, then run the relevant CTest 
 
 ## Non-goals
 
-- No change to the DynaPin row/column indexing, Y support offset, XY blocker dimensions beyond the naming change, or pull motion sequence.
+- The corrected DynaPin address semantics are `row → Z` and `col → Y`; the Y support offset, XY blocker dimensions beyond the naming change, and pull motion sequence are unchanged.
 - No compatibility parser for the removed support-exclusion aliases.
 - No change to Tree/Organic support behavior outside the existing DynaPin integration points.

@@ -21,11 +21,11 @@ Replace every direct assignment to `config.origin_y`, `config.origin_z`, `config
 
 - [x] **Step 2: Make the candidate-grid test assert the fixed zero-based contract**
 
-Rename `DynaPin candidate grid starts at the configured origin` to `DynaPin candidate grid starts at zero`, remove the `origin_row` and `origin_col` setup, and continue asserting that a `10 x 14` grid produces `{0, 0}` through `{9, 13}`. This ensures the test no longer implies that an origin index is configurable.
+Rename `DynaPin candidate grid starts at the configured origin` to `DynaPin candidate grid starts at zero`, remove the `origin_row` and `origin_col` setup, and assert that a `14 x 10` grid produces `{0, 0}` through `{13, 9}`. This ensures the test no longer implies that an origin index is configurable.
 
 - [x] **Step 3: Update the sorting test to configure the support Z base**
 
-Set `config.support_origin_z = 5.` in the physical-height sorting test. Keep the pin list and expected order unchanged; the test should continue proving that sorting is based on `support_origin_z + col * col_pitch_z`.
+Set `config.support_origin_z = 5.` in the physical-height sorting test. Keep the pin list and expected order aligned with the corrected mapping; the test should continue proving that sorting is based on `support_origin_z + row * row_pitch_z`.
 
 - [x] **Step 4: Run the focused test target before implementation**
 
@@ -56,8 +56,8 @@ double pull_origin_y = 0.;
 double pull_origin_z = 0.;
 double support_origin_y = 0.;
 double support_origin_z = 0.;
-double row_pitch_y = 0.;
-double col_pitch_z = 0.;
+double row_pitch_z = 0.;
+double col_pitch_y = 0.;
 ```
 
 Remove `origin_row`, `origin_col`, `origin_y`, `origin_z`, and the optional physical-origin fields. Remove the now-unused `<optional>` include from the header if no other declaration uses it.
@@ -68,16 +68,16 @@ Use these formulas in `DynaPin.cpp`:
 
 ```cpp
 double pin_y(const Config& config, const Pin& pin)
-{ return config.support_origin_y + double(pin.row) * config.row_pitch_y; }
+{ return config.support_origin_y + double(pin.col) * config.col_pitch_y; }
 
 double pin_z(const Config& config, const Pin& pin)
-{ return config.support_origin_z + double(pin.col) * config.col_pitch_z; }
+{ return config.support_origin_z + double(pin.row) * config.row_pitch_z; }
 
 static double pull_y(const Config& config, const Pin& pin)
-{ return config.pull_origin_y + double(pin.row) * config.row_pitch_y + config.pull_gcode.y_offset; }
+{ return config.pull_origin_y + double(pin.col) * config.col_pitch_y + config.pull_gcode.y_offset; }
 
 static double pull_z(const Config& config, const Pin& pin)
-{ return config.pull_origin_z + double(pin.col) * config.col_pitch_z; }
+{ return config.pull_origin_z + double(pin.row) * config.row_pitch_z; }
 ```
 
 Update `candidate_pins()` to loop with `row = 0; row < row_count` and `col = 0; col < col_count`. Do not modify `Pin::row` / `Pin::col` or selected-pin parsing.
@@ -145,10 +145,10 @@ Remove `row` and `col` from the JSON entirely. Preserve row/column counts, pitch
 Document `pull_origin.y/z` as the pull-G-code base and `support_origin.y/z` as the installed pin-array/support-geometry base. State that row and column indices always start at zero. Replace formulas with:
 
 ```text
-pull_y = pull_origin.y + row × pitch.row_y + pull_gcode.y_offset
-pull_z = pull_origin.z + col × pitch.col_z
-support_pin_y = support_origin.y + row × pitch.row_y
-support_pin_z = support_origin.z + col × pitch.col_z
+pull_y = pull_origin.y + col × pitch.col_y + pull_gcode.y_offset
+pull_z = pull_origin.z + row × pitch.row_z
+support_pin_y = support_origin.y + col × pitch.col_y
+support_pin_z = support_origin.z + row × pitch.row_z
 ```
 
 Remove the old-origin migration section and all references to `origin.row`, `origin.col`, and configurable origin indices. Keep the selected-pin syntax as `row,col`.
@@ -216,10 +216,10 @@ Expected: the source/configuration search returns no old runtime names, and `git
 Confirm that:
 
 ```text
-pin_y = support_origin_y + row * row_pitch_y
-pin_z = support_origin_z + col * col_pitch_z
-pull_y = pull_origin_y + row * row_pitch_y + y_offset
-pull_z = pull_origin_z + col * col_pitch_z
+pin_y = support_origin_y + col * col_pitch_y
+pin_z = support_origin_z + row * row_pitch_z
+pull_y = pull_origin_y + col * col_pitch_y + y_offset
+pull_z = pull_origin_z + row * row_pitch_z
 ```
 
 and that `support_block_y_offset`, `approach_y_offset`, `z_offset`, selected-pin syntax, preview comments, and support projection termination behavior are unchanged.

@@ -13,7 +13,7 @@ The primary implementation path is an OrcaSlicer core change. OrcaSlicer does no
   - Add only `dynapin_config_path` to the machine preset, using a relative path.
   - Use the same key for user machine presets, with user-profile JSON taking priority when available.
 - Base the DynaPin Config shape on PyDynaPin.
-  - `grid`: `pull_origin`, `support_origin`, row/column counts, row pitch Y, and col pitch Z; row/col indices always start at zero
+  - `grid`: `pull_origin`, `support_origin`, row/column counts, row pitch Z, and col pitch Y; row/col indices always start at zero
   - `support_exclusion`: Y/X width around the pin center, target Z range or layer range
   - `pull_gcode`: `x_hook`, `x_latch`, `x_front`, offsets, feed rates
 - Store slice-time operation settings on the project or object side.
@@ -35,7 +35,7 @@ The primary implementation path is an OrcaSlicer core change. OrcaSlicer does no
   - Read the correct JSON from a machine preset's `dynapin_config_path`.
   - Handle missing config, missing files, and invalid JSON with a clear error or by disabling the feature.
 - Pin calculation:
-  - Verify PyDynaPin-compatible `row,col -> Y,Z` calculation.
+  - Verify PyDynaPin-compatible `row,col -> Z,Y` calculation.
   - Detect duplicate and invalid pin selections.
 - Support generation:
   - Confirm target-area support polygons/extrusions disappear for both normal and tree supports.

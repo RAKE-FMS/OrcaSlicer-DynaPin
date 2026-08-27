@@ -28,8 +28,8 @@ The `grid` section becomes:
     "row_count": 10,
     "col_count": 14,
     "pitch": {
-      "row_y": 12.4,
-      "col_z": 7.4
+      "row_z": 7.4,
+      "col_y": 12.4
     }
   }
 }
@@ -42,11 +42,11 @@ The `grid` section becomes:
 The grid origin is always row `0`, column `0`:
 
 ```text
-pull_y = pull_origin.y + row * pitch.row_y + pull_gcode.y_offset
-pull_z = pull_origin.z + col * pitch.col_z
+pull_y = pull_origin.y + col * pitch.col_y + pull_gcode.y_offset
+pull_z = pull_origin.z + row * pitch.row_z
 
-support_pin_y = support_origin.y + row * pitch.row_y
-support_pin_z = support_origin.z + col * pitch.col_z
+support_pin_y = support_origin.y + col * pitch.col_y
+support_pin_z = support_origin.z + row * pitch.row_z
 ```
 
 Candidate pins are enumerated as `row = 0 .. row_count - 1` and `col = 0 .. col_count - 1`.
@@ -80,4 +80,3 @@ The bundled KP3S JSON and `resources/profiles/Kingroon/dynapin/README.md` will d
 - Do not change the physical `support_block_y_offset`.
 - Do not change pin selection syntax, DynaPin preview comment syntax, support-selection behavior, or support geometry dimensions.
 - Do not add compatibility parsing for the old schema.
-
