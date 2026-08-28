@@ -155,7 +155,7 @@ SCENARIO("SupportMaterial: DynaPin keeps normal interfaces without a synthetic p
         {"enable_support", true},
         {"enable_dynapin_support_optimization", true},
         {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
-        {"dynapin_selected_pins", "0,5"},
+        {"dynapin_selected_pins", "5,0"},
         {"dynapin_debug_stage", 2},
         {"support_type", "normal(auto)"},
         {"support_interface_top_layers", 2},
@@ -170,14 +170,14 @@ SCENARIO("SupportMaterial: DynaPin keeps normal interfaces without a synthetic p
     const PrintObject &print_object = *print.objects().front();
 
     THEN("No synthetic interface is printed at the pin top") {
-        CHECK_FALSE(support_interface_at_z(print_object, 44.55));
+        CHECK_FALSE(support_interface_at_z(print_object, 44.3));
     }
     THEN("The regular support interface remains above the pin top") {
-        CHECK(support_interface_above_z(print_object, 44.55));
+        CHECK(support_interface_above_z(print_object, 44.3));
     }
 
     THEN("The first real support layer above the pin top has a regular interface") {
-        CHECK(support_interface_at_z(print_object, 45.0));
+        CHECK(support_interface_at_z(print_object, 44.7));
     }
 
     THEN("The layer spanning the pin top is still generated") {
@@ -187,11 +187,11 @@ SCENARIO("SupportMaterial: DynaPin keeps normal interfaces without a synthetic p
     THEN("Support from lower geometry remains below the selected pin body") {
         DynaPin::Config dynapin_config;
         REQUIRE(DynaPin::load_config_for_print(print, dynapin_config));
-        const DynaPin::Pin pin{ 0, 5 };
+        const DynaPin::Pin pin{ 5, 0 };
         const DynaPin::VirtualSupportSurface surface = DynaPin::surface_for_pin(print_object, dynapin_config, pin);
         const DynaPin::LocalBlocker blocker = DynaPin::blocker_for_pin(print_object, dynapin_config, pin);
-        CHECK(blocker.z_min == Catch::Approx(39.55));
-        CHECK(blocker.z_max == Catch::Approx(44.55));
+        CHECK(blocker.z_min == Catch::Approx(39.3));
+        CHECK(blocker.z_max == Catch::Approx(44.3));
         CHECK(surface.print_z == Catch::Approx(blocker.z_max));
         // The pin must not globally erase support from lower geometry. This
         // coverage is supplied by the lower model contact, not by restarting
@@ -223,7 +223,7 @@ SCENARIO("SupportMaterial: DynaPin blocks stacked pin spans", "[SupportMaterial]
         {"enable_support", true},
         {"enable_dynapin_support_optimization", true},
         {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
-        {"dynapin_selected_pins", "0,5 0,6"},
+        {"dynapin_selected_pins", "5,0 6,0"},
         {"dynapin_debug_stage", 2},
         {"support_type", "normal(auto)"},
         {"support_interface_top_layers", 2},
@@ -238,10 +238,10 @@ SCENARIO("SupportMaterial: DynaPin blocks stacked pin spans", "[SupportMaterial]
     const PrintObject &print_object = *print.objects().front();
     DynaPin::Config dynapin_config;
     REQUIRE(DynaPin::load_config_for_print(print, dynapin_config));
-    REQUIRE(print.dynapin_selection().pins == std::vector<DynaPin::Pin>{{0, 5}, {0, 6}});
+    REQUIRE(print.dynapin_selection().pins == std::vector<DynaPin::Pin>{{5, 0}, {6, 0}});
     REQUIRE_FALSE(print_object.support_layers().empty());
 
-    for (const DynaPin::Pin pin : { DynaPin::Pin{0, 5}, DynaPin::Pin{0, 6} }) {
+    for (const DynaPin::Pin pin : { DynaPin::Pin{5, 0}, DynaPin::Pin{6, 0} }) {
         const DynaPin::LocalBlocker blocker = DynaPin::blocker_for_pin(print_object, dynapin_config, pin);
         CHECK(blocker.z_max > blocker.z_min);
         CHECK_FALSE(support_coverage_intersects_z_range(print_object, blocker.poly, blocker.z_min, blocker.z_max));
@@ -287,7 +287,7 @@ SCENARIO("SupportMaterial: DynaPin propagates a connected blocker cutout downwar
         {"enable_support", true},
         {"enable_dynapin_support_optimization", true},
         {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
-        {"dynapin_selected_pins", "0,5"},
+        {"dynapin_selected_pins", "5,0"},
         {"dynapin_debug_stage", 2},
         {"support_type", "normal(auto)"},
     });
@@ -300,7 +300,7 @@ SCENARIO("SupportMaterial: DynaPin propagates a connected blocker cutout downwar
     const PrintObject &print_object = *print.objects().front();
     DynaPin::Config dynapin_config;
     REQUIRE(DynaPin::load_config_for_print(print, dynapin_config));
-    const DynaPin::LocalBlocker blocker = DynaPin::blocker_for_pin(print_object, dynapin_config, { 0, 5 });
+    const DynaPin::LocalBlocker blocker = DynaPin::blocker_for_pin(print_object, dynapin_config, { 5, 0 });
     Polygon side_region = blocker.poly;
     side_region.translate(0., scaled<coord_t>(20.));
     const double baseline_area = maximum_support_coverage_area_in_z_range(

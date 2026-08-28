@@ -48,3 +48,5 @@ internal_docs/
 /flatpak-repo/
 docs/plans/
 docs/research/
+models/
+__pycache__/

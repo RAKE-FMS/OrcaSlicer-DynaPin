@@ -58,19 +58,19 @@ static int int_or(const nlohmann::json& j, const char* key, int fallback)
 static constexpr double support_block_y_offset = -7.2;
 
 double pin_y(const Config& config, const Pin& pin)
-{ return config.support_origin_y + double(pin.row) * config.row_pitch_y; }
+{ return config.support_origin_y + double(pin.col) * config.col_pitch_y; }
 
 BlockerZRange blocker_z_range(const Config& config, const Pin& pin)
 {
-    const double z_max = config.support_origin_z + double(pin.col) * config.col_pitch_z;
+    const double z_max = config.support_origin_z + double(pin.row) * config.row_pitch_z;
     return { z_max - config.blocker_height_z, z_max };
 }
 
 static double pull_y(const Config& config, const Pin& pin)
-{ return config.pull_origin_y + double(pin.row) * config.row_pitch_y + config.pull_gcode.y_offset; }
+{ return config.pull_origin_y + double(pin.col) * config.col_pitch_y + config.pull_gcode.y_offset; }
 
 static double pull_z(const Config& config, const Pin& pin)
-{ return config.pull_origin_z + double(pin.col) * config.col_pitch_z; }
+{ return config.pull_origin_z + double(pin.row) * config.row_pitch_z; }
 
 std::vector<Pin> parse_pin_list(const std::string& pins)
 {
@@ -270,8 +270,8 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
     config.support_origin_y             = number_or(support_origin, "y", config.support_origin_y);
     config.support_origin_z             = number_or(support_origin, "z", config.support_origin_z);
     const nlohmann::json pitch          = grid.contains("pitch") && grid["pitch"].is_object() ? grid["pitch"] : nlohmann::json::object();
-    config.row_pitch_y                  = number_or(pitch, "row_y", config.row_pitch_y);
-    config.col_pitch_z                  = number_or(pitch, "col_z", config.col_pitch_z);
+    config.row_pitch_z                  = number_or(pitch, "row_z", config.row_pitch_z);
+    config.col_pitch_y                  = number_or(pitch, "col_y", config.col_pitch_y);
 
     const nlohmann::json exclusion = j.contains("support_exclusion") && j["support_exclusion"].is_object() ? j["support_exclusion"] :
                                                                                                              nlohmann::json::object();
@@ -302,22 +302,22 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
         return false;
     }
     if (!has_number_value(pull, "x_front") || !std::isfinite(config.pull_gcode.x_front) || config.pull_gcode.x_front >= *max_x_bed ||
-        config.blocker_width_y <= 0. || config.row_pitch_y == 0. || config.col_pitch_z == 0.) {
+        config.blocker_width_y <= 0. || config.row_pitch_z == 0. || config.col_pitch_y == 0.) {
         if (error)
             *error = "DynaPin config requires pull_gcode.x_front and valid grid/support_exclusion dimensions";
         return false;
     }
 
-    const BlockerZRange zero_pin_range = blocker_z_range(config, { 0, 0 });
+    const BlockerZRange zero_row_range = blocker_z_range(config, { 0, 0 });
     BOOST_LOG_TRIVIAL(debug) << "[DynaPin] config loaded: requested='" << config_path << "', resolved='" << resolved.string()
                              << "', grid_size=" << config.row_count << "x" << config.col_count << ", pull_origin_mm=("
                              << config.pull_origin_y << "," << config.pull_origin_z << ")"
                              << ", support_origin_mm=(" << config.support_origin_y << "," << config.support_origin_z << ")"
-                             << ", pitch_mm=(" << config.row_pitch_y << "," << config.col_pitch_z << ")"
+                             << ", pitch_mm=(row_z=" << config.row_pitch_z << ", col_y=" << config.col_pitch_y << ")"
                              << ", exclusion_x_mm=[" << config.pull_gcode.x_front << "," << *max_x_bed << "]"
                              << ", exclusion_y_center_mm=" << config.support_origin_y + support_block_y_offset
-                             << ", exclusion_width_y_mm=" << config.blocker_width_y << ", zero_column_blocker_z_range_mm=["
-                             << zero_pin_range.z_min << "," << zero_pin_range.z_max << "]";
+                             << ", exclusion_width_y_mm=" << config.blocker_width_y << ", zero_row_blocker_z_range_mm=["
+                             << zero_row_range.z_min << "," << zero_row_range.z_max << "]";
     return true;
 }
 

@@ -60,16 +60,16 @@ TEST_CASE("DynaPin pull G-code comments match preview contract", "[DynaPin]")
     DynaPin::Config config;
     config.pull_origin_y       = 10.;
     config.pull_origin_z       = 20.;
-    config.row_pitch_y         = 1.;
-    config.col_pitch_z         = 2.;
+    config.row_pitch_z         = 2.;
+    config.col_pitch_y         = 1.;
     config.pull_gcode.x_hook   = 100.;
     config.pull_gcode.x_latch  = 110.;
     config.pull_gcode.x_front  = 20.;
     config.pull_gcode.y_offset = -3.5;
 
-    const std::string gcode = DynaPin::pull_gcode_for_pin(config, {2, 5});
+    const std::string gcode = DynaPin::pull_gcode_for_pin(config, {5, 2});
 
-    CHECK(gcode.find("; BEGIN_DYNAPIN_PULL ROW=2 COL=5\n") != std::string::npos);
+    CHECK(gcode.find("; BEGIN_DYNAPIN_PULL ROW=5 COL=2\n") != std::string::npos);
     CHECK(gcode.find("; DYNAPIN_PULL_MOVE\nG1 X20") != std::string::npos);
     CHECK(gcode.find("; END_DYNAPIN_PULL\n") != std::string::npos);
     CHECK(gcode.find("row=") == std::string::npos);
@@ -85,8 +85,8 @@ TEST_CASE("DynaPin support and pull coordinates are independent", "[DynaPin]")
     config.pull_origin_z       = 5.;
     config.support_origin_y    = 18.;
     config.support_origin_z    = 7.55;
-    config.row_pitch_y         = 12.4;
-    config.col_pitch_z         = 7.4;
+    config.row_pitch_z         = 7.4;
+    config.col_pitch_y         = 12.4;
     config.blocker_height_z    = 5.;
     config.pull_gcode.x_hook   = 160.;
     config.pull_gcode.x_latch  = 165.;
@@ -103,22 +103,26 @@ TEST_CASE("DynaPin support and pull coordinates are independent", "[DynaPin]")
     CHECK(gcode.find("G1 Y22.9000") != std::string::npos);
     CHECK(gcode.find("G1 X160.0000 Z12.4000") != std::string::npos);
     CHECK(gcode.find("G1 X165.0000") != std::string::npos);
+
+    CHECK(DynaPin::pin_y(config, {2, 0}) == 18.);
+    CHECK(DynaPin::pin_y(config, {0, 2}) == 42.8);
+    CHECK(DynaPin::blocker_z_range(config, {2, 0}).z_max == Catch::Approx(22.35));
 }
 
 TEST_CASE("DynaPin candidate grid starts at zero", "[DynaPin]")
 {
     DynaPin::Config config;
-    config.row_count = 10;
-    config.col_count = 14;
+    config.row_count = 14;
+    config.col_count = 10;
 
     const std::vector<DynaPin::Pin> pins = DynaPin::candidate_pins(config);
     REQUIRE(pins.size() == 140);
     CHECK(pins.front() == DynaPin::Pin{0, 0});
-    CHECK(pins.back() == DynaPin::Pin{9, 13});
+    CHECK(pins.back() == DynaPin::Pin{13, 9});
 
     config.row_count = 0;
     CHECK(DynaPin::candidate_pins(config).empty());
-    config.row_count = 10;
+    config.row_count = 14;
     config.col_count = -1;
     CHECK(DynaPin::candidate_pins(config).empty());
 }
@@ -127,14 +131,14 @@ TEST_CASE("DynaPin pins are sorted by physical height and deduplicated", "[DynaP
 {
     DynaPin::Config config;
     config.support_origin_z = 5.;
-    config.col_pitch_z      = 7.4;
+    config.row_pitch_z      = 7.4;
     std::vector<DynaPin::Pin> pins{{2, 3}, {1, 3}, {2, 3}, {0, 5}};
 
     DynaPin::sort_unique_pins(pins, config);
     REQUIRE(pins.size() == 3);
-    CHECK(pins[0] == DynaPin::Pin{1, 3});
-    CHECK(pins[1] == DynaPin::Pin{2, 3});
-    CHECK(pins[2] == DynaPin::Pin{0, 5});
+    CHECK(pins[0] == DynaPin::Pin{0, 5});
+    CHECK(pins[1] == DynaPin::Pin{1, 3});
+    CHECK(pins[2] == DynaPin::Pin{2, 3});
 }
 
 TEST_CASE("DynaPin downward projection stops at the highest safe pin", "[DynaPin]")

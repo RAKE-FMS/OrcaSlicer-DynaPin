@@ -11,8 +11,8 @@
       "z": "6.15"
     },
     "pitch": {
-      "row_y": "12.4",
-      "col_z": "7.4"
+      "row_z": "7.4",
+      "col_y": "12.4"
     }
   },
   "support_exclusion": {

@@ -80,8 +80,8 @@ struct Config
     double         pull_origin_z    = 0.;
     double         support_origin_y = 0.;
     double         support_origin_z = 0.;
-    double         row_pitch_y      = 0.;
-    double         col_pitch_z      = 0.;
+    double         row_pitch_z      = 0.;
+    double         col_pitch_y      = 0.;
     double         blocker_width_y  = 0.;
     double         blocker_height_z = 0.;
     PullMoveConfig pull_gcode;
