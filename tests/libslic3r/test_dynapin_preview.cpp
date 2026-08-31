@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/DynaPin.hpp"
+#include "libslic3r/DynaPinGCode.hpp"
 #include "libslic3r/DynaPinPreview.hpp"
 
 #include <cstdio>
@@ -13,8 +14,8 @@ namespace {
 
 std::string write_gcode(const std::string& body)
 {
-    char path[] = "/tmp/orcaslicer-dynapin-XXXXXX";
-    const int fd = ::mkstemp(path);
+    char      path[] = "/tmp/orcaslicer-dynapin-XXXXXX";
+    const int fd     = ::mkstemp(path);
     REQUIRE(fd >= 0);
     ::close(fd);
     std::ofstream file(path);
@@ -76,6 +77,20 @@ TEST_CASE("DynaPin pull G-code comments match preview contract", "[DynaPin]")
     CHECK(gcode.find("col=") == std::string::npos);
     CHECK(gcode.find("G1 Y4.5000") != std::string::npos);
     CHECK(gcode.find("G1 X100.0000 Z30.0000") != std::string::npos);
+}
+
+TEST_CASE("DynaPin return keeps clearance until XY is restored", "[DynaPin]")
+{
+    DynaPin::Config config;
+    config.pull_gcode.travel_feedrate = 5000.;
+    config.pull_gcode.pull_feedrate   = 1500.;
+
+    const std::string gcode = DynaPin::return_gcode(config, Vec3d(102.667, 97.188, 59.3));
+
+    CHECK(gcode == "; BEGIN_DYNAPIN_RETURN\n"
+                   "G1 X102.6670 Y97.1880 F5000.0000\n"
+                   "G1 Z59.3000 F1500.0000\n"
+                   "; END_DYNAPIN_RETURN\n");
 }
 
 TEST_CASE("DynaPin support and pull coordinates are independent", "[DynaPin]")
@@ -143,7 +158,7 @@ TEST_CASE("DynaPin pins are sorted by physical height and deduplicated", "[DynaP
 
 TEST_CASE("DynaPin downward projection stops at the highest safe pin", "[DynaPin]")
 {
-    const Polygon landing{{0, 0}, {1000, 0}, {1000, 1000}, {0, 1000}};
+    const Polygon                         landing{{0, 0}, {1000, 0}, {1000, 1000}, {0, 1000}};
     std::vector<DynaPin::ProjectionEvent> events{
         {DynaPin::ProjectionEventType::Contact, 30., {landing}, {}, false},
         {DynaPin::ProjectionEventType::PinSurface, 20., {landing}, {0, 2}, false},
@@ -158,7 +173,7 @@ TEST_CASE("DynaPin downward projection stops at the highest safe pin", "[DynaPin
 
 TEST_CASE("DynaPin downward projection continues past a colliding pin", "[DynaPin]")
 {
-    const Polygon landing{{0, 0}, {1000, 0}, {1000, 1000}, {0, 1000}};
+    const Polygon                         landing{{0, 0}, {1000, 0}, {1000, 1000}, {0, 1000}};
     std::vector<DynaPin::ProjectionEvent> events{
         {DynaPin::ProjectionEventType::Contact, 30., {landing}, {}, false},
         {DynaPin::ProjectionEventType::PinSurface, 20., {landing}, {0, 2}, true},
@@ -174,8 +189,8 @@ TEST_CASE("DynaPin downward projection continues past a colliding pin", "[DynaPi
 
 TEST_CASE("DynaPin selection ignores pin surfaces outside the support projection", "[DynaPin]")
 {
-    const Polygon support{{0, 0}, {1000, 0}, {1000, 1000}, {0, 1000}};
-    const Polygon remote{{2000, 0}, {3000, 0}, {3000, 1000}, {2000, 1000}};
+    const Polygon                      support{{0, 0}, {1000, 0}, {1000, 1000}, {0, 1000}};
+    const Polygon                      remote{{2000, 0}, {3000, 0}, {3000, 1000}, {2000, 1000}};
     const DynaPin::ProjectionSelection result = DynaPin::select_from_projection({
         {DynaPin::ProjectionEventType::Contact, 30., {support}, {}, false},
         {DynaPin::ProjectionEventType::PinSurface, 20., {remote}, {0, 2}, false},
@@ -187,16 +202,16 @@ TEST_CASE("DynaPin selection ignores pin surfaces outside the support projection
 
 TEST_CASE("DynaPin pull comments create events", "[DynaPinPreview]")
 {
-    const std::string    body   = "G1 X0\n"
-                                  "; BEGIN_DYNAPIN_PULL ROW=2 COL=5\n"
-                                  "G1 X5\n"
-                                  "; DYNAPIN_PULL_MOVE\n"
-                                  "G1 X10\n"
-                                  "; END_DYNAPIN_PULL\n";
-    const std::string    path   = write_gcode(body);
+    const std::string    body = "G1 X0\n"
+                                "; BEGIN_DYNAPIN_PULL ROW=2 COL=5\n"
+                                "G1 X5\n"
+                                "; DYNAPIN_PULL_MOVE\n"
+                                "G1 X10\n"
+                                "; END_DYNAPIN_PULL\n";
+    const std::string    path = write_gcode(body);
     GCodeProcessorResult result;
     initialize_result(result, path);
-    result.lines_ends           = line_ends(body);
+    result.lines_ends = line_ends(body);
 
     DynaPinPreviewState state;
     state.load(result);
@@ -213,16 +228,16 @@ TEST_CASE("DynaPin pull comments create events", "[DynaPinPreview]")
 
 TEST_CASE("DynaPin preview state applies only matching selections", "[DynaPinPreview]")
 {
-    const std::string    body   = "G1 X0\n"
-                                  "; BEGIN_DYNAPIN_PULL ROW=2 COL=5\n"
-                                  "G1 X5\n"
-                                  "; DYNAPIN_PULL_MOVE\n"
-                                  "G1 X10\n"
-                                  "; END_DYNAPIN_PULL\n";
-    const std::string    path   = write_gcode(body);
+    const std::string    body = "G1 X0\n"
+                                "; BEGIN_DYNAPIN_PULL ROW=2 COL=5\n"
+                                "G1 X5\n"
+                                "; DYNAPIN_PULL_MOVE\n"
+                                "G1 X10\n"
+                                "; END_DYNAPIN_PULL\n";
+    const std::string    path = write_gcode(body);
     GCodeProcessorResult result;
     initialize_result(result, path);
-    result.lines_ends           = line_ends(body);
+    result.lines_ends = line_ends(body);
 
     DynaPinPreviewState state;
     state.load(result);
@@ -239,16 +254,16 @@ TEST_CASE("DynaPin preview state applies only matching selections", "[DynaPinPre
 
 TEST_CASE("DynaPin incomplete blocks are ignored", "[DynaPinPreview]")
 {
-    const std::string    body   = "; BEGIN_DYNAPIN_PULL ROW=2 COL=5\n"
-                                  "G1 X5\n"
-                                  "; END_DYNAPIN_PULL\n"
-                                  "; BEGIN_DYNAPIN_PULL ROW=3 COL=1\n"
-                                  "G1 X10\n"
-                                  "; DYNAPIN_PULL_MOVE\n";
-    const std::string    path   = write_gcode(body);
+    const std::string    body = "; BEGIN_DYNAPIN_PULL ROW=2 COL=5\n"
+                                "G1 X5\n"
+                                "; END_DYNAPIN_PULL\n"
+                                "; BEGIN_DYNAPIN_PULL ROW=3 COL=1\n"
+                                "G1 X10\n"
+                                "; DYNAPIN_PULL_MOVE\n";
+    const std::string    path = write_gcode(body);
     GCodeProcessorResult result;
     initialize_result(result, path);
-    result.lines_ends           = line_ends(body);
+    result.lines_ends = line_ends(body);
 
     DynaPinPreviewState state;
     state.load(result);

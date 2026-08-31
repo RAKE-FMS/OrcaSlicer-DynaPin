@@ -12,7 +12,7 @@
 #include "GCode/PrintExtents.hpp"
 #include "GCode/Thumbnails.hpp"
 #include "GCode/WipeTower.hpp"
-#include "DynaPin.hpp"
+#include "DynaPinGCode.hpp"
 #include "ShortestPath.hpp"
 #include "Print.hpp"
 #include "Utils.hpp"
@@ -4233,9 +4233,8 @@ static void skirt_loops_per_extruder_all_printing(const Print&                  
 
     // BBS. Extrude skirt with first extruder if min_skirt_length is zero
     // ORCA: Always extrude skirt with first extruder, independantly of if the minimum skirt length is zero or not. The code below
-    // is left as a placeholder for when a multiextruder support is implemented. Then we will need to extrude the skirt loops for each extruder.
-    // const PrintConfig &config = print.config();
-    // if (config.min_skirt_length.value < EPSILON) {
+    // is left as a placeholder for when a multiextruder support is implemented. Then we will need to extrude the skirt loops for each
+    // extruder. const PrintConfig &config = print.config(); if (config.min_skirt_length.value < EPSILON) {
     skirt_loops_per_extruder_out[layer_tools.extruders.front()] = std::pair<size_t, size_t>(0, n_loops);
     //} else {
     //    for (size_t i = 0; i < n_loops; i += lines_per_extruder)
@@ -5630,13 +5629,29 @@ std::string GCode::change_layer(coordf_t print_z)
     if (m_print != nullptr) {
         DynaPin::Config dynapin_config;
         if (m_print->config().enable_dynapin_support_optimization.value && DynaPin::load_config_for_print(*m_print, dynapin_config)) {
+            std::vector<std::pair<std::string, DynaPin::Pin>> due_pins;
             for (const DynaPin::Pin& pin : DynaPin::resolved_pins(*m_print)) {
                 const DynaPin::BlockerZRange range = DynaPin::blocker_z_range(dynapin_config, pin);
                 if (range.z_max <= print_z + EPSILON) {
                     const std::string key = std::to_string(pin.row) + ":" + std::to_string(pin.col);
-                    if (m_dynapin_pulls_done.insert(key).second)
-                        gcode += DynaPin::pull_gcode_for_pin(dynapin_config, pin);
+                    if (m_dynapin_pulls_done.find(key) == m_dynapin_pulls_done.end())
+                        due_pins.emplace_back(key, pin);
                 }
+            }
+
+            if (!due_pins.empty()) {
+                gcode += m_writer.eager_lift(LiftType::NormalLift);
+
+                Vec3d       return_position = m_writer.get_position();
+                const Vec2f xy_offset       = m_writer.get_xy_offset();
+                return_position.x() -= xy_offset.x();
+                return_position.y() -= xy_offset.y();
+
+                for (const auto& [key, pin] : due_pins) {
+                    gcode += DynaPin::pull_gcode_for_pin(dynapin_config, pin);
+                    m_dynapin_pulls_done.insert(key);
+                }
+                gcode += DynaPin::return_gcode(dynapin_config, return_position);
             }
         }
     }

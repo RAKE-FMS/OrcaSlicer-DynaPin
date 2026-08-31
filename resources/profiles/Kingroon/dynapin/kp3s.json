@@ -2,13 +2,13 @@
   "grid": {
     "pull_origin": {
       "y": "14",
-      "z": "5.0"
+      "z": "6.0"
     },
     "row_count": 10,
     "col_count": 14,
     "support_origin": {
       "y": "18.0",
-      "z": "6.15"
+      "z": "7.3"
     },
     "pitch": {
       "row_z": "7.4",
@@ -21,7 +21,7 @@
   },
   "pull_gcode": {
     "x_hook": "160",
-    "x_latch": "168",
+    "x_latch": "165",
     "x_front": "20",
     "y_offset": "-3.5",
     "z_offset": "4",
