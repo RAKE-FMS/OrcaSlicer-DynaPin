@@ -13,7 +13,7 @@ OrcaSlicer本体を改造し、G-code後処理ではなくサポート生成前�
   - machine presetには`dynapin_config_path`だけを追加し、相対パスで参照する。
   - ユーザーmachine presetでも同じキーを使い、ユーザープロファイル配下のJSONを優先して読めるようにする。
 - DynaPin Configの内容はPyDynaPinの構造をベースにする。
-  - `grid`: `pull_origin`、`support_origin`、row/column counts、row pitch Y、col pitch Z。row/colは常に0始まり
+  - `grid`: `pull_origin`、`support_origin`、row/column counts、row pitch Z、col pitch Y。row/colは常に0始まり
   - `support_exclusion`: ピン中心からのY/X幅、対象Zまたはレイヤー範囲
   - `pull_gcode`: `x_hook`, `x_latch`, `x_front`, offsets, feed rates
 - スライス時の操作設定はプロジェクトまたはオブジェクト側に置く。
@@ -35,7 +35,7 @@ OrcaSlicer本体を改造し、G-code後処理ではなくサポート生成前�
   - machine presetの`dynapin_config_path`から正しいJSONを読む。
   - Config未設定、ファイルなし、不正JSONでは明確なエラーまたは機能無効化になる。
 - ピン計算:
-  - PyDynaPin互換の`row,col -> Y,Z`計算を検証する。
+  - PyDynaPin互換の`row,col -> Z,Y`計算を検証する。
   - 重複ピン、不正ピンを検出する。
 - サポート生成:
   - 通常サポートとツリーサポートで対象領域のsupport polygons/extrusionsが消える。

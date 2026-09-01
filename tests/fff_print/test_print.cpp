@@ -162,7 +162,7 @@ SCENARIO("Print: Rotating a DynaPin model invalidates slicing", "[Print][DynaPin
             { "enable_dynapin_support_optimization", true },
             { "enable_support",                    true },
             { "dynapin_config_path",               "Kingroon/dynapin/kp3s.json" },
-            { "dynapin_selected_pins",              "0,1" }
+            { "dynapin_selected_pins",              "1,0" }
         });
         init_dynapin_print(print, model, config);
         print.process();
@@ -249,7 +249,7 @@ SCENARIO("Print: Automatic DynaPin selection starts at the model overhang", "[Pr
         mesh.translate(30.f, 30.f, 0.f);
         TriangleMesh top = Test::mesh(TestMesh::cube_20x20x20);
         top.scale(Vec3f(1.f, 1.f, 0.1f));
-        top.translate(0.f, 0.f, 22.f);
+        top.translate(0.f, 0.f, 23.f);
         mesh.merge(top);
 
         ModelObject *object = model.add_object();
@@ -274,9 +274,9 @@ SCENARIO("Print: Automatic DynaPin selection starts at the model overhang", "[Pr
 
         THEN("A pin at the slab height is selected automatically") {
             REQUIRE(print.dynapin_selection().source == DynaPin::SelectionSource::Automatic);
-            CHECK(print.dynapin_selection().pins == std::vector<DynaPin::Pin>{{0, 2}, {1, 2}});
+            CHECK(print.dynapin_selection().pins == std::vector<DynaPin::Pin>{{2, 0}, {2, 1}});
             CHECK(std::any_of(print.dynapin_selection().pins.begin(), print.dynapin_selection().pins.end(),
-                              [](const DynaPin::Pin &pin) { return pin.col == 2; }));
+                              [](const DynaPin::Pin &pin) { return pin.row == 2; }));
             CHECK(print.config().dynapin_selected_pins.value.empty());
         }
     }
@@ -290,14 +290,14 @@ SCENARIO("Print: Automatic DynaPin selection keeps independent lower overhangs",
 
         // Keep a bed-connected base outside the pin landing area, then add two
         // separate overhang stages in the same XY region.  The lower stage is
-        // above the col=2 pin top (20.95 mm), while the upper stage is above
-        // the col=4 pin top (35.75 mm).
+        // above the row=2 pin top, while the upper stage is above the row=4
+        // pin top.
         TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
         mesh.scale(Vec3f(1.f, 1.f, 0.25f));
         mesh.translate(30.f, 150.f, 0.f);
         TriangleMesh lower = Test::mesh(TestMesh::cube_20x20x20);
         lower.scale(Vec3f(1.f, 1.f, 0.1f));
-        lower.translate(0.f, 0.f, 22.f);
+        lower.translate(0.f, 0.f, 23.f);
         mesh.merge(lower);
         TriangleMesh upper = Test::mesh(TestMesh::cube_20x20x20);
         upper.scale(Vec3f(1.f, 1.f, 0.1f));
@@ -327,11 +327,11 @@ SCENARIO("Print: Automatic DynaPin selection keeps independent lower overhangs",
 
         THEN("Both overhang stages select pins at their respective heights") {
             REQUIRE(print.dynapin_selection().source == DynaPin::SelectionSource::Automatic);
-            CHECK(print.dynapin_selection().pins == std::vector<DynaPin::Pin>{{0, 2}, {1, 2}, {0, 4}, {1, 4}});
+            CHECK(print.dynapin_selection().pins == std::vector<DynaPin::Pin>{{2, 0}, {2, 1}, {4, 0}, {4, 1}});
             CHECK(std::any_of(print.dynapin_selection().pins.begin(), print.dynapin_selection().pins.end(),
-                              [](const DynaPin::Pin &pin) { return pin.col == 2; }));
+                              [](const DynaPin::Pin &pin) { return pin.row == 2; }));
             CHECK(std::any_of(print.dynapin_selection().pins.begin(), print.dynapin_selection().pins.end(),
-                              [](const DynaPin::Pin &pin) { return pin.col == 4; }));
+                              [](const DynaPin::Pin &pin) { return pin.row == 4; }));
         }
 
         THEN("Each selected pin has a blocker") {
@@ -478,7 +478,7 @@ SCENARIO("Print: DynaPin copies keep independent fixed-coordinate supports", "[P
             { "enable_support", true },
             { "enable_dynapin_support_optimization", true },
             { "dynapin_config_path", "Kingroon/dynapin/kp3s.json" },
-            { "dynapin_selected_pins", "0,1" },
+            { "dynapin_selected_pins", "1,0" },
             { "printable_area", "0x0,180x0,180x180,0x180" }
         });
         init_dynapin_print(print, model, config);
@@ -494,13 +494,14 @@ SCENARIO("Print: DynaPin copies keep independent fixed-coordinate supports", "[P
         REQUIRE(first_object->instances().size() == 1);
         REQUIRE(second_object->instances().size() == 1);
         REQUIRE(print.dynapin_selection().source == DynaPin::SelectionSource::Manual);
-        REQUIRE(print.dynapin_selection().pins == std::vector<DynaPin::Pin>{{0, 1}});
+        REQUIRE(print.dynapin_selection().pins == std::vector<DynaPin::Pin>{{1, 0}});
 
         const auto first_blockers  = DynaPin::support_blocker_regions_local(*first_object);
         const auto second_blockers = DynaPin::support_blocker_regions_local(*second_object);
         REQUIRE(first_blockers.size() == 1);
         REQUIRE(second_blockers.size() == 1);
-        CHECK(first_blockers.front().z_min == Catch::Approx(6.4));
+        CHECK(first_blockers.front().z_min == Catch::Approx(9.7));
+        CHECK(first_blockers.front().z_max == Catch::Approx(14.7));
 
         const Point first_shift = first_object->instances().front().shift_without_plate_offset();
         const BoundingBox first_blocker_box = get_extents(first_blockers.front().poly);
@@ -527,7 +528,7 @@ SCENARIO("Print: DynaPin copies keep independent fixed-coordinate supports", "[P
             REQUIRE(second_object->get_shared_object() == nullptr);
             const std::vector<DynaPin::BlockerBox> boxes = DynaPin::selected_blocker_boxes(print);
             REQUIRE(boxes.size() == 1);
-            CHECK(boxes.front().pin == DynaPin::Pin{0, 1});
+            CHECK(boxes.front().pin == DynaPin::Pin{1, 0});
             CHECK(boxes.front().min.x() == Catch::Approx(20.0));
             CHECK(boxes.front().max.x() == Catch::Approx(180.0));
         }
