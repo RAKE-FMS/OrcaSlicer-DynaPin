@@ -16,6 +16,7 @@
 #include <cctype>
 #include <cmath>
 #include <iomanip>
+#include <cstdlib>
 #include <set>
 #include <sstream>
 
@@ -58,12 +59,63 @@ static int int_or(const nlohmann::json& j, const char* key, int fallback)
 // this support geometry.
 static constexpr double support_block_y_offset = -7.2;
 
+bool TipCollisionConfig::valid(std::string *error) const
+{
+    auto fail = [error](const char *message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    if (!configured)
+        return fail("DynaPin tip_collision configuration is missing");
+    if (!std::isfinite(x_min) || !std::isfinite(x_max) || !std::isfinite(width_y) || !std::isfinite(thickness_z) ||
+        !std::isfinite(clearance))
+        return fail("DynaPin tip_collision values must be finite");
+    if (!(x_min < x_max))
+        return fail("DynaPin tip_collision requires x_min < x_max");
+    if (!(width_y > 0.) || !(thickness_z > 0.))
+        return fail("DynaPin tip_collision requires positive width_y and thickness_z");
+    if (clearance < 0.)
+        return fail("DynaPin tip_collision clearance must be non-negative");
+    return true;
+}
+
 double pin_y(const Config& config, const Pin& pin) { return config.support_origin_y + double(pin.col) * config.col_pitch_y; }
 
 BlockerZRange blocker_z_range(const Config& config, const Pin& pin)
 {
     const double z_max = config.support_origin_z + double(pin.row) * config.row_pitch_z;
     return {z_max - config.blocker_height_z, z_max};
+}
+
+std::optional<TipCollisionBox> tip_collision_box_for_pin(const Config& config, const Pin& pin)
+{
+    if (!config.tip_collision.valid())
+        return std::nullopt;
+
+    const double c = config.tip_collision.clearance;
+    const double y = pin_y(config, pin) + support_block_y_offset;
+    const double z = blocker_z_range(config, pin).z_max;
+    const double half_width = config.tip_collision.width_y * 0.5;
+    return TipCollisionBox{{config.tip_collision.x_min - c, y - half_width - c, z - config.tip_collision.thickness_z - c},
+                           {config.tip_collision.x_max + c, y + half_width + c, z + c}};
+}
+
+bool tip_collision_configured(const Config& config) { return config.tip_collision.valid(); }
+
+int effective_debug_stage(const Print& print)
+{
+    int stage = print.config().dynapin_debug_stage.value;
+    if (const char *override_stage = std::getenv("DYNAPIN_DEBUG_STAGE")) {
+        try {
+            stage = std::stoi(override_stage);
+        } catch (...) {
+            // Keep the configured value when an environment override is not an
+            // integer.  This mirrors the permissive handling of other debug
+            // configuration values.
+        }
+    }
+    return std::max(0, std::min(2, stage));
 }
 
 static double pull_y(const Config& config, const Pin& pin)
@@ -274,6 +326,16 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
     config.blocker_width_y         = number_or(exclusion, "blocker_width_y", config.blocker_width_y);
     config.blocker_height_z        = number_or(exclusion, "blocker_height_z", config.blocker_height_z);
 
+    const nlohmann::json tip = j.contains("tip_collision") && j["tip_collision"].is_object() ? j["tip_collision"] : nlohmann::json::object();
+    if (!tip.empty()) {
+        config.tip_collision.x_min       = number_or(tip, "x_min", config.tip_collision.x_min);
+        config.tip_collision.x_max       = number_or(tip, "x_max", config.tip_collision.x_max);
+        config.tip_collision.width_y     = number_or(tip, "width_y", config.tip_collision.width_y);
+        config.tip_collision.thickness_z = number_or(tip, "thickness_z", config.tip_collision.thickness_z);
+        config.tip_collision.clearance   = number_or(tip, "clearance", config.tip_collision.clearance);
+        config.tip_collision.configured = true;
+    }
+
     const nlohmann::json pull  = j.contains("pull_gcode") && j["pull_gcode"].is_object() ? j["pull_gcode"] : nlohmann::json::object();
     config.pull_gcode.x_hook   = number_or(pull, "x_hook", config.pull_gcode.x_hook);
     config.pull_gcode.x_latch  = number_or(pull, "x_latch", config.pull_gcode.x_latch);
@@ -414,11 +476,56 @@ bool pin_collides_with_model(const Print& print, const Config& config, const Pin
     return false;
 }
 
+bool tip_collides_with_model(const Print& print, const Config& config, const Pin& pin)
+{
+    const std::optional<TipCollisionBox> box = tip_collision_box_for_pin(config, pin);
+    if (!box)
+        return false;
+
+    const coord_t epsilon = scaled(EPSILON);
+    for (const PrintObject *object : print.objects()) {
+        if (object == nullptr)
+            continue;
+        const auto check_instance = [&](const Point &shift) {
+            const coord_t min_x = scaled(box->min.x()) - shift.x() - epsilon;
+            const coord_t max_x = scaled(box->max.x()) - shift.x() + epsilon;
+            const coord_t min_y = scaled(box->min.y()) - shift.y() - epsilon;
+            const coord_t max_y = scaled(box->max.y()) - shift.y() + epsilon;
+            const Polygon  tip{{min_x, min_y}, {max_x, min_y}, {max_x, max_y}, {min_x, max_y}};
+            for (const Layer *layer : object->layers()) {
+                if (layer == nullptr || layer->bottom_z() > box->max.z() + EPSILON || layer->print_z < box->min.z() - EPSILON)
+                    continue;
+                if (!intersection(to_polygons(layer->lslices), {tip}).empty())
+                    return true;
+            }
+            return false;
+        };
+
+        if (object->instances().empty()) {
+            if (check_instance(Point(0, 0)))
+                return true;
+        } else {
+            for (const PrintInstance &instance : object->instances())
+                if (check_instance(instance.shift_without_plate_offset()))
+                    return true;
+        }
+    }
+    return false;
+}
+
+bool tip_collides_with_any_physical_pin(const Print& print, const Config& config)
+{
+    for (const Pin &pin : candidate_pins(config))
+        if (tip_collides_with_model(print, config, pin))
+            return true;
+    return false;
+}
+
 std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
 {
     std::vector<Polygons> out(object.layer_count());
     const Print&          print = *object.print();
-    if (!print.config().enable_dynapin_support_optimization.value)
+    if (!print.config().enable_dynapin_support_optimization.value || effective_debug_stage(print) < 2)
         return out;
 
     Config      config;
@@ -452,7 +559,7 @@ std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject& objec
 {
     std::vector<LocalBlocker> out;
     const Print&              print = *object.print();
-    if (!print.config().enable_dynapin_support_optimization.value)
+    if (!print.config().enable_dynapin_support_optimization.value || effective_debug_stage(print) < 2)
         return out;
 
     Config      config;
@@ -473,7 +580,7 @@ std::vector<VirtualSupportSurface> pin_top_surfaces_for_object(const PrintObject
 {
     std::vector<VirtualSupportSurface> out;
     const Print&                       print = *object.print();
-    if (!print.config().enable_dynapin_support_optimization.value)
+    if (!print.config().enable_dynapin_support_optimization.value || effective_debug_stage(print) < 1)
         return out;
 
     Config      config;
@@ -493,7 +600,7 @@ std::vector<VirtualSupportSurface> pin_top_surfaces_for_object(const PrintObject
 std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
 {
     std::vector<BlockerBox> out;
-    if (!print.config().enable_dynapin_support_optimization.value)
+    if (!print.config().enable_dynapin_support_optimization.value || effective_debug_stage(print) < 1)
         return out;
 
     Config      config;

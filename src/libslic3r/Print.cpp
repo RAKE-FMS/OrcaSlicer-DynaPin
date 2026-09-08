@@ -18,6 +18,7 @@
 #include "PrintConfig.hpp"
 #include "MaterialType.hpp"
 #include "Model.hpp"
+#include "DynaPinPlacement.hpp"
 #include "format.hpp"
 #include <float.h>
 
@@ -78,8 +79,8 @@ void Print::update_dynapin_selection()
                             << ", selected_pins='" << m_config.dynapin_selected_pins.value << "'"
                             << ", config_path='" << m_config.dynapin_config_path.value << "'"
                             << ", objects=" << m_objects.size();
-    if (!m_config.enable_dynapin_support_optimization.value) {
-        BOOST_LOG_TRIVIAL(info) << "[DynaPin] selection skipped: optimization disabled";
+    if (!m_config.enable_dynapin_support_optimization.value || DynaPin::effective_debug_stage(*this) < 1) {
+        BOOST_LOG_TRIVIAL(info) << "[DynaPin] selection skipped: optimization disabled or debug stage is 0";
         m_dynapin_selection = std::move(next);
         return;
     }
@@ -185,6 +186,61 @@ void Print::update_dynapin_selection()
 
 template class PrintState<PrintStep, psCount>;
 template class PrintState<PrintObjectStep, posCount>;
+
+bool Print::generate_normal_support_geometry_only(std::vector<DynaPin::SupportSlab> &slabs, const std::function<bool()> &cancel)
+{
+    slabs.clear();
+    if (m_objects.empty())
+        return true;
+
+    auto canceled = [this, &cancel]() {
+        if (cancel && cancel()) {
+            this->cancel();
+            return true;
+        }
+        return this->canceled();
+    };
+
+    this->restart();
+    for (PrintObject *object : m_objects)
+        object->clear_shared_object();
+
+    // The placement evaluator runs on a private Print, so it can prepare the
+    // normal support inputs serially without sharing sliced layers between
+    // candidates.  Stop before the normal generator emits support toolpaths.
+    for (PrintObject *object : m_objects) {
+        if (canceled())
+            return false;
+        object->make_perimeters();
+        object->estimate_curled_extrusions();
+        object->infill();
+        object->ironing();
+    }
+
+    if (canceled())
+        return false;
+    update_dynapin_selection();
+
+    for (PrintObject *object : m_objects) {
+        if (canceled())
+            return false;
+        std::vector<DynaPin::SupportSlab> object_slabs;
+        object->generate_support_geometry_only(object_slabs);
+        for (const DynaPin::SupportSlab &slab : object_slabs) {
+            // SupportGenerator polygons are in the PrintObject's local
+            // coordinates.  Placement scoring unions every object in plate
+            // coordinates, so copy one slab per independent instance and
+            // apply the same shift used by the regular print pipeline.
+            for (const PrintInstance &instance : object->instances()) {
+                DynaPin::SupportSlab plate_slab = slab;
+                for (Polygon &polygon : plate_slab.polygons)
+                    polygon.translate(instance.shift_without_plate_offset());
+                slabs.emplace_back(std::move(plate_slab));
+            }
+        }
+    }
+    return !canceled();
+}
 
 PrintRegion::PrintRegion(const PrintRegionConfig &config) : PrintRegion(config, config.hash()) {}
 PrintRegion::PrintRegion(PrintRegionConfig &&config) : PrintRegion(std::move(config), config.hash()) {}

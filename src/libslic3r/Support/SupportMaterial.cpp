@@ -6,6 +6,7 @@
 #include "SupportMaterial.hpp"
 #include "SupportCommon.hpp"
 #include "../DynaPin.hpp"
+#include "../DynaPinPlacement.hpp"
 #include "Geometry.hpp"
 #include "Point.hpp"
 #include "MutablePolygon.hpp"
@@ -575,6 +576,42 @@ std::pair<std::vector<DynaPin::Pin>, std::vector<DynaPin::Pin>> PrintObjectSuppo
                              << ", support_style=" << int(m_object_config->support_style.value)
                              << ", support_spacing_mm=" << m_support_params.support_material_flow.spacing();
 
+    // top_contact_layers() may classify sharp tails while preparing its
+    // contacts.  Automatic pin selection is a read-only query and must not
+    // leave those classifications in the shared sliced layers; otherwise a
+    // second selection pass can produce different support geometry.
+    struct SharpTailRestore
+    {
+        struct LayerState {
+            Layer *layer = nullptr;
+            ExPolygons sharp_tails;
+            std::vector<float> sharp_tails_height;
+        };
+        std::vector<LayerState> states;
+
+        explicit SharpTailRestore(const PrintObject &print_object)
+        {
+            states.reserve(print_object.layers().size());
+            for (const Layer *layer : print_object.layers()) {
+                LayerState state;
+                state.layer = const_cast<Layer *>(layer);
+                state.sharp_tails = layer->sharp_tails;
+                state.sharp_tails_height = layer->sharp_tails_height;
+                states.emplace_back(std::move(state));
+            }
+        }
+
+        ~SharpTailRestore()
+        {
+            for (LayerState &state : states) {
+                if (state.layer == nullptr)
+                    continue;
+                state.layer->sharp_tails = std::move(state.sharp_tails);
+                state.layer->sharp_tails_height = std::move(state.sharp_tails_height);
+            }
+        }
+    } sharp_tail_restore(object);
+
     SupportGeneratorLayerStorage layer_storage;
     std::vector<Polygons>        covered = buildplate_covered(object);
     SupportGeneratorLayersPtr    contacts = top_contact_layers(object, covered, layer_storage);
@@ -839,6 +876,75 @@ static constexpr const std::initializer_list<SupporLayerType> support_types_inte
     SupporLayerType::RaftInterface, SupporLayerType::BottomContact, SupporLayerType::BottomInterface, SupporLayerType::TopContact, SupporLayerType::TopInterface
 };
 
+static void collect_geometry_slabs(const SupportGeneratorLayersPtr &layers, std::vector<DynaPin::SupportSlab> &slabs)
+{
+    for (const SupportGeneratorLayer *layer : layers) {
+        if (layer == nullptr || layer->polygons.empty())
+            continue;
+        // Raft geometry is intentionally excluded from the optimizer's score.
+        if (layer->layer_type == SupporLayerType::RaftBase || layer->layer_type == SupporLayerType::RaftInterface)
+            continue;
+        const double z_min = layer->bottom_print_z();
+        const double z_max = layer->print_z;
+        if (!(z_max > z_min))
+            continue;
+        slabs.push_back({z_min, z_max, layer->polygons});
+    }
+}
+
+void PrintObjectSupportMaterial::generate_geometry_only(PrintObject &object, std::vector<DynaPin::SupportSlab> &slabs)
+{
+    slabs.clear();
+    // Support preparation may lazily classify sharp tails and cantilevers on
+    // the sliced layers.  Geometry-only evaluation is used by placement
+    // scoring and must leave the caller's live sliced state exactly as it was,
+    // including when the generator throws or is canceled.
+    struct LayerStateRestore
+    {
+        struct State {
+            Layer *layer = nullptr;
+            ExPolygons sharp_tails;
+            ExPolygons cantilevers;
+            std::vector<float> sharp_tails_height;
+        };
+        PrintObject &object;
+        std::vector<State> states;
+
+        explicit LayerStateRestore(PrintObject &print_object) : object(print_object)
+        {
+            states.reserve(object.layers().size());
+            for (Layer *layer : object.layers())
+                states.push_back({layer, layer->sharp_tails, layer->cantilevers, layer->sharp_tails_height});
+        }
+
+        ~LayerStateRestore()
+        {
+            object.clear_support_layers();
+            for (State &state : states) {
+                if (state.layer == nullptr)
+                    continue;
+                state.layer->sharp_tails = std::move(state.sharp_tails);
+                state.layer->cantilevers = std::move(state.cantilevers);
+                state.layer->sharp_tails_height = std::move(state.sharp_tails_height);
+            }
+        }
+    } layer_state_restore(object);
+
+    const bool old_geometry_only = m_geometry_only;
+    auto *const old_geometry_slabs = m_geometry_slabs;
+    m_geometry_only = true;
+    m_geometry_slabs = &slabs;
+    try {
+        generate(object);
+    } catch (...) {
+        m_geometry_only = old_geometry_only;
+        m_geometry_slabs = old_geometry_slabs;
+        throw;
+    }
+    m_geometry_only = old_geometry_only;
+    m_geometry_slabs = old_geometry_slabs;
+}
+
 void PrintObjectSupportMaterial::generate(PrintObject &object)
 {
     BOOST_LOG_TRIVIAL(info) << "Support generator - Start";
@@ -887,12 +993,9 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     // may get merged and trimmed by this->generate_base_layers() if the support layers are not synchronized with object layers.
     std::vector<Polygons> layer_support_areas;
     // DynaPin: デバッグステージの取得 (0: Off/Normal, 1: Landing Only, 2: Full DynaPin)
-    int dynapin_debug_stage = object.print()->config().dynapin_debug_stage.value;
-    if (const char* env_stage = std::getenv("DYNAPIN_DEBUG_STAGE")) {
-        try { dynapin_debug_stage = std::stoi(env_stage); } catch (...) {}
-    }
+    const int dynapin_debug_stage = DynaPin::effective_debug_stage(*object.print());
     const std::vector<DynaPin::VirtualSupportSurface> dynapin_surfaces = (dynapin_debug_stage >= 1) ? DynaPin::pin_top_surfaces_for_object(object) : std::vector<DynaPin::VirtualSupportSurface>{};
-    const std::vector<DynaPin::LocalBlocker>          dynapin_blockers = (dynapin_debug_stage >= 1) ? DynaPin::support_blocker_regions_local(object) : std::vector<DynaPin::LocalBlocker>{};
+    const std::vector<DynaPin::LocalBlocker>          dynapin_blockers = (dynapin_debug_stage >= 2) ? DynaPin::support_blocker_regions_local(object) : std::vector<DynaPin::LocalBlocker>{};
 
     SupportGeneratorLayersPtr bottom_contacts = this->bottom_contact_layers_and_layer_support_areas(
         object, top_contacts, buildplate_covered,
@@ -1035,10 +1138,15 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     //    intermediate_layers.clear();
     //    interface_layers.clear();
 
-#ifdef SLIC3R_DEBUG
     SupportGeneratorLayersPtr layers_sorted =
-#endif // SLIC3R_DEBUG
         generate_support_layers(object, raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers);
+
+    if (m_geometry_only) {
+        if (m_geometry_slabs != nullptr)
+            collect_geometry_slabs(layers_sorted, *m_geometry_slabs);
+        object.clear_support_layers();
+        return;
+    }
 
     BOOST_LOG_TRIVIAL(info) << "Support generator - Generating tool paths";
 
@@ -3271,6 +3379,19 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_
             continue;
 
         auto prepare_projection = [&](std::vector<ProjectionState> &states) {
+            // With DynaPin disabled there is no reason to preserve the
+            // contact-by-contact state.  The historical normal-support path
+            // projected one unioned contact set at a time; keeping that fast
+            // path avoids changing grid quantisation or doing extra work when
+            // the feature is off.
+            if (dynapin_blocker_groups.empty() && dynapin_surfaces.empty() && states.size() > 1) {
+                Polygons merged;
+                for (const ProjectionState &state : states)
+                    polygons_append(merged, state.projection);
+                states.clear();
+                if (!merged.empty())
+                    states.push_back({union_(std::move(merged)), {}, {}, {}});
+            }
             Polygons raw;
             const double upper_print_z = object.get_layer(layer_id + 1)->print_z;
             for (ProjectionState &state : states) {

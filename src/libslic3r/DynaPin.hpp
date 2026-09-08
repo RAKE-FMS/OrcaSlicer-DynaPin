@@ -4,6 +4,7 @@
 #include "ExPolygon.hpp"
 
 #include <string>
+#include <optional>
 #include <vector>
 
 namespace Slic3r {
@@ -74,7 +75,29 @@ struct Config
     double         col_pitch_y      = 0.;
     double         blocker_width_y  = 0.;
     double         blocker_height_z = 0.;
+    // Geometry used only while checking whether a candidate pose would put a
+    // model through the physical pin tip.  This is deliberately separate from
+    // the support blocker and pull path geometry.
+    struct TipCollisionConfig
+    {
+        double x_min       = 0.;
+        double x_max       = 0.;
+        double width_y     = 0.;
+        double thickness_z = 0.;
+        double clearance   = 0.;
+        bool   configured  = false;
+
+        bool valid(std::string *error = nullptr) const;
+    } tip_collision;
     PullMoveConfig pull_gcode;
+};
+
+using TipCollisionConfig = Config::TipCollisionConfig;
+
+struct TipCollisionBox
+{
+    Vec3d min{Vec3d::Zero()};
+    Vec3d max{Vec3d::Zero()};
 };
 
 struct BlockerZRange
@@ -139,6 +162,17 @@ std::vector<BlockerBox> selected_blocker_boxes(const Print& print);
 std::string             pull_gcode_for_pin(const Config& config, const Pin& pin);
 double                  pin_y(const Config& config, const Pin& pin);
 BlockerZRange           blocker_z_range(const Config& config, const Pin& pin);
+std::optional<TipCollisionBox> tip_collision_box_for_pin(const Config& config, const Pin& pin);
+bool                    tip_collision_configured(const Config& config);
+bool                    tip_collides_with_model(const Print& print, const Config& config, const Pin& pin);
+// Check the physical tip grid independently of support pin selection.  The
+// automatic selection result may be empty before support projection runs,
+// while every configured physical pin remains an obstacle for placement.
+bool                    tip_collides_with_any_physical_pin(const Print& print, const Config& config);
+
+// The support generator and G-code writer must use the same stage override.
+// 0 = normal support, 1 = landing surfaces, 2 = full DynaPin support/pulls.
+int                     effective_debug_stage(const Print& print);
 
 } // namespace DynaPin
 } // namespace Slic3r

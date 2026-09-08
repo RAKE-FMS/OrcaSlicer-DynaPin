@@ -124,6 +124,54 @@ TEST_CASE("DynaPin support and pull coordinates are independent", "[DynaPin]")
     CHECK(DynaPin::blocker_z_range(config, {2, 0}).z_max == Catch::Approx(22.35));
 }
 
+TEST_CASE("DynaPin tip collision follows the support top and current axes", "[DynaPin]")
+{
+    DynaPin::Config config;
+    config.support_origin_y          = 100.;
+    config.support_origin_z          = 7.3;
+    config.col_pitch_y               = 12.4;
+    config.row_pitch_z               = 7.4;
+    config.blocker_height_z          = 5.;
+    config.tip_collision.x_min       = 0.;
+    config.tip_collision.x_max       = 20.;
+    config.tip_collision.width_y     = 12.4;
+    config.tip_collision.thickness_z = 5.;
+    config.tip_collision.clearance   = 0.;
+    config.tip_collision.configured  = true;
+
+    const auto box = DynaPin::tip_collision_box_for_pin(config, {0, 1});
+    REQUIRE(box);
+    CHECK(box->min.x() == Catch::Approx(0.));
+    CHECK(box->max.x() == Catch::Approx(20.));
+    CHECK(box->min.y() == Catch::Approx(99.));
+    CHECK(box->max.y() == Catch::Approx(111.4));
+    CHECK(box->min.z() == Catch::Approx(2.3));
+    CHECK(box->max.z() == Catch::Approx(7.3));
+
+    const auto row_advanced = DynaPin::tip_collision_box_for_pin(config, {1, 1});
+    const auto col_advanced = DynaPin::tip_collision_box_for_pin(config, {0, 2});
+    REQUIRE(row_advanced);
+    REQUIRE(col_advanced);
+    CHECK(row_advanced->min.z() == Catch::Approx(box->min.z() + 7.4));
+    CHECK(row_advanced->min.y() == Catch::Approx(box->min.y()));
+    CHECK(col_advanced->min.y() == Catch::Approx(box->min.y() + 12.4));
+    CHECK(col_advanced->min.z() == Catch::Approx(box->min.z()));
+}
+
+TEST_CASE("DynaPin tip collision rejects missing and invalid configuration", "[DynaPin]")
+{
+    DynaPin::Config config;
+    CHECK(!DynaPin::tip_collision_configured(config));
+    CHECK(!DynaPin::tip_collision_box_for_pin(config, {0, 0}));
+
+    config.tip_collision.configured  = true;
+    config.tip_collision.x_min       = 20.;
+    config.tip_collision.x_max       = 0.;
+    config.tip_collision.width_y     = 12.4;
+    config.tip_collision.thickness_z = 5.;
+    CHECK(!DynaPin::tip_collision_configured(config));
+}
+
 TEST_CASE("DynaPin candidate grid starts at zero", "[DynaPin]")
 {
     DynaPin::Config config;

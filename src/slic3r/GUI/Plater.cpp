@@ -94,6 +94,7 @@
 #include "Jobs/ArrangeJob.hpp"
 #include "Jobs/FillBedJob.hpp"
 #include "Jobs/RotoptimizeJob.hpp"
+#include "Jobs/DynaPinPlacementJob.hpp"
 #include "Jobs/SLAImportJob.hpp"
 #include "Jobs/SLAImportDialog.hpp"
 #include "Jobs/PrintJob.hpp"
@@ -4255,6 +4256,11 @@ struct Plater::priv
     bool m_is_slicing {false};
     bool auto_reslice_pending {false};
     bool auto_reslice_after_cancel {false};
+    // Suppresses one placement-search attempt on the reslice triggered by a
+    // completed placement job.  The flag is consumed at the next reslice
+    // entry, including error/early-return paths, so an unrelated later reslice
+    // can start a fresh search.
+    bool dynapin_placement_reslice_guard {false};
     bool m_is_publishing {false};
     int m_is_RightClickInLeftUI{-1};
     int m_cur_slice_plate;
@@ -15462,6 +15468,12 @@ bool Plater::is_multi_extruder_ams_empty()
 void Plater::reslice()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: enter, process_completed_with_error=%2%")%__LINE__ %p->process_completed_with_error;
+    // Consume the one-shot suppression immediately.  Reslice has several
+    // early-return validation paths before the worker can be stopped; keeping
+    // this local prevents a failed optimization-triggered reslice from
+    // suppressing a later independent manual reslice.
+    const bool placement_reslice_guard = p->dynapin_placement_reslice_guard;
+    p->dynapin_placement_reslice_guard = false;
     // There is "invalid data" button instead "slice now"
     if (p->process_completed_with_error == p->partplate_list.get_curr_plate_index())
     {
@@ -15500,13 +15512,6 @@ void Plater::reslice()
     unsigned int state = this->p->update_background_process(true);
     if (state & priv::UPDATE_BACKGROUND_PROCESS_REFRESH_SCENE)
         this->p->view3D->reload_scene(false);
-    // If the SLA processing of just a single object's supports is running, restart slicing for the whole object.
-    this->p->background_process.set_task(PrintBase::TaskParams());
-    // Only restarts if the state is valid.
-    //BBS: jusdge the result
-    bool result = this->p->restart_background_process(state | priv::UPDATE_BACKGROUND_PROCESS_FORCE_RESTART);
-
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: restart background,state=%2%, result=%3%")%__LINE__%state %result;
     if ((state & priv::UPDATE_BACKGROUND_PROCESS_INVALID) != 0)
     {
         //BBS: add logs
@@ -15514,6 +15519,30 @@ void Plater::reslice()
         p->update_fff_scene_only_shells();
         return;
     }
+
+    // The update above has applied the current model and print configuration
+    // to current Print and completed validation/scene refresh.  Start the
+    // placement job only now, immediately before the normal background
+    // process restart, so its snapshot cannot observe stale geometry or
+    // modified-count state.  A guarded reslice skips this one-shot search.
+    const DynaPin::PlacementResliceAction placement_action = DynaPin::placement_reslice_action(
+        placement_reslice_guard, this->get_ui_job_worker().is_idle());
+    if (placement_action == DynaPin::PlacementResliceAction::WaitForWorker)
+        return;
+    if (placement_action == DynaPin::PlacementResliceAction::StartSearch && start_dynapin_placement()) {
+        // The placement job owns the first pass.  Its completion callback will
+        // either request this reslice again with the one-shot guard armed or
+        // leave the project untouched when the user canceled the search.
+        return;
+    }
+
+    // If the SLA processing of just a single object's supports is running, restart slicing for the whole object.
+    this->p->background_process.set_task(PrintBase::TaskParams());
+    // Only restarts if the state is valid.
+    //BBS: jusdge the result
+    bool result = this->p->restart_background_process(state | priv::UPDATE_BACKGROUND_PROCESS_FORCE_RESTART);
+
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: restart background,state=%2%, result=%3%")%__LINE__%state %result;
 
     if ((!result) && p->m_slice_all && (p->m_cur_slice_plate < (p->partplate_list.get_plate_count() - 1)))
     {
@@ -16589,6 +16618,195 @@ void Plater::arrange()
         p->take_snapshot(_u8L("Arrange"));
         replace_job(w, std::make_unique<ArrangeJob>());
     }
+}
+
+bool Plater::start_dynapin_placement()
+{
+    Worker &worker = get_ui_job_worker();
+    if (!worker.is_idle() || printer_technology() != ptFFF)
+        return false;
+
+    const Selection &selection = get_selection();
+    if (!selection.is_single_full_instance())
+        return false;
+
+    const int object_idx = selection.get_object_idx();
+    const int instance_idx = selection.get_instance_idx();
+    if (object_idx < 0 || instance_idx < 0 || size_t(object_idx) >= model().objects.size())
+        return false;
+
+    ModelObject *object = model().objects[size_t(object_idx)];
+    if (object == nullptr || size_t(instance_idx) >= object->instances.size())
+        return false;
+    ModelInstance *instance = object->instances[size_t(instance_idx)];
+    if (instance == nullptr || !instance->id().valid() || !object->id().valid())
+        return false;
+
+    // DynaPin optimization is evaluated against the current plate's Print.
+    // The Plater-owned legacy fff_print is not necessarily the selected plate
+    // after a plate switch.
+    PartPlate *plate = p->partplate_list.get_curr_plate();
+    if (plate == nullptr)
+        return false;
+    Print &current_print = p->partplate_list.get_current_fff_print();
+
+    const PrintObject *selected_print_object = nullptr;
+    for (const PrintObject *print_object : current_print.objects()) {
+        if (print_object == nullptr || print_object->model_object() == nullptr || print_object->model_object()->id() != object->id())
+            continue;
+        if (std::any_of(print_object->instances().begin(), print_object->instances().end(),
+                        [instance](const PrintInstance &print_instance) {
+                            return print_instance.model_instance != nullptr && print_instance.model_instance->id() == instance->id();
+                        })) {
+            selected_print_object = print_object;
+            break;
+        }
+    }
+
+    DynaPin::Config dynapin_config;
+    std::string         config_error;
+    const bool          config_loaded = DynaPin::load_config_for_print(current_print, dynapin_config, &config_error);
+    DynaPin::PlacementEligibility eligibility;
+    // Debug stage 0 is the standard-support mode and must not start any
+    // DynaPin side job even when the persisted feature flag is enabled.
+    eligibility.dynapin_enabled         = current_print.config().enable_dynapin_support_optimization.value &&
+                                  DynaPin::effective_debug_stage(current_print) >= 1;
+    eligibility.automatic_pin_selection = !DynaPin::has_manual_selection(current_print);
+    eligibility.normal_support          = selected_print_object != nullptr && selected_print_object->has_support() &&
+                                 !is_tree(selected_print_object->config().support_type.value);
+    eligibility.selected_instance_count = 1;
+    eligibility.tip_collision_configured = config_loaded && DynaPin::tip_collision_configured(dynapin_config);
+
+    std::string eligibility_error;
+    if (!eligibility.valid(&eligibility_error))
+        return false;
+
+    const BoundingBoxf3 initial_bbox = object->instance_bounding_box(*instance, false);
+    if (!initial_bbox.defined)
+        return false;
+
+    const Pointfs &plate_shape = plate->get_shape();
+    if (plate_shape.size() < 3)
+        return false;
+
+    DynaPin::PlacementSceneSnapshot scene;
+    scene.model               = std::make_shared<Model>(model());
+    scene.config              = current_print.full_print_config();
+    scene.target_object_id   = object->id();
+    scene.target_instance_id = instance->id();
+    scene.initial_transform  = instance->get_matrix();
+    scene.world_center       = initial_bbox.center();
+    scene.printable_area     = plate_shape;
+    scene.printable_height   = p->bed.build_volume().printable_height();
+    scene.plate_origin       = plate->get_origin();
+    scene.plate_index        = p->partplate_list.get_curr_plate_index();
+
+    double bed_y_min = std::numeric_limits<double>::infinity();
+    double bed_y_max = -std::numeric_limits<double>::infinity();
+    for (const Vec2d &point : scene.printable_area) {
+        bed_y_min = std::min(bed_y_min, point.y());
+        bed_y_max = std::max(bed_y_max, point.y());
+    }
+
+    DynaPin::PlacementSearchInput search;
+    search.pitch_y             = dynapin_config.col_pitch_y;
+    const std::optional<DynaPin::DeltaYInterval> y_range = DynaPin::placement_delta_y_range_for_bbox(
+        bed_y_min, bed_y_max, initial_bbox.min.y(), initial_bbox.max.y());
+    if (!y_range)
+        return false;
+    search.y_min               = y_range->min;
+    search.y_max               = y_range->max;
+    search.current_rotation_deg = 0.;
+    search.current_delta_y      = 0.;
+    search.delta_y_range_for_rotation = [scene](double rotation_deg) {
+        return DynaPin::placement_delta_y_range_for_scene(scene, rotation_deg);
+    };
+    // The temporary evaluator computes the exact current volume on the worker
+    // thread, avoiding a stale support volume from the live Print.
+    search.current_volume_mm3 = std::numeric_limits<double>::quiet_NaN();
+    // The worker evaluates the current pose in the temporary Print.  This
+    // keeps the InitialTipCollision result tied to the same regenerated layers
+    // used for candidate scoring, including fixed model instances.
+
+    DynaPinPlacementSnapshot snapshot;
+    snapshot.eligibility        = eligibility;
+    snapshot.search             = search;
+    snapshot.scene              = std::move(scene);
+    snapshot.target_instance_id = instance->id();
+    snapshot.input_generation   = static_cast<std::uint64_t>(current_print.get_modified_count());
+
+    return start_dynapin_placement(
+        std::move(snapshot),
+        [this](const DynaPinPlacementSnapshot &snapshot, const DynaPin::PlacementResult &result) {
+            if (p == nullptr || p->partplate_list.get_curr_plate_index() != snapshot.scene.plate_index)
+                return false;
+
+            Print &live_print = p->partplate_list.get_current_fff_print();
+            if (static_cast<std::uint64_t>(live_print.get_modified_count()) != snapshot.input_generation)
+                return false;
+
+            ModelObject *live_object = nullptr;
+            ModelInstance *live_instance = nullptr;
+            for (ModelObject *candidate_object : model().objects) {
+                if (candidate_object == nullptr || candidate_object->id() != snapshot.scene.target_object_id)
+                    continue;
+                live_object = candidate_object;
+                for (ModelInstance *candidate_instance : candidate_object->instances)
+                    if (candidate_instance != nullptr && candidate_instance->id() == snapshot.scene.target_instance_id) {
+                        live_instance = candidate_instance;
+                        break;
+                    }
+                break;
+            }
+            if (live_object == nullptr || live_instance == nullptr)
+                return false;
+
+            if (!live_instance->get_matrix().isApprox(snapshot.scene.initial_transform, 1e-7))
+                return false;
+
+            p->take_snapshot(_u8L("DynaPin placement"));
+            live_instance->set_transformation(Geometry::Transformation(DynaPin::candidate_transform(
+                snapshot.scene.initial_transform, snapshot.scene.world_center, result.candidate.rotation_deg, result.candidate.delta_y)));
+            live_object->invalidate_bounding_box();
+            p->view3D->reload_scene(false);
+            return true;
+        },
+        [this](const DynaPinPlacementSnapshot &, const DynaPin::PlacementResult &result, bool canceled, bool, bool failed) {
+            if (p == nullptr)
+                return;
+
+            if (result.status == DynaPin::PlacementStatus::InitialTipCollision) {
+                p->notification_manager->push_notification(
+                    NotificationType::CustomNotification,
+                    NotificationManager::NotificationLevel::WarningNotificationLevel,
+                    _u8L("DynaPin placement was skipped because the current pose intersects a pin tip."));
+            }
+
+            // A canceled search must leave both the model and the slicing
+            // request untouched.  An exception is handled by the worker's
+            // normal error path; the optimization guard is not armed here.
+            if (!DynaPin::placement_job_should_continue_reslice(result.status, canceled, failed)) {
+                p->dynapin_placement_reslice_guard = false;
+                return;
+            }
+
+            // Every non-canceled terminal result continues the original
+            // reslice once.  The guard makes that reslice skip this optimizer,
+            // so Unchanged/NoFeasible/InvalidConfig cannot loop forever and a
+            // successful apply cannot immediately search again.
+            p->dynapin_placement_reslice_guard = true;
+            reslice();
+        });
+}
+
+bool Plater::start_dynapin_placement(DynaPinPlacementSnapshot snapshot,
+                                     DynaPinPlacementJob::ApplyCallback apply,
+                                     DynaPinPlacementJob::CompletionCallback completion)
+{
+    Worker &worker = get_ui_job_worker();
+    if (!worker.is_idle())
+        return false;
+    return replace_job(worker, std::make_unique<DynaPinPlacementJob>(std::move(snapshot), std::move(apply), std::move(completion)));
 }
 
 void Plater::set_current_canvas_as_dirty()

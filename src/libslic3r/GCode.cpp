@@ -5628,7 +5628,8 @@ std::string GCode::change_layer(coordf_t print_z)
 
     if (m_print != nullptr) {
         DynaPin::Config dynapin_config;
-        if (m_print->config().enable_dynapin_support_optimization.value && DynaPin::load_config_for_print(*m_print, dynapin_config)) {
+        if (m_print->config().enable_dynapin_support_optimization.value && DynaPin::effective_debug_stage(*m_print) >= 2 &&
+            DynaPin::load_config_for_print(*m_print, dynapin_config)) {
             std::vector<std::pair<std::string, DynaPin::Pin>> due_pins;
             for (const DynaPin::Pin& pin : DynaPin::resolved_pins(*m_print)) {
                 const DynaPin::BlockerZRange range = DynaPin::blocker_z_range(dynapin_config, pin);

@@ -29,6 +29,10 @@
 
 namespace Slic3r {
 
+namespace DynaPin {
+struct SupportSlab;
+}
+
 class GCode;
 class Layer;
 class ModelObject;
@@ -355,6 +359,9 @@ public:
 
     // BBS
     void generate_support_preview();
+    // Generate only Normal support polygons for placement scoring.  The
+    // temporary generator clears any support layers before returning.
+    void generate_support_geometry_only(std::vector<DynaPin::SupportSlab> &slabs);
     const std::vector<VolumeSlices>& firstLayerObjSlice() const { return firstLayerObjSliceByVolume; }
     std::vector<VolumeSlices>& firstLayerObjSliceMod() { return firstLayerObjSliceByVolume; }
     const std::vector<groupedVolumeSlices>& firstLayerObjGroups() const { return firstLayerObjSliceByGroups; }
@@ -907,6 +914,12 @@ public:
     ApplyStatus         apply(const Model &model, DynamicPrintConfig config) override;
 
     void                process(long long *time_cost_with_cache = nullptr, bool use_cache = false) override;
+    // Run the slice/infill/support stages needed for placement scoring.  The
+    // Normal support generator is stopped before support toolpaths are built;
+    // callers receive owned support slabs in plate coordinates only after
+    // collecting each PrintObject's geometry.
+    bool                generate_normal_support_geometry_only(std::vector<DynaPin::SupportSlab> &slabs,
+                                                              const std::function<bool()> &cancel = {});
     // Exports G-code into a file name based on the path_template, returns the file path of the generated G-code file.
     // If preview_data is not null, the preview_data is filled in for the G-code visualization (not used by the command line Slic3r).
     std::string         export_gcode(const std::string& path_template, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);

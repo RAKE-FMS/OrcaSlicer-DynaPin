@@ -7,6 +7,7 @@
 #include "libslic3r/Utils.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <boost/filesystem/path.hpp>
 
 #include "test_data.hpp"
@@ -30,6 +31,29 @@ std::string test_resources_dir()
 {
     return (boost::filesystem::path(TEST_DATA_DIR).parent_path().parent_path() / "resources").string();
 }
+
+class DebugStageEnvGuard
+{
+public:
+    DebugStageEnvGuard() : m_previous(std::getenv("DYNAPIN_DEBUG_STAGE")), m_had_previous(m_previous != nullptr)
+    {
+        if (m_had_previous)
+            m_value = m_previous;
+    }
+
+    ~DebugStageEnvGuard()
+    {
+        if (m_had_previous)
+            ::setenv("DYNAPIN_DEBUG_STAGE", m_value.c_str(), 1);
+        else
+            ::unsetenv("DYNAPIN_DEBUG_STAGE");
+    }
+
+private:
+    const char *m_previous;
+    bool        m_had_previous;
+    std::string m_value;
+};
 
 void init_dynapin_print(Print& print, Model& model, const DynamicPrintConfig& config)
 {
@@ -184,6 +208,61 @@ SCENARIO("Print: Rotating a DynaPin model invalidates slicing", "[Print][DynaPin
             }
         }
     }
+}
+
+TEST_CASE("DynaPin debug stage gates selection and support geometry", "[Print][DynaPin]")
+{
+    ResourcesDirGuard resources_guard(test_resources_dir());
+
+    for (const int stage : {0, 1, 2}) {
+        Print print;
+        Model model;
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            {"enable_dynapin_support_optimization", true},
+            {"enable_support", true},
+            {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+            {"dynapin_selected_pins", "1,0"},
+            {"dynapin_debug_stage", stage},
+        });
+        init_dynapin_print(print, model, config);
+
+        const auto &selection = print.dynapin_selection();
+        const auto *object = print.objects().front();
+        if (stage == 0) {
+            CHECK(selection.pins.empty());
+            CHECK(DynaPin::selected_blocker_boxes(print).empty());
+            CHECK(DynaPin::pin_top_surfaces_for_object(*object).empty());
+            CHECK(DynaPin::support_blocker_regions_local(*object).empty());
+        } else {
+            REQUIRE(selection.pins == std::vector<DynaPin::Pin>{{1, 0}});
+            CHECK(DynaPin::selected_blocker_boxes(print).size() == 1);
+            CHECK(DynaPin::pin_top_surfaces_for_object(*object).size() == 1);
+            if (stage == 1)
+                CHECK(DynaPin::support_blocker_regions_local(*object).empty());
+            else
+                CHECK(DynaPin::support_blocker_regions_local(*object).size() == 1);
+        }
+    }
+
+    // The environment override is read for the same snapshot as the config;
+    // restore the process environment before the test returns.
+    DebugStageEnvGuard env_guard;
+    REQUIRE(::setenv("DYNAPIN_DEBUG_STAGE", "0", 1) == 0);
+
+    Print print;
+    Model model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_dynapin_support_optimization", true},
+        {"enable_support", true},
+        {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+        {"dynapin_selected_pins", "1,0"},
+        {"dynapin_debug_stage", 2},
+    });
+    init_dynapin_print(print, model, config);
+    CHECK(print.dynapin_selection().pins.empty());
+    CHECK(DynaPin::selected_blocker_boxes(print).empty());
 }
 
 SCENARIO("Print: Empty DynaPin selection is resolved automatically without writeback", "[Print][DynaPin]") {
@@ -364,6 +443,41 @@ SCENARIO("Print: Automatic DynaPin pin collision check evaluates all model insta
             const bool collides = DynaPin::pin_collides_with_model(print, dynapin_config, test_pin);
             CHECK_FALSE(collides);
         }
+    }
+}
+
+SCENARIO("Print: Placement tip collision scans physical pins before automatic selection", "[Print][DynaPin]") {
+    GIVEN("A model overlapping a physical pin while DynaPin selection is disabled") {
+        ResourcesDirGuard resources_guard(test_resources_dir());
+        Print print;
+        Model model;
+        TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
+        mesh.translate(10.f, 10.f, 0.f);
+        ModelObject *object = model.add_object();
+        object->name        = "dynapin-tip-test.stl";
+        object->add_volume(std::move(mesh));
+        object->add_instance();
+        object->ensure_on_bed();
+
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            {"enable_support", true},
+            {"enable_dynapin_support_optimization", true},
+            {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+            {"dynapin_selected_pins", ""},
+            {"dynapin_debug_stage", 0},
+            {"support_type", "normal(auto)"},
+        });
+        print.auto_assign_extruders(object);
+        print.apply(model, config);
+        print.validate();
+        print.set_status_silent();
+        print.process();
+
+        DynaPin::Config dynapin_config;
+        REQUIRE(DynaPin::load_config_for_print(print, dynapin_config));
+        CHECK(print.dynapin_selection().pins.empty());
+        CHECK(DynaPin::tip_collides_with_any_physical_pin(print, dynapin_config));
     }
 }
 

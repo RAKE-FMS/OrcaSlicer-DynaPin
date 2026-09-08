@@ -1,5 +1,6 @@
 #include "Exception.hpp"
 #include "Print.hpp"
+#include "DynaPinPlacement.hpp"
 #include "BoundingBox.hpp"
 #include "ClipperUtils.hpp"
 #include "ElephantFootCompensation.hpp"
@@ -3964,6 +3965,18 @@ void PrintObject::_generate_support_material()
         PrintObjectSupportMaterial support_material(this, m_slicing_params);
         support_material.generate(*this);
     }
+}
+
+void PrintObject::generate_support_geometry_only(std::vector<DynaPin::SupportSlab> &slabs)
+{
+    slabs.clear();
+    // Tree/Organic support has a different generator and is intentionally not
+    // part of DynaPin placement optimization.
+    if (is_tree(m_config.support_type.value))
+        return;
+
+    PrintObjectSupportMaterial support_material(this, m_slicing_params);
+    support_material.generate_geometry_only(*this, slabs);
 }
 
 // BBS
