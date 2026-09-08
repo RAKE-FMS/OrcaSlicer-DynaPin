@@ -93,7 +93,6 @@ enum class PlacementStatus {
     Unchanged,
     Canceled,
     InvalidConfig,
-    InitialTipCollision,
     NoFeasiblePose,
 };
 
@@ -117,7 +116,6 @@ struct PlacementSearchInput
     double current_rotation_deg = 0.;
     double current_delta_y = 0.;
     double current_volume_mm3 = std::numeric_limits<double>::quiet_NaN();
-    bool   initial_tip_collision = false;
     // When provided, coarse search recomputes the feasible Y interval for
     // every rotation. The fixed y_min/y_max values remain the fallback used by
     // pure optimizer tests and callers without scene geometry.
@@ -133,8 +131,6 @@ struct PlacementEligibility
     bool automatic_pin_selection = false;
     bool normal_support = false;
     size_t selected_instance_count = 0;
-    bool tip_collision_configured = false;
-
     bool valid(std::string *error = nullptr) const;
 };
 
@@ -145,24 +141,6 @@ struct PlacementResult
     double             volume_mm3 = std::numeric_limits<double>::quiet_NaN();
     size_t             evaluations = 0;
     std::string        warning;
-};
-
-enum class PlacementRejectionReason {
-    None,
-    InvalidPose,
-    TipCollision,
-};
-
-// Detailed candidate result used by the scene evaluator.  The optimizer
-// distinguishes a tip collision at the current pose from an invalid search
-// candidate, while callers that only need a score can keep using the
-// optional<double> evaluator below.
-struct PlacementEvaluation
-{
-    std::optional<double>    volume_mm3;
-    PlacementRejectionReason rejection = PlacementRejectionReason::InvalidPose;
-
-    bool feasible() const { return rejection == PlacementRejectionReason::None && volume_mm3.has_value(); }
 };
 
 // Immutable input for a real placement evaluation.  The model and config are
@@ -187,28 +165,18 @@ struct PlacementSceneSnapshot
     int                           plate_index = 0;
 };
 
-// The evaluator returns nullopt for a candidate rejected by bed/model/pin
-// constraints.  It may throw; optimize_placement converts such a failure into
+// The evaluator returns nullopt for a candidate rejected by bed or model
+// constraints. It may throw; optimize_placement converts such a failure into
 // NoFeasiblePose and preserves the live caller state.
 using PlacementEvaluator = std::function<std::optional<double>(const PlacementCandidate &)>;
-using PlacementDetailedEvaluator = std::function<PlacementEvaluation(const PlacementCandidate &)>;
 using CancelCallback = std::function<bool()>;
 using ProgressCallback = std::function<void(int)>;
 
-PlacementEvaluation evaluate_scene_candidate_detailed(const PlacementSceneSnapshot &scene,
-                                                       const PlacementCandidate     &candidate,
-                                                       const CancelCallback         &cancel = {});
 std::optional<double> evaluate_scene_candidate(const PlacementSceneSnapshot &scene,
                                                const PlacementCandidate     &candidate,
                                                const CancelCallback         &cancel = {});
 
-PlacementDetailedEvaluator make_scene_detailed_evaluator(PlacementSceneSnapshot scene, const CancelCallback &cancel = {});
 PlacementEvaluator make_scene_evaluator(PlacementSceneSnapshot scene, const CancelCallback &cancel = {});
-
-PlacementResult optimize_placement_detailed(const PlacementSearchInput &input,
-                                            const PlacementDetailedEvaluator &evaluator,
-                                            const CancelCallback              &cancel = {},
-                                            const ProgressCallback            &progress = {});
 
 PlacementResult optimize_placement(const PlacementSearchInput &input,
                                    const PlacementEvaluator   &evaluator,

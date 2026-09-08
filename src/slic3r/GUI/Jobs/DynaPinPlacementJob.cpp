@@ -24,11 +24,11 @@ void DynaPinPlacementJob::process(Ctl &ctl)
         return;
     }
 
-    DynaPin::PlacementDetailedEvaluator evaluator = m_snapshot.evaluator;
+    DynaPin::PlacementEvaluator evaluator = m_snapshot.evaluator;
     if (!evaluator && m_snapshot.scene.model)
-        evaluator = DynaPin::make_scene_detailed_evaluator(m_snapshot.scene, [&ctl]() { return ctl.was_canceled(); });
+        evaluator = DynaPin::make_scene_evaluator(m_snapshot.scene, [&ctl]() { return ctl.was_canceled(); });
 
-    m_result = DynaPin::optimize_placement_detailed(
+    m_result = DynaPin::optimize_placement(
         m_snapshot.search,
         evaluator,
         [&ctl]() { return ctl.was_canceled(); },

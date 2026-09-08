@@ -16,7 +16,7 @@
 
 | 項目 | 現在の確認結果 | 担当タスク |
 |---|---|---|
-| ピン先端設定 | `Config`とKP3S JSONに`tip_collision`なし。`pin_z()`もなし | S01 |
+| ピン衝突判定 | 既存blockerと`pin_collides_with_model()`をAuto選択から直接使用 | S01、S07 |
 | 幾何体積評価 | `PrintObjectSupportMaterial::generate()`が`generate_support_toolpaths()`まで実行。専用評価APIなし | S02–S04 |
 | 配置候補探索 | DynaPin.hpp/cppに配置探索APIなし | S05–S09 |
 | GUI適用 | `DynaPinPlacementJob`なし。Platerへの配置最適化接続なし | S10–S12 |
@@ -112,16 +112,16 @@ cmake --build build/arm64 --target OrcaSlicer --config Release --parallel
 
 **完了条件:** 無効時の通常支持とstageの一貫性を別々に報告できる。
 
-### S01: 先端干渉設定を現在の軸定義へ合わせる
+### S01: blocker衝突判定を配置評価でも直接流用する
 
 **依存:** S00。**変更:** `src/libslic3r/DynaPin.hpp/.cpp`、`resources/profiles/Kingroon/dynapin/kp3s.json`。**テスト:** `tests/libslic3r/test_dynapin_preview.cpp`。
 
-- [ ] `TipCollisionConfig`に`x_min,x_max,width_y,thickness_z,clearance`を追加。設定未指定を明示的に表現し、通常スライスは従来動作、配置最適化だけは設定不足として終了する。
-- [ ] KP3S値を`0,20,12.4,5,0`として追加（旧設計の余白1mmは採用しない）。全値finite、`x_min<x_max`、幅・厚さ>0、余白>=0を検証する。
-- [ ] `tip_collision_box_for_pin()`を追加し、blocker形状やpull座標と別の用途として保持する。
-- [ ] row増加でZのみ、col増加でYのみ変わるケース、負余白、NaN、逆転X、設定欠落を検証する。
+- [ ] 配置専用の`TipCollisionConfig`、box、判定関数、KP3S JSON設定を追加しない。残存している場合は削除する。
+- [ ] `blocker_z_range()`、`blocker_for_pin_shift()`、`pin_collides_with_model()`をblocker領域の唯一の定義として維持する。
+- [ ] blockerはX=`pull_gcode.x_front..bed_max_x`、Y=`pin_y + support_block_y_offset ± blocker_width_y/2`、Z=`z_max-blocker_height_z..z_max`であることを既存テストで確認する。
+- [ ] `x_front`は引き出し到達位置であり、その手前を物理ピン領域として扱わない回帰ケースを追加する。
 
-**受け入れ例:** 上面7.3、厚さ5ならZ範囲`[2.3,7.3]`。現行実装どおり追加余白なし。Y中心は`pin_y(config,pin) - 7.2`、幅12.4。旧設計の中心±厚さ/2を上面へ直接当てない。`clearance`は初版0固定とし、全方向への拡張機能を追加しない。境界のEPSILONは数値誤差用であり物理余白ではない。
+**完了条件:** 配置評価だけの衝突設定や幾何を持たず、通常スライスと候補評価が同じblocker判定を使用する。
 
 ### S02: Zスラブ体積積算を純粋関数にする
 
@@ -194,17 +194,17 @@ M_candidate = T(0, delta_y, 0) * T(C) * Rz(theta) * T(-C) * M_initial
 
 **完了条件:** X逸脱をY区間計算で補正しない。pitchが0/非finiteなら探索せずInvalidConfig。
 
-### S07: bed・固定モデル・ピン干渉で候補を除外する
+### S07: 姿勢制約を検証し、ピン衝突はAuto選択へ委ねる
 
 **依存:** S01、S04–S06。**変更:** `src/libslic3r/DynaPinPlacement.hpp/.cpp`、必要なら`src/libslic3r/DynaPin.cpp`。**テスト:** `tests/fff_print/test_print.cpp`。
 
 - [ ] 候補のplate座標でbed外周・除外領域・高さ上限を検証する。XY AABBだけで非矩形bedを判定しない。
 - [ ] 固定モデルとの3D重なりを検証する。同じXYでもZが離れる例を過剰除外しない。
-- [ ] 先端boxと候補/固定モデルの干渉を検証する。box接触境界は干渉扱いとし、スライス面の間にだけ存在する薄い干渉も取り逃さない。
-- [ ] 引き出し経路の既存判定とAuto選択を維持する。あるピンが使用不能という理由だけで姿勢全体を無効にせず、最終選択ピンの安全性を確認する。
-- [ ] 現在姿勢の先端干渉はInitialTipCollision、探索中は当該候補のInvalidPoseとして分離する。
+- [ ] 一時`Print`のgeometry-only生成から`update_dynapin_selection()`を実行し、既存の`candidate_pins()`→`pin_collides_with_model()`→`detect_dynapin_pins()`経路を使用する。
+- [ ] blockerと重なるピンだけを`rejected_collisions`へ送り、他のピンと通常支持で候補体積を評価する。ピン衝突を姿勢制約へ昇格させない。
+- [ ] 複数ピンのうち衝突ピンだけが除外され、安全なピンが選択され続けることを検証する。
 
-**完了条件:** 初期干渉で評価ループに入らない。判定対象の物理ピン集合はS01の設定と設計に従い明記する。
+**完了条件:** bed・除外領域・高さ・モデル重なりだけが候補を無効にし、blocker衝突があっても候補評価を完了できる。
 
 ### S08: 比較ルールを固定する
 
@@ -226,7 +226,7 @@ M_candidate = T(0, delta_y, 0) * T(C) * Rz(theta) * T(-C) * M_initial
 - [ ] 角度は[0,360)へ正規化し、角度とscaled Δyのキーで粗密両段階の重複評価を防ぐ。候補は毎回制約判定する。
 - [ ] 全無効、全同値、最適点が359°付近、途中cancel、評価例外をテストする。
 
-**完了条件:** 状態をImproved/Unchanged/Canceled/InvalidConfig/InitialTipCollision/NoFeasiblePoseとして返す。進捗は単調増加し、Canceledでは勝者を適用しない。
+**完了条件:** 状態をImproved/Unchanged/Canceled/InvalidConfig/NoFeasiblePoseとして返す。進捗は単調増加し、Canceledでは勝者を適用しない。
 
 ### S10: GUI起動条件とスナップショットを用意する
 
@@ -255,7 +255,7 @@ M_candidate = T(0, delta_y, 0) * T(C) * Rz(theta) * T(-C) * M_initial
 - [ ] finalizeで対象IDと入力世代、Model/config/plateの一致を確認。不一致なら結果破棄。
 - [ ] ImprovedだけUndoスナップショットを1回作り、選択instanceのS05変換だけを適用する。Z移動を伴わないのでobject全体のbed再配置を追加しない。
 - [ ] 最適化起因の再スライスに限定した一回限りのガードを設定し、消費・失敗・cancelの各経路で解除する。
-- [ ] 初期干渉は警告、Unchangedは姿勢維持して通常スライス継続。cancelは自動再起動しない。
+- [ ] Unchangedは姿勢維持して通常スライスを継続し、cancelは自動再起動しない。
 - [ ] Undo/Redo、探索中の削除・移動・設定変更、2回目の手動slice、最適化起因resliceを手動検証する。
 
 **完了条件:** 自動適用時のJob起動1回、Undo1回。次の独立sliceはガードに阻害されない。
@@ -268,7 +268,7 @@ M_candidate = T(0, delta_y, 0) * T(C) * Rz(theta) * T(-C) * M_initial
 - [ ] `models/manual-tests/gymnast.3mf`を複製して、現在姿勢と最適化後を同一profileで評価する。
 - [ ] V0/Vbest(mm³)、Δy、相対角度、選択ピン(row,col)、候補数、無効候補数、評価時間、全時間を記録する。
 - [ ] 通常スライスしたG-codeの選択ピンとpullコメント、上段支持終了、下段支持保持を確認する。実機動作は別途実施の有無を明記する。
-- [ ] 改善なし、初期干渉、cancelの各経路でも姿勢とUndoが不変であることを確認する。
+- [ ] 改善なし、候補なし、cancelの各経路でも姿勢とUndoが不変であることを確認する。
 
 **完了条件:** 体積差が閾値を超える場合だけ適用。改善率や実行時間を未測定のまま保証しない。
 
@@ -280,15 +280,15 @@ M_candidate = T(0, delta_y, 0) * T(C) * Rz(theta) * T(-C) * M_initial
 
 ## 確認事項と検証記録
 
-2026-09-08ユーザー回答: 「上面から5mmで、余白は実装に従ってほしい」。`DynaPin.cpp`の`blocker_z_range()`と`pin_collides_with_model()`を照合し、Zは`[top-5,top]`、追加余白なしと確定した。Y中心は既存`support_block_y_offset=-7.2`を含む物理領域に合わせる。旧設計の全方向1mm余白は廃止する。
+2026-09-08に`DynaPin.cpp`の既存`blocker_z_range()`、`blocker_for_pin_shift()`、`pin_collides_with_model()`を照合した。配置専用の先端領域は重複するため削除し、blockerのZ=`[top-blocker_height_z,top]`とY中心=`pin_y + support_block_y_offset`をそのまま使う。`pull_gcode.x_front`はblockerの開始位置であり、その手前を物理ピン領域とは扱わない。
 
 ### 2026-09-08 実装状況
 
-S01〜S12を一括実装した。先端boxはピン上面から下向き5mm、追加余白0mmとし、Auto選択結果に限らず全物理ピンを候補姿勢で検査する。配置評価はライブModelを変更しない一時PrintでNormal支持のgeometry-onlyスラブを生成し、ZスラブごとのXY union体積を目的関数にする。
+S01〜S12を一括実装した。配置評価はライブModelを変更しない一時PrintでNormal支持のgeometry-onlyスラブを生成し、ZスラブごとのXY union体積を目的関数にする。geometry-only生成内の既存Auto選択が全候補ピンをblocker領域で検査し、衝突ピンだけを除外する。
 
-探索は5°・pitch/16の粗探索と、上位5候補に対する1°・pitch/64の局所探索を実装した。各回転角で変換後bounding boxからbed内の実行可能Y区間を再計算し、区間端点と現在姿勢を含める。比較、重複排除、キャンセル、初期先端干渉、無効候補の扱いも決定的テストで固定した。
+探索は5°・pitch/16の粗探索と、上位5候補に対する1°・pitch/64の局所探索を実装した。各回転角で変換後bounding boxからbed内の実行可能Y区間を再計算し、区間端点と現在姿勢を含める。比較、重複排除、キャンセル、無効候補の扱いも決定的テストで固定した。
 
-GUIは`Plater::reslice()`で最新Model/configをbackground Printへ反映した後に対象判定し、Jobで探索する。改善時だけUndo 1件と選択instanceの変換を適用し、一回限りのガード付きで再スライスする。初期干渉は警告し、改善なし・cancel・古い結果では姿勢を変更しない。
+GUIは`Plater::reslice()`で最新Model/configをbackground Printへ反映した後に対象判定し、Jobで探索する。改善時だけUndo 1件と選択instanceの変換を適用し、一回限りのガード付きで再スライスする。改善なし・cancel・古い結果では姿勢を変更しない。
 
 R01のsharp-tail状態復元、R03aのDynaPin無効時の集約投影経路、R03bのdebug stage共通化も実装した。R01/R03aの専用性能・状態比較と、S03〜S05/S07/S11〜S13に記載したGUI・実モデルの手動確認は未実施のため、該当チェック項目は完了扱いにしない。
 
@@ -296,7 +296,7 @@ R01のsharp-tail状態復元、R03aのDynaPin無効時の集約投影経路、R0
 
 - `cmake --build build/arm64 --target libslic3r_tests libslic3r_gui --parallel 4`: 成功。
 - `ctest --test-dir build/arm64 --output-on-failure -R 'DynaPin placement recomputes and shifts the Y interval'`: 1/1成功。
-- `ctest --test-dir build/arm64 --output-on-failure -R 'DynaPin|SupportMaterial'`: 41/41成功、120.12秒。
+- `ctest --test-dir build/arm64 --output-on-failure -R 'DynaPin|SupportMaterial'`: tip専用テスト削除後の38/38成功、115.02秒。
 - `cmake --build build/arm64 --target OrcaSlicer --config Release --parallel 4`: 成功。既存警告のみ。
 - `git diff --check`: 成功。
 

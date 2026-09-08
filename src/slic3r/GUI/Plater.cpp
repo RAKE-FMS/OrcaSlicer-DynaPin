@@ -16664,8 +16664,9 @@ bool Plater::start_dynapin_placement()
     }
 
     DynaPin::Config dynapin_config;
-    std::string         config_error;
-    const bool          config_loaded = DynaPin::load_config_for_print(current_print, dynapin_config, &config_error);
+    std::string     config_error;
+    if (!DynaPin::load_config_for_print(current_print, dynapin_config, &config_error))
+        return false;
     DynaPin::PlacementEligibility eligibility;
     // Debug stage 0 is the standard-support mode and must not start any
     // DynaPin side job even when the persisted feature flag is enabled.
@@ -16675,7 +16676,6 @@ bool Plater::start_dynapin_placement()
     eligibility.normal_support          = selected_print_object != nullptr && selected_print_object->has_support() &&
                                  !is_tree(selected_print_object->config().support_type.value);
     eligibility.selected_instance_count = 1;
-    eligibility.tip_collision_configured = config_loaded && DynaPin::tip_collision_configured(dynapin_config);
 
     std::string eligibility_error;
     if (!eligibility.valid(&eligibility_error))
@@ -16724,9 +16724,6 @@ bool Plater::start_dynapin_placement()
     // The temporary evaluator computes the exact current volume on the worker
     // thread, avoiding a stale support volume from the live Print.
     search.current_volume_mm3 = std::numeric_limits<double>::quiet_NaN();
-    // The worker evaluates the current pose in the temporary Print.  This
-    // keeps the InitialTipCollision result tied to the same regenerated layers
-    // used for candidate scoring, including fixed model instances.
 
     DynaPinPlacementSnapshot snapshot;
     snapshot.eligibility        = eligibility;
@@ -16774,13 +16771,6 @@ bool Plater::start_dynapin_placement()
         [this](const DynaPinPlacementSnapshot &, const DynaPin::PlacementResult &result, bool canceled, bool, bool failed) {
             if (p == nullptr)
                 return;
-
-            if (result.status == DynaPin::PlacementStatus::InitialTipCollision) {
-                p->notification_manager->push_notification(
-                    NotificationType::CustomNotification,
-                    NotificationManager::NotificationLevel::WarningNotificationLevel,
-                    _u8L("DynaPin placement was skipped because the current pose intersects a pin tip."));
-            }
 
             // A canceled search must leave both the model and the slicing
             // request untouched.  An exception is handled by the worker's

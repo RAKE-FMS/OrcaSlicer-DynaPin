@@ -183,18 +183,6 @@ TEST_CASE("DynaPin placement applies only significant improvements", "[DynaPinPl
         CHECK(result.evaluations == evaluated.size());
     }
 
-    SECTION("initial tip collision stops before evaluation")
-    {
-        input.initial_tip_collision = true;
-        bool called = false;
-        const DynaPin::PlacementResult result = DynaPin::optimize_placement(input, [&](const DynaPin::PlacementCandidate &) {
-            called = true;
-            return std::optional<double>{998.};
-        });
-        CHECK(result.status == DynaPin::PlacementStatus::InitialTipCollision);
-        CHECK(!called);
-    }
-
     SECTION("cancellation does not return a winner")
     {
         bool canceled = false;
@@ -236,54 +224,6 @@ TEST_CASE("DynaPin placement applies only significant improvements", "[DynaPinPl
     }
 }
 
-TEST_CASE("DynaPin placement reports an initial tip collision before coarse search", "[DynaPinPlacement]")
-{
-    DynaPin::PlacementSearchInput input;
-    input.pitch_y = 16.;
-    input.y_min   = -8.;
-    input.y_max   = 8.;
-
-    size_t evaluations = 0;
-    bool   coarse_evaluated = false;
-    const DynaPin::PlacementResult result = DynaPin::optimize_placement_detailed(
-        input,
-        [&evaluations, &coarse_evaluated](const DynaPin::PlacementCandidate &candidate) {
-            ++evaluations;
-            if (candidate.rotation_deg != 0. || candidate.delta_y != 0.)
-                coarse_evaluated = true;
-            return DynaPin::PlacementEvaluation{std::nullopt, DynaPin::PlacementRejectionReason::TipCollision};
-        });
-
-    CHECK(result.status == DynaPin::PlacementStatus::InitialTipCollision);
-    CHECK(result.evaluations == 1);
-    CHECK(evaluations == 1);
-    CHECK_FALSE(coarse_evaluated);
-}
-
-TEST_CASE("DynaPin placement excludes only candidates with tip collisions", "[DynaPinPlacement]")
-{
-    DynaPin::PlacementSearchInput input;
-    input.pitch_y            = 16.;
-    input.y_min              = -8.;
-    input.y_max              = 8.;
-    input.current_volume_mm3 = 1000.;
-
-    bool rejected_candidate = false;
-    const DynaPin::PlacementResult result = DynaPin::optimize_placement_detailed(
-        input,
-        [&rejected_candidate](const DynaPin::PlacementCandidate &candidate) {
-            if (candidate.delta_y > 0.1) {
-                rejected_candidate = true;
-                return DynaPin::PlacementEvaluation{std::nullopt, DynaPin::PlacementRejectionReason::TipCollision};
-            }
-            return DynaPin::PlacementEvaluation{std::optional<double>{998.9}, DynaPin::PlacementRejectionReason::None};
-        });
-
-    CHECK(rejected_candidate);
-    CHECK(result.status == DynaPin::PlacementStatus::Improved);
-    CHECK(result.candidate.delta_y <= 0.1);
-}
-
 TEST_CASE("DynaPin placement reports infeasible candidates", "[DynaPinPlacement]")
 {
     DynaPin::PlacementSearchInput input;
@@ -308,6 +248,5 @@ TEST_CASE("DynaPin placement eligibility is a complete snapshot gate", "[DynaPin
     eligibility.automatic_pin_selection  = true;
     eligibility.normal_support           = true;
     eligibility.selected_instance_count  = 1;
-    eligibility.tip_collision_configured = true;
     CHECK(eligibility.valid(&error));
 }

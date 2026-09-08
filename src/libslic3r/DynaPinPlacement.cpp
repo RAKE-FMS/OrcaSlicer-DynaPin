@@ -194,8 +194,6 @@ bool PlacementEligibility::valid(std::string *error) const
         return fail("DynaPin placement optimization requires Normal support");
     if (selected_instance_count != 1)
         return fail("DynaPin placement optimization requires exactly one selected instance");
-    if (!tip_collision_configured)
-        return fail("DynaPin tip collision configuration is missing");
     return true;
 }
 
@@ -307,14 +305,14 @@ double support_volume_mm3(const Print &print)
     return support_volume_mm3(slabs);
 }
 
-PlacementEvaluation evaluate_scene_candidate_detailed(const PlacementSceneSnapshot &scene,
-                                                      const PlacementCandidate     &candidate,
-                                                      const CancelCallback         &cancel)
+std::optional<double> evaluate_scene_candidate(const PlacementSceneSnapshot &scene,
+                                               const PlacementCandidate     &candidate,
+                                               const CancelCallback         &cancel)
 {
     if (!scene.model || !scene.target_object_id.valid() || !scene.target_instance_id.valid())
-        return {std::nullopt, PlacementRejectionReason::InvalidPose};
+        return std::nullopt;
     if (cancel && cancel())
-        return {std::nullopt, PlacementRejectionReason::InvalidPose};
+        return std::nullopt;
 
     Model candidate_model(*scene.model);
     ModelObject *target_object = nullptr;
@@ -331,11 +329,11 @@ PlacementEvaluation evaluate_scene_candidate_detailed(const PlacementSceneSnapsh
         break;
     }
     if (target_object == nullptr || target_instance == nullptr)
-        return {std::nullopt, PlacementRejectionReason::InvalidPose};
+        return std::nullopt;
 
     const std::optional<BuildVolume> build_volume = build_volume_for_scene(scene);
     if (!build_volume)
-        return {std::nullopt, PlacementRejectionReason::InvalidPose};
+        return std::nullopt;
 
     target_instance->set_transformation(Geometry::Transformation(candidate_transform(
         scene.initial_transform, scene.world_center, candidate.rotation_deg, candidate.delta_y)));
@@ -347,7 +345,7 @@ PlacementEvaluation evaluate_scene_candidate_detailed(const PlacementSceneSnapsh
     candidate_model.curr_plate_index = scene.plate_index;
     candidate_model.update_print_volume_state(*build_volume);
     if (target_instance->calc_print_volume_state(*build_volume) != ModelInstancePVS_Inside)
-        return {std::nullopt, PlacementRejectionReason::InvalidPose};
+        return std::nullopt;
 
     Print candidate_print;
     candidate_print.set_plate_index(scene.plate_index);
@@ -359,58 +357,31 @@ PlacementEvaluation evaluate_scene_candidate_detailed(const PlacementSceneSnapsh
     candidate_print.apply(candidate_model, scene.config);
     if (cancel && cancel()) {
         candidate_print.cancel();
-        return {std::nullopt, PlacementRejectionReason::InvalidPose};
+        return std::nullopt;
     }
 
     std::vector<SupportSlab> slabs;
+    // This call runs update_dynapin_selection() before support generation.
+    // The existing blocker collision scan therefore removes only colliding
+    // pins while the candidate pose remains eligible for volume scoring.
     if (!candidate_print.generate_normal_support_geometry_only(slabs, cancel))
-        return {std::nullopt, PlacementRejectionReason::InvalidPose};
+        return std::nullopt;
     if (cancel && cancel())
-        return {std::nullopt, PlacementRejectionReason::InvalidPose};
+        return std::nullopt;
 
     // Check all model instances in their actual Z intervals.  This catches
     // thin intersections between slices while allowing identical XY footprints
-    // that are separated in Z.  The same candidate model also drives the
-    // DynaPin tip check below, so fixed models are included in both checks.
+    // that are separated in Z.
     if (model_layers_overlap(candidate_print) || model_intersects_bed_exclusion(candidate_print))
-        return {std::nullopt, PlacementRejectionReason::InvalidPose};
+        return std::nullopt;
 
-    DynaPin::Config dynapin_config;
-    std::string config_error;
-    if (candidate_print.config().enable_dynapin_support_optimization.value && effective_debug_stage(candidate_print) >= 1 &&
-        load_config_for_print(candidate_print, dynapin_config, &config_error) && tip_collision_configured(dynapin_config)) {
-        // Placement evaluates physical pin tips independently of automatic
-        // support selection.  Before selection is resolved, resolved_pins()
-        // may be empty even though the printer has real pins at every grid
-        // position; every candidate must therefore be checked against the
-        // complete configured grid.
-        if (tip_collides_with_any_physical_pin(candidate_print, dynapin_config))
-            return {std::nullopt, PlacementRejectionReason::TipCollision};
-    }
-
-    return {support_volume_mm3(slabs), PlacementRejectionReason::None};
-}
-
-std::optional<double> evaluate_scene_candidate(const PlacementSceneSnapshot &scene,
-                                               const PlacementCandidate     &candidate,
-                                               const CancelCallback         &cancel)
-{
-    const PlacementEvaluation evaluation = evaluate_scene_candidate_detailed(scene, candidate, cancel);
-    return evaluation.feasible() ? evaluation.volume_mm3 : std::nullopt;
-}
-
-PlacementDetailedEvaluator make_scene_detailed_evaluator(PlacementSceneSnapshot scene, const CancelCallback &cancel)
-{
-    return [scene = std::move(scene), cancel](const PlacementCandidate &candidate) {
-        return evaluate_scene_candidate_detailed(scene, candidate, cancel);
-    };
+    return support_volume_mm3(slabs);
 }
 
 PlacementEvaluator make_scene_evaluator(PlacementSceneSnapshot scene, const CancelCallback &cancel)
 {
-    return [detailed = make_scene_detailed_evaluator(std::move(scene), cancel)](const PlacementCandidate &candidate) {
-        const PlacementEvaluation evaluation = detailed(candidate);
-        return evaluation.feasible() ? evaluation.volume_mm3 : std::nullopt;
+    return [scene = std::move(scene), cancel](const PlacementCandidate &candidate) {
+        return evaluate_scene_candidate(scene, candidate, cancel);
     };
 }
 
@@ -594,10 +565,10 @@ std::optional<DeltaYInterval> placement_delta_y_range_for_scene(const PlacementS
     return placement_delta_y_range_for_bbox(bed_y_min, bed_y_max, bbox.min.y(), bbox.max.y());
 }
 
-PlacementResult optimize_placement_detailed(const PlacementSearchInput      &input,
-                                            const PlacementDetailedEvaluator &evaluator,
-                                            const CancelCallback              &cancel,
-                                            const ProgressCallback            &progress)
+PlacementResult optimize_placement(const PlacementSearchInput &input,
+                                   const PlacementEvaluator   &evaluator,
+                                   const CancelCallback        &cancel,
+                                   const ProgressCallback      &progress)
 {
     PlacementResult result;
     auto set_progress = [&progress](int value) {
@@ -610,10 +581,8 @@ PlacementResult optimize_placement_detailed(const PlacementSearchInput      &inp
     const bool invalid_fixed_range = !has_rotation_ranges &&
                                      (!finite(input.y_min) || !finite(input.y_max) || input.y_max < input.y_min);
     if (!evaluator || !finite(input.pitch_y) || input.pitch_y == 0. || invalid_fixed_range ||
-        !finite(input.current_rotation_deg) || !finite(input.current_delta_y) || input.initial_tip_collision) {
-        result.status = input.initial_tip_collision ? PlacementStatus::InitialTipCollision : PlacementStatus::InvalidConfig;
-        if (input.initial_tip_collision)
-            result.warning = "The current pose intersects a DynaPin tip";
+        !finite(input.current_rotation_deg) || !finite(input.current_delta_y)) {
+        result.status = PlacementStatus::InvalidConfig;
         set_progress(100);
         return result;
     }
@@ -629,14 +598,7 @@ PlacementResult optimize_placement_detailed(const PlacementSearchInput      &inp
     std::optional<double> current_volume;
     try {
         ++result.evaluations;
-        const PlacementEvaluation evaluation = evaluator(current);
-        if (evaluation.rejection == PlacementRejectionReason::TipCollision) {
-            result.status = PlacementStatus::InitialTipCollision;
-            result.warning = "The current pose intersects a DynaPin tip";
-            set_progress(100);
-            return result;
-        }
-        current_volume = evaluation.feasible() ? evaluation.volume_mm3 : std::nullopt;
+        current_volume = evaluator(current);
     } catch (const std::exception &error) {
         if (cancel && cancel()) {
             result.status = PlacementStatus::Canceled;
@@ -702,8 +664,7 @@ PlacementResult optimize_placement_detailed(const PlacementSearchInput      &inp
         if (!evaluated.emplace(candidate_key(normalized_candidate)).second)
             return std::nullopt;
         try {
-            const PlacementEvaluation evaluation = evaluator(normalized_candidate);
-            std::optional<double> value = evaluation.feasible() ? evaluation.volume_mm3 : std::nullopt;
+            std::optional<double> value = evaluator(normalized_candidate);
             ++result.evaluations;
             ++completed;
             set_progress(static_cast<int>(100. * double(completed) / double(estimated_total)));
@@ -798,22 +759,6 @@ PlacementResult optimize_placement_detailed(const PlacementSearchInput      &inp
     }
     set_progress(100);
     return result;
-}
-
-PlacementResult optimize_placement(const PlacementSearchInput &input,
-                                   const PlacementEvaluator   &evaluator,
-                                   const CancelCallback        &cancel,
-                                   const ProgressCallback     &progress)
-{
-    PlacementDetailedEvaluator detailed;
-    if (evaluator) {
-        detailed = [&evaluator](const PlacementCandidate &candidate) {
-            const std::optional<double> value = evaluator(candidate);
-            return value ? PlacementEvaluation{value, PlacementRejectionReason::None}
-                         : PlacementEvaluation{std::nullopt, PlacementRejectionReason::InvalidPose};
-        };
-    }
-    return optimize_placement_detailed(input, detailed, cancel, progress);
 }
 
 } // namespace Slic3r::DynaPin

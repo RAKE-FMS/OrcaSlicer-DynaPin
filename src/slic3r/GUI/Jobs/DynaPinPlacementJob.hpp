@@ -19,7 +19,7 @@ struct DynaPinPlacementSnapshot
     DynaPin::PlacementEligibility eligibility;
     DynaPin::PlacementSearchInput search;
     DynaPin::PlacementSceneSnapshot scene;
-    DynaPin::PlacementDetailedEvaluator evaluator;
+    DynaPin::PlacementEvaluator evaluator;
     ObjectID target_instance_id;
     std::uint64_t input_generation = 0;
 };

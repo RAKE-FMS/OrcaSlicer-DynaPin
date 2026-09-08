@@ -2,6 +2,7 @@
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/DynaPin.hpp"
+#include "libslic3r/DynaPinPlacement.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Utils.hpp"
@@ -446,15 +447,15 @@ SCENARIO("Print: Automatic DynaPin pin collision check evaluates all model insta
     }
 }
 
-SCENARIO("Print: Placement tip collision scans physical pins before automatic selection", "[Print][DynaPin]") {
-    GIVEN("A model overlapping a physical pin while DynaPin selection is disabled") {
+SCENARIO("Print: Model geometry before x_front does not collide with a DynaPin blocker", "[Print][DynaPin]") {
+    GIVEN("A model entirely before the pull path") {
         ResourcesDirGuard resources_guard(test_resources_dir());
         Print print;
         Model model;
-        TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
-        mesh.translate(10.f, 10.f, 0.f);
+        TriangleMesh mesh = make_cube(10., 10., 5.);
+        mesh.translate(5.f, 5.f, 0.f);
         ModelObject *object = model.add_object();
-        object->name        = "dynapin-tip-test.stl";
+        object->name        = "dynapin-before-x-front-test.stl";
         object->add_volume(std::move(mesh));
         object->add_instance();
         object->ensure_on_bed();
@@ -476,13 +477,13 @@ SCENARIO("Print: Placement tip collision scans physical pins before automatic se
 
         DynaPin::Config dynapin_config;
         REQUIRE(DynaPin::load_config_for_print(print, dynapin_config));
-        CHECK(print.dynapin_selection().pins.empty());
-        CHECK(DynaPin::tip_collides_with_any_physical_pin(print, dynapin_config));
+        CHECK(dynapin_config.pull_gcode.x_front == Catch::Approx(20.));
+        CHECK_FALSE(DynaPin::pin_collides_with_model(print, dynapin_config, {0, 0}));
     }
 }
 
 SCENARIO("Print: Automatic DynaPin collision check covers the full pull path", "[Print][DynaPin]") {
-    GIVEN("A model in the pin pull path but outside the pin body X range") {
+    GIVEN("A model inside the blocker pull-path range") {
         ResourcesDirGuard resources_guard(test_resources_dir());
         Print print;
         Model model;
@@ -506,12 +507,13 @@ SCENARIO("Print: Automatic DynaPin collision check covers the full pull path", "
         print.apply(model, config);
         print.validate();
         print.set_status_silent();
-        print.process();
+        std::vector<DynaPin::SupportSlab> slabs;
+        REQUIRE(print.generate_normal_support_geometry_only(slabs, {}));
 
         DynaPin::Config dynapin_config;
         REQUIRE(DynaPin::load_config_for_print(print, dynapin_config));
 
-        THEN("The pin is rejected because its pull path intersects the model") {
+        THEN("The blocker collision is handled without rejecting the candidate Print") {
             CHECK(DynaPin::pin_collides_with_model(print, dynapin_config, {0, 0}));
         }
     }
