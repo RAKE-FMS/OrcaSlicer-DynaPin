@@ -5580,6 +5580,13 @@ void PrintConfigDef::init_fff_params()
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def           = this->add("enable_dynapin_placement_optimization", coBool);
+    def->label    = L("DynaPin position/rotation optimization");
+    def->category = L("Support");
+    def->tooltip  = L("Optimize the model's Y position and Z rotation before slicing to reduce support material when using DynaPin.");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
     def             = this->add("dynapin_selected_pins", coString);
     def->label      = L("DynaPin selected pins");
     def->category   = L("Support");

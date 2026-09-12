@@ -105,7 +105,10 @@ enum class PlacementResliceAction {
     WaitForWorker,
 };
 
-PlacementResliceAction placement_reslice_action(bool optimization_reslice_guard, bool worker_idle);
+PlacementResliceAction placement_reslice_action(bool optimization_reslice_guard,
+                                                bool slice_result_valid,
+                                                bool force_placement_search,
+                                                bool worker_idle);
 bool placement_job_should_continue_reslice(PlacementStatus status, bool canceled, bool failed);
 
 struct PlacementSearchInput
@@ -128,6 +131,7 @@ struct PlacementSearchInput
 struct PlacementEligibility
 {
     bool dynapin_enabled = false;
+    bool placement_enabled = false;
     bool automatic_pin_selection = false;
     bool normal_support = false;
     size_t selected_instance_count = 0;

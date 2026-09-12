@@ -9785,7 +9785,7 @@ void Plater::priv::on_action_slice_plate(SimpleEvent&)
         Model::setExtruderParams(config, numExtruders);
         Model::setPrintSpeedTable(config, print_config);
         m_slice_all = false;
-        q->reslice();
+        q->reslice(true);
         q->select_view_3D("Preview");
     }
 }
@@ -9808,7 +9808,7 @@ void Plater::priv::on_action_slice_all(SimpleEvent&)
         m_cur_slice_plate = 0;
         //select plate
         q->select_plate(m_cur_slice_plate);
-        q->reslice();
+        q->reslice(true);
         if (!m_is_publishing)
             q->select_view_3D("Preview");
         //BBS: wish to select all plates stats item
@@ -15465,7 +15465,7 @@ bool Plater::is_multi_extruder_ams_empty()
 }
 
 //BBS: add multiple plate reslice logic
-void Plater::reslice()
+void Plater::reslice(bool force_dynapin_placement)
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: enter, process_completed_with_error=%2%")%__LINE__ %p->process_completed_with_error;
     // Consume the one-shot suppression immediately.  Reslice has several
@@ -15524,9 +15524,11 @@ void Plater::reslice()
     // to current Print and completed validation/scene refresh.  Start the
     // placement job only now, immediately before the normal background
     // process restart, so its snapshot cannot observe stale geometry or
-    // modified-count state.  A guarded reslice skips this one-shot search.
+    // modified-count state.  A guarded reslice, or an already valid result
+    // reached without an explicit slice action, skips this one-shot search.
+    const bool slice_result_valid = p->partplate_list.get_curr_plate()->is_slice_result_valid();
     const DynaPin::PlacementResliceAction placement_action = DynaPin::placement_reslice_action(
-        placement_reslice_guard, this->get_ui_job_worker().is_idle());
+        placement_reslice_guard, slice_result_valid, force_dynapin_placement, this->get_ui_job_worker().is_idle());
     if (placement_action == DynaPin::PlacementResliceAction::WaitForWorker)
         return;
     if (placement_action == DynaPin::PlacementResliceAction::StartSearch && start_dynapin_placement()) {
@@ -16626,22 +16628,6 @@ bool Plater::start_dynapin_placement()
     if (!worker.is_idle() || printer_technology() != ptFFF)
         return false;
 
-    const Selection &selection = get_selection();
-    if (!selection.is_single_full_instance())
-        return false;
-
-    const int object_idx = selection.get_object_idx();
-    const int instance_idx = selection.get_instance_idx();
-    if (object_idx < 0 || instance_idx < 0 || size_t(object_idx) >= model().objects.size())
-        return false;
-
-    ModelObject *object = model().objects[size_t(object_idx)];
-    if (object == nullptr || size_t(instance_idx) >= object->instances.size())
-        return false;
-    ModelInstance *instance = object->instances[size_t(instance_idx)];
-    if (instance == nullptr || !instance->id().valid() || !object->id().valid())
-        return false;
-
     // DynaPin optimization is evaluated against the current plate's Print.
     // The Plater-owned legacy fff_print is not necessarily the selected plate
     // after a plate switch.
@@ -16650,18 +16636,57 @@ bool Plater::start_dynapin_placement()
         return false;
     Print &current_print = p->partplate_list.get_current_fff_print();
 
-    const PrintObject *selected_print_object = nullptr;
-    for (const PrintObject *print_object : current_print.objects()) {
-        if (print_object == nullptr || print_object->model_object() == nullptr || print_object->model_object()->id() != object->id())
-            continue;
-        if (std::any_of(print_object->instances().begin(), print_object->instances().end(),
-                        [instance](const PrintInstance &print_instance) {
-                            return print_instance.model_instance != nullptr && print_instance.model_instance->id() == instance->id();
-                        })) {
-            selected_print_object = print_object;
-            break;
+    ModelObject         *object                = nullptr;
+    const ModelInstance *instance              = nullptr;
+    const PrintObject   *selected_print_object = nullptr;
+
+    const Selection &selection = get_selection();
+    if (selection.is_single_full_instance()) {
+        const int object_idx   = selection.get_object_idx();
+        const int instance_idx = selection.get_instance_idx();
+        if (object_idx >= 0 && instance_idx >= 0 && size_t(object_idx) < model().objects.size()) {
+            ModelObject *selected_object = model().objects[size_t(object_idx)];
+            if (selected_object != nullptr && size_t(instance_idx) < selected_object->instances.size()) {
+                const ModelInstance *selected_instance = selected_object->instances[size_t(instance_idx)];
+                for (const PrintObject *print_object : current_print.objects()) {
+                    if (print_object == nullptr || print_object->model_object() == nullptr ||
+                        print_object->model_object()->id() != selected_object->id())
+                        continue;
+                    if (std::any_of(print_object->instances().begin(), print_object->instances().end(),
+                                    [selected_instance](const PrintInstance &print_instance) {
+                                        return print_instance.model_instance != nullptr && selected_instance != nullptr &&
+                                               print_instance.model_instance->id() == selected_instance->id();
+                                    })) {
+                        object                = selected_object;
+                        instance              = selected_instance;
+                        selected_print_object = print_object;
+                        break;
+                    }
+                }
+            }
         }
     }
+
+    // A freshly loaded 3MF may have no selected instance.  In that case the
+    // sole printable instance on the current plate is an unambiguous target.
+    if (instance == nullptr) {
+        for (const PrintObject *print_object : current_print.objects()) {
+            if (print_object == nullptr || print_object->model_object() == nullptr)
+                continue;
+            for (const PrintInstance &print_instance : print_object->instances()) {
+                if (print_instance.model_instance == nullptr)
+                    continue;
+                if (instance != nullptr)
+                    return false;
+                object                = print_instance.model_instance->get_object();
+                instance              = print_instance.model_instance;
+                selected_print_object = print_object;
+            }
+        }
+    }
+
+    if (object == nullptr || instance == nullptr || !instance->id().valid() || !object->id().valid())
+        return false;
 
     DynaPin::Config dynapin_config;
     std::string     config_error;
@@ -16672,6 +16697,7 @@ bool Plater::start_dynapin_placement()
     // DynaPin side job even when the persisted feature flag is enabled.
     eligibility.dynapin_enabled         = current_print.config().enable_dynapin_support_optimization.value &&
                                   DynaPin::effective_debug_stage(current_print) >= 1;
+    eligibility.placement_enabled       = current_print.config().enable_dynapin_placement_optimization.value;
     eligibility.automatic_pin_selection = !DynaPin::has_manual_selection(current_print);
     eligibility.normal_support          = selected_print_object != nullptr && selected_print_object->has_support() &&
                                  !is_tree(selected_print_object->config().support_type.value);

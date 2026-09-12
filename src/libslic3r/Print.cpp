@@ -585,6 +585,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         else if (opt_key == "z_hop_types") {
             osteps.emplace_back(posDetectOverhangsForLift);
         } else if (opt_key == "enable_dynapin_support_optimization"
+                || opt_key == "enable_dynapin_placement_optimization"
                 || opt_key == "dynapin_selected_pins"
                 || opt_key == "dynapin_debug_stage") {
 

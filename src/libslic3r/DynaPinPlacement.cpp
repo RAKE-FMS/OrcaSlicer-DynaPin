@@ -188,6 +188,8 @@ bool PlacementEligibility::valid(std::string *error) const
     };
     if (!dynapin_enabled)
         return fail("DynaPin support optimization is disabled");
+    if (!placement_enabled)
+        return fail("DynaPin position/rotation optimization is disabled");
     if (!automatic_pin_selection)
         return fail("DynaPin placement optimization requires automatic pin selection");
     if (!normal_support)
@@ -197,11 +199,16 @@ bool PlacementEligibility::valid(std::string *error) const
     return true;
 }
 
-PlacementResliceAction placement_reslice_action(bool optimization_reslice_guard, bool worker_idle)
+PlacementResliceAction placement_reslice_action(bool optimization_reslice_guard,
+                                                bool slice_result_valid,
+                                                bool force_placement_search,
+                                                bool worker_idle)
 {
+    if (optimization_reslice_guard || (slice_result_valid && !force_placement_search))
+        return PlacementResliceAction::ContinueSlicing;
     if (!worker_idle)
         return PlacementResliceAction::WaitForWorker;
-    return optimization_reslice_guard ? PlacementResliceAction::ContinueSlicing : PlacementResliceAction::StartSearch;
+    return PlacementResliceAction::StartSearch;
 }
 
 bool placement_job_should_continue_reslice(PlacementStatus status, bool canceled, bool failed)

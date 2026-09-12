@@ -115,11 +115,13 @@ TEST_CASE("DynaPin placement candidates retain a shifted current pose", "[DynaPi
     CHECK(std::find(candidates.begin(), candidates.end(), DynaPin::PlacementCandidate{359., 20.}) != candidates.end());
 }
 
-TEST_CASE("DynaPin placement reslice flow consumes its one-shot guard", "[DynaPinPlacement]")
+TEST_CASE("DynaPin placement reslice flow distinguishes explicit slicing from preview reuse", "[DynaPinPlacement]")
 {
-    CHECK(DynaPin::placement_reslice_action(false, true) == DynaPin::PlacementResliceAction::StartSearch);
-    CHECK(DynaPin::placement_reslice_action(true, true) == DynaPin::PlacementResliceAction::ContinueSlicing);
-    CHECK(DynaPin::placement_reslice_action(false, false) == DynaPin::PlacementResliceAction::WaitForWorker);
+    CHECK(DynaPin::placement_reslice_action(false, false, false, true) == DynaPin::PlacementResliceAction::StartSearch);
+    CHECK(DynaPin::placement_reslice_action(false, true, false, true) == DynaPin::PlacementResliceAction::ContinueSlicing);
+    CHECK(DynaPin::placement_reslice_action(false, true, true, true) == DynaPin::PlacementResliceAction::StartSearch);
+    CHECK(DynaPin::placement_reslice_action(true, false, true, true) == DynaPin::PlacementResliceAction::ContinueSlicing);
+    CHECK(DynaPin::placement_reslice_action(false, false, false, false) == DynaPin::PlacementResliceAction::WaitForWorker);
 
     CHECK(DynaPin::placement_job_should_continue_reslice(DynaPin::PlacementStatus::Improved, false, false));
     CHECK(DynaPin::placement_job_should_continue_reslice(DynaPin::PlacementStatus::Unchanged, false, false));
@@ -244,7 +246,11 @@ TEST_CASE("DynaPin placement eligibility is a complete snapshot gate", "[DynaPin
     CHECK(!eligibility.valid(&error));
     CHECK(error == "DynaPin support optimization is disabled");
 
-    eligibility.dynapin_enabled          = true;
+    eligibility.dynapin_enabled = true;
+    CHECK(!eligibility.valid(&error));
+    CHECK(error == "DynaPin position/rotation optimization is disabled");
+
+    eligibility.placement_enabled        = true;
     eligibility.automatic_pin_selection  = true;
     eligibility.normal_support           = true;
     eligibility.selected_instance_count  = 1;

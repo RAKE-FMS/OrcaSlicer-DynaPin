@@ -3579,7 +3579,7 @@ void MainFrame::update_menubar()
 void MainFrame::reslice_now()
 {
     if (m_plater)
-        m_plater->reslice();
+        m_plater->reslice(true);
 }
 
 struct ConfigsOverwriteConfirmDialog : MessageDialog
