@@ -8,7 +8,11 @@
 #include "Print.hpp"
 #include "libslic3r.h"
 
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <exception>
 #include <limits>
@@ -664,6 +668,41 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
     evaluated.emplace(candidate_key(current));
     feasible.emplace_back(current, *current_volume);
 
+    std::atomic<bool> canceled{false};
+    auto check_canceled = [&]() {
+        if (canceled.load(std::memory_order_relaxed))
+            return true;
+        if (!cancel)
+            return false;
+        if (cancel()) {
+            canceled.store(true, std::memory_order_relaxed);
+            return true;
+        }
+        return false;
+    };
+
+    auto evaluate_parallel = [&](const std::vector<PlacementCandidate> &candidates) {
+        std::vector<std::optional<double>> values(candidates.size());
+        std::atomic<size_t> evaluations{0};
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, candidates.size()), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t i = range.begin(); i < range.end(); ++i) {
+                if (check_canceled())
+                    return;
+                try {
+                    values[i] = evaluator(candidates[i]);
+                    evaluations.fetch_add(1, std::memory_order_relaxed);
+                } catch (...) {
+                    evaluations.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+        const size_t evaluated_count = evaluations.load(std::memory_order_relaxed);
+        result.evaluations += evaluated_count;
+        completed += evaluated_count;
+        set_progress(static_cast<int>(100. * double(completed) / double(estimated_total)));
+        return values;
+    };
+
     auto evaluate = [&](const PlacementCandidate &candidate) -> std::optional<double> {
         if (cancel && cancel())
             return std::nullopt;
@@ -685,14 +724,33 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
         return std::nullopt;
     };
 
-    for (const PlacementCandidate &candidate : coarse) {
-        if (cancel && cancel()) {
+    if (has_rotation_ranges) {
+        std::vector<PlacementCandidate> unique_coarse;
+        unique_coarse.reserve(coarse.size());
+        for (const PlacementCandidate &candidate : coarse) {
+            const PlacementCandidate normalized_candidate{normalized_rotation_deg(candidate.rotation_deg), candidate.delta_y};
+            if (evaluated.emplace(candidate_key(normalized_candidate)).second)
+                unique_coarse.push_back(normalized_candidate);
+        }
+        const std::vector<std::optional<double>> values = evaluate_parallel(unique_coarse);
+        if (check_canceled()) {
             result.status = PlacementStatus::Canceled;
             set_progress(100);
             return result;
         }
-        if (const std::optional<double> value = evaluate(candidate))
-            feasible.emplace_back(candidate, *value);
+        for (size_t i = 0; i < unique_coarse.size(); ++i)
+            if (values[i] && finite(*values[i]) && *values[i] >= 0.)
+                feasible.emplace_back(unique_coarse[i], *values[i]);
+    } else {
+        for (const PlacementCandidate &candidate : coarse) {
+            if (cancel && cancel()) {
+                result.status = PlacementStatus::Canceled;
+                set_progress(100);
+                return result;
+            }
+            if (const std::optional<double> value = evaluate(candidate))
+                feasible.emplace_back(candidate, *value);
+        }
     }
     if (feasible.empty()) {
         result.status = PlacementStatus::NoFeasiblePose;
@@ -708,24 +766,45 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
     });
     const size_t seed_count = std::min<size_t>(5, feasible.size());
     std::set<CandidateKey> local_seen;
-    for (size_t seed_index = 0; seed_index < seed_count; ++seed_index) {
-        for (const PlacementCandidate &candidate : local_candidates(feasible[seed_index].first, pitch_y)) {
-            if (!local_seen.emplace(candidate_key(candidate)).second)
-                continue;
-            if (cancel && cancel()) {
-                result.status = PlacementStatus::Canceled;
-                set_progress(100);
-                return result;
+    if (has_rotation_ranges) {
+        std::vector<PlacementCandidate> unique_local;
+        for (size_t seed_index = 0; seed_index < seed_count; ++seed_index) {
+            for (const PlacementCandidate &candidate : local_candidates(feasible[seed_index].first, pitch_y)) {
+                if (!local_seen.emplace(candidate_key(candidate)).second)
+                    continue;
+                if (evaluated.emplace(candidate_key(candidate)).second)
+                    unique_local.push_back(candidate);
             }
-            if (const std::optional<double> value = evaluate(candidate))
-                feasible.emplace_back(candidate, *value);
+        }
+        const std::vector<std::optional<double>> values = evaluate_parallel(unique_local);
+        if (check_canceled()) {
+            result.status = PlacementStatus::Canceled;
+            set_progress(100);
+            return result;
+        }
+        for (size_t i = 0; i < unique_local.size(); ++i)
+            if (values[i] && finite(*values[i]) && *values[i] >= 0.)
+                feasible.emplace_back(unique_local[i], *values[i]);
+    } else {
+        for (size_t seed_index = 0; seed_index < seed_count; ++seed_index) {
+            for (const PlacementCandidate &candidate : local_candidates(feasible[seed_index].first, pitch_y)) {
+                if (!local_seen.emplace(candidate_key(candidate)).second)
+                    continue;
+                if (cancel && cancel()) {
+                    result.status = PlacementStatus::Canceled;
+                    set_progress(100);
+                    return result;
+                }
+                if (const std::optional<double> value = evaluate(candidate))
+                    feasible.emplace_back(candidate, *value);
+            }
         }
     }
 
     // A cancellation can be raised by the evaluator itself, including on the
     // last candidate.  Check again before ranking so a canceled search never
     // leaks an otherwise valid winner to finalize().
-    if (cancel && cancel()) {
+    if (check_canceled()) {
         result.status = PlacementStatus::Canceled;
         set_progress(100);
         return result;

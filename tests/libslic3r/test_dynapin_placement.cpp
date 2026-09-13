@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <vector>
 
@@ -85,9 +86,11 @@ TEST_CASE("DynaPin placement recomputes and shifts the Y interval for every coar
     };
 
     std::vector<DynaPin::PlacementCandidate> evaluated;
+    std::mutex evaluated_mutex;
     const DynaPin::PlacementResult result = DynaPin::optimize_placement(
         input,
-        [&evaluated](const DynaPin::PlacementCandidate &candidate) {
+        [&evaluated, &evaluated_mutex](const DynaPin::PlacementCandidate &candidate) {
+            std::lock_guard<std::mutex> lock(evaluated_mutex);
             evaluated.push_back(candidate);
             return std::optional<double>{1000.};
         });
