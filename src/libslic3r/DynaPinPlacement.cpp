@@ -16,6 +16,7 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <tuple>
@@ -396,6 +397,161 @@ PlacementEvaluator make_scene_evaluator(PlacementSceneSnapshot scene, const Canc
     };
 }
 
+void evaluate_scene_angle_group(const PlacementSceneSnapshot          &scene,
+                                double                                 rotation_deg,
+                                const std::vector<PlacementCandidate> &candidates,
+                                std::vector<std::optional<double>>    &results,
+                                const CandidateCompletedCallback      &completed,
+                                const CancelCallback                  &cancel)
+{
+    results.assign(candidates.size(), std::nullopt);
+    if (candidates.empty())
+        return;
+    if (!scene.model || !scene.target_object_id.valid() || !scene.target_instance_id.valid())
+        return;
+    if (cancel && cancel())
+        return;
+
+    const std::optional<BuildVolume> build_volume = build_volume_for_scene(scene);
+    if (!build_volume)
+        return;
+
+    Model          candidate_model(*scene.model);
+    ModelObject   *target_object   = nullptr;
+    ModelInstance *target_instance = nullptr;
+    for (ModelObject *object : candidate_model.objects) {
+        if (object == nullptr || object->id() != scene.target_object_id)
+            continue;
+        target_object = object;
+        for (ModelInstance *instance : object->instances) {
+            if (instance != nullptr && instance->id() == scene.target_instance_id) {
+                target_instance = instance;
+                break;
+            }
+        }
+        break;
+    }
+    if (target_object == nullptr || target_instance == nullptr)
+        return;
+
+    candidate_model.curr_plate_index = scene.plate_index;
+
+    std::vector<bool> classified(candidates.size(), false);
+    size_t            initial_candidate = candidates.size();
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (cancel && cancel())
+            return;
+        target_instance->set_transformation(Geometry::Transformation(candidate_transform(
+            scene.initial_transform, scene.world_center, rotation_deg, candidates[i].delta_y)));
+        target_object->invalidate_bounding_box();
+        candidate_model.update_print_volume_state(*build_volume);
+        if (target_instance->calc_print_volume_state(*build_volume) == ModelInstancePVS_Inside) {
+            initial_candidate = i;
+            break;
+        }
+        classified[i] = true;
+        if (completed)
+            completed(i);
+    }
+    if (initial_candidate == candidates.size())
+        return;
+
+    Print candidate_print;
+    candidate_print.set_plate_index(scene.plate_index);
+    candidate_print.set_plate_origin(scene.plate_origin);
+    candidate_print.set_status_callback([&candidate_print, &cancel](const PrintBase::SlicingStatus &) {
+        if (cancel && cancel())
+            candidate_print.cancel();
+    });
+    candidate_print.apply(candidate_model, scene.config);
+    if (cancel && cancel()) {
+        candidate_print.cancel();
+        return;
+    }
+
+    if (!candidate_print.prepare_slices_for_support_geometry(cancel))
+        return;
+    if (cancel && cancel())
+        return;
+
+    PrintInstance *target_print_instance = nullptr;
+    for (PrintObject *object : candidate_print.objects()) {
+        if (object == nullptr)
+            continue;
+        for (PrintInstance &inst : object->instances()) {
+            if (inst.model_instance != nullptr && inst.model_instance->id() == scene.target_instance_id) {
+                target_print_instance = &inst;
+                break;
+            }
+        }
+        if (target_print_instance != nullptr)
+            break;
+    }
+    if (target_print_instance == nullptr)
+        return;
+
+    ModelInstance *print_model_instance = const_cast<ModelInstance *>(target_print_instance->model_instance);
+    ModelObject   *print_model_object   = print_model_instance == nullptr ? nullptr : print_model_instance->get_object();
+    if (print_model_object == nullptr)
+        return;
+
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (classified[i])
+            continue;
+        if (cancel && cancel())
+            return;
+
+        const auto &candidate = candidates[i];
+
+        target_instance->set_transformation(Geometry::Transformation(candidate_transform(
+            scene.initial_transform, scene.world_center, candidate.rotation_deg, candidate.delta_y)));
+        target_object->invalidate_bounding_box();
+
+        candidate_model.update_print_volume_state(*build_volume);
+        if (target_instance->calc_print_volume_state(*build_volume) != ModelInstancePVS_Inside) {
+            if (completed)
+                completed(i);
+            continue;
+        }
+
+        const Transform3d instance_trafo = target_instance->get_transformation().get_matrix();
+        print_model_instance->set_transformation(Geometry::Transformation(instance_trafo));
+        print_model_instance->print_volume_state = target_instance->print_volume_state;
+        print_model_object->invalidate_bounding_box();
+        target_print_instance->shift = Point::new_scale(instance_trafo.data()[12], instance_trafo.data()[13]) +
+                                       target_print_instance->print_object->center_offset();
+
+        std::vector<SupportSlab> slabs;
+        if (!candidate_print.generate_normal_support_geometry_for_current_shift(slabs, cancel)) {
+            if (!(cancel && cancel()) && completed)
+                completed(i);
+            continue;
+        }
+        if (cancel && cancel())
+            return;
+
+        if (model_layers_overlap(candidate_print) || model_intersects_bed_exclusion(candidate_print)) {
+            if (completed)
+                completed(i);
+            continue;
+        }
+
+        results[i] = support_volume_mm3(slabs);
+        if (completed)
+            completed(i);
+    }
+}
+
+AngleGroupEvaluator make_scene_angle_evaluator(PlacementSceneSnapshot scene, const CancelCallback &cancel)
+{
+    return [scene = std::move(scene), cancel](double                                 rotation_deg,
+                                              const std::vector<PlacementCandidate> &candidates,
+                                              std::vector<std::optional<double>>    &results,
+                                              const CandidateCompletedCallback     &completed) {
+        evaluate_scene_angle_group(scene, rotation_deg, candidates, results, completed, cancel);
+    };
+}
+
 std::vector<SupportSlab> generate_normal_support_geometry(PrintObject &object)
 {
     std::vector<SupportSlab> slabs;
@@ -467,22 +623,47 @@ static std::vector<PlacementCandidate> coarse_candidates_for_rotation_ranges(con
     std::set<CandidateKey>          seen;
     const double                    step = pitch_y / 16.;
 
-    for (int angle = 0; angle < 360; angle += static_cast<int>(angle_step_deg)) {
-        const std::optional<DeltaYInterval> feasible = input.delta_y_range_for_rotation(double(angle));
-        if (!feasible)
-            continue;
-        const std::optional<DeltaYInterval> interval = placement_delta_y_interval(feasible->min, feasible->max, pitch_y);
+    std::vector<double> angles;
+    for (int angle = 0; angle < 360; angle += static_cast<int>(angle_step_deg))
+        angles.push_back(double(angle));
+
+    std::vector<std::optional<DeltaYInterval>> intervals(angles.size());
+    auto compute_intervals = [&](size_t begin, size_t end) {
+        for (size_t i = begin; i < end; ++i) {
+            if (const std::optional<DeltaYInterval> feasible = input.delta_y_range_for_rotation(angles[i]))
+                intervals[i] = placement_delta_y_interval(feasible->min, feasible->max, pitch_y);
+        }
+    };
+
+    if (input.concurrency == 1) {
+        compute_intervals(0, angles.size());
+    } else {
+        auto run_parallel = [&]() {
+            tbb::parallel_for(tbb::blocked_range<size_t>(0, angles.size()), [&](const tbb::blocked_range<size_t> &range) {
+                compute_intervals(range.begin(), range.end());
+            });
+        };
+        if (input.concurrency > 1) {
+            tbb::task_arena arena(static_cast<int>(input.concurrency));
+            arena.execute(run_parallel);
+        } else {
+            run_parallel();
+        }
+    }
+
+    for (size_t a = 0; a < angles.size(); ++a) {
+        const auto &interval = intervals[a];
         if (!interval)
             continue;
-
+        const double angle = angles[a];
         for (int i = 0;; ++i) {
             const double delta_y = interval->min + double(i) * step;
             if (delta_y > interval->max + coordinate_epsilon)
                 break;
-            append_unique(candidates, seen, {double(angle), delta_y});
+            append_unique(candidates, seen, {angle, delta_y});
         }
-        append_unique(candidates, seen, {double(angle), interval->min});
-        append_unique(candidates, seen, {double(angle), interval->max});
+        append_unique(candidates, seen, {angle, interval->min});
+        append_unique(candidates, seen, {angle, interval->max});
     }
 
     append_unique(candidates, seen, {input.current_rotation_deg, input.current_delta_y});
@@ -543,14 +724,13 @@ std::optional<DeltaYInterval> placement_delta_y_range_for_scene(const PlacementS
     if (!scene.model || !finite(rotation_deg) || scene.printable_area.size() < 3)
         return std::nullopt;
 
-    Model          candidate_model(*scene.model);
-    ModelObject   *target_object   = nullptr;
-    ModelInstance *target_instance = nullptr;
-    for (ModelObject *object : candidate_model.objects) {
+    const ModelObject   *target_object   = nullptr;
+    const ModelInstance *target_instance = nullptr;
+    for (const ModelObject *object : scene.model->objects) {
         if (object == nullptr || object->id() != scene.target_object_id)
             continue;
         target_object = object;
-        for (ModelInstance *instance : object->instances)
+        for (const ModelInstance *instance : object->instances)
             if (instance != nullptr && instance->id() == scene.target_instance_id) {
                 target_instance = instance;
                 break;
@@ -560,10 +740,12 @@ std::optional<DeltaYInterval> placement_delta_y_range_for_scene(const PlacementS
     if (target_object == nullptr || target_instance == nullptr)
         return std::nullopt;
 
-    target_instance->set_transformation(Geometry::Transformation(candidate_transform(
-        scene.initial_transform, scene.world_center, rotation_deg, 0.)));
-    target_object->invalidate_bounding_box();
-    const BoundingBoxf3 bbox = target_object->instance_bounding_box(*target_instance, false);
+    const Transform3d inst_matrix = candidate_transform(scene.initial_transform, scene.world_center, rotation_deg, 0.);
+    BoundingBoxf3     bbox;
+    for (const ModelVolume *v : target_object->volumes) {
+        if (v != nullptr && v->is_model_part())
+            bbox.merge(v->mesh().transformed_bounding_box(inst_matrix * v->get_matrix()));
+    }
     if (!bbox.defined)
         return std::nullopt;
 
@@ -579,13 +761,29 @@ std::optional<DeltaYInterval> placement_delta_y_range_for_scene(const PlacementS
 PlacementResult optimize_placement(const PlacementSearchInput &input,
                                    const PlacementEvaluator   &evaluator,
                                    const CancelCallback        &cancel,
-                                   const ProgressCallback      &progress)
+                                   const ProgressCallback      &progress,
+                                   const ProgressStageCallback &progress_stage)
 {
     PlacementResult result;
-    auto set_progress = [&progress](int value) {
+    std::mutex      progress_mutex;
+    int             last_progress = -1;
+    bool            progress_finished = false;
+    auto set_progress = [&](int value) {
+        const int clamped = std::max(0, std::min(100, value));
+        std::lock_guard<std::mutex> lock(progress_mutex);
+        if (progress_finished || clamped <= last_progress)
+            return;
+        last_progress = clamped;
         if (progress)
-            progress(std::max(0, std::min(100, value)));
+            progress(clamped);
+        if (clamped == 100)
+            progress_finished = true;
     };
+    auto set_stage = [&progress_stage](PlacementProgressStage stage) {
+        if (progress_stage)
+            progress_stage(stage);
+    };
+    set_stage(PlacementProgressStage::EvaluatingCurrent);
     set_progress(0);
 
     const bool has_rotation_ranges = bool(input.delta_y_range_for_rotation);
@@ -645,9 +843,11 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
         set_progress(100);
         return result;
     }
+    set_progress(2);
 
     const double baseline_volume = finite(input.current_volume_mm3) && input.current_volume_mm3 >= 0. ? input.current_volume_mm3 : *current_volume;
     const double epsilon = std::max(1., baseline_volume * 0.001);
+    set_stage(PlacementProgressStage::PreparingCandidates);
     std::vector<PlacementCandidate> coarse;
     if (has_rotation_ranges) {
         coarse = coarse_candidates_for_rotation_ranges(input, pitch_y);
@@ -660,8 +860,7 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
         }
         coarse = coarse_candidates(*interval, pitch_y, input.current_rotation_deg, input.current_delta_y);
     }
-    const size_t estimated_total = std::max<size_t>(1, 1 + coarse.size() + 5 * 81);
-    size_t completed = 0;
+    set_progress(5);
     std::vector<std::pair<PlacementCandidate, double>> feasible;
     feasible.reserve(coarse.size());
     std::set<CandidateKey> evaluated;
@@ -681,58 +880,154 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
         return false;
     };
 
-    auto evaluate_parallel = [&](const std::vector<PlacementCandidate> &candidates) {
+    auto evaluate_candidates = [&](const std::vector<PlacementCandidate> &candidates,
+                                   int                                    phase_start,
+                                   int                                    phase_end,
+                                   bool                                   parallel) {
         std::vector<std::optional<double>> values(candidates.size());
-        std::atomic<size_t> evaluations{0};
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, candidates.size()), [&](const tbb::blocked_range<size_t> &range) {
-            for (size_t i = range.begin(); i < range.end(); ++i) {
+        std::vector<unsigned char>         completed_candidates(candidates.size(), 0);
+        size_t                             completed_count = 0;
+
+        auto complete_candidate = [&](size_t index) {
+            if (index >= candidates.size())
+                return;
+            std::lock_guard<std::mutex> lock(progress_mutex);
+            if (completed_candidates[index] != 0)
+                return;
+            completed_candidates[index] = 1;
+            ++completed_count;
+            ++result.evaluations;
+            const long long progress_span = static_cast<long long>(phase_end - phase_start);
+            const int next_progress = phase_start + static_cast<int>(
+                (progress_span * static_cast<long long>(completed_count)) / static_cast<long long>(candidates.size()));
+            if (!progress_finished && next_progress > last_progress) {
+                last_progress = next_progress;
+                if (progress)
+                    progress(next_progress);
+            }
+        };
+
+        if (candidates.empty()) {
+            set_progress(phase_end);
+            return values;
+        }
+
+        if (input.angle_evaluator) {
+            struct AngleCandidateItem {
+                size_t             index;
+                PlacementCandidate candidate;
+            };
+            std::map<double, std::vector<AngleCandidateItem>> angle_groups_map;
+            for (size_t i = 0; i < candidates.size(); ++i) {
+                const double angle = normalized_rotation_deg(candidates[i].rotation_deg);
+                angle_groups_map[angle].push_back({i, candidates[i]});
+            }
+
+            std::vector<std::pair<double, std::vector<AngleCandidateItem>>> angle_groups;
+            angle_groups.reserve(angle_groups_map.size());
+            for (auto &pair : angle_groups_map)
+                angle_groups.emplace_back(pair.first, std::move(pair.second));
+
+            auto process_group = [&](size_t g) {
                 if (check_canceled())
                     return;
+                const double &angle = angle_groups[g].first;
+                const auto   &items = angle_groups[g].second;
+                std::vector<PlacementCandidate> group_candidates;
+                group_candidates.reserve(items.size());
+                for (const auto &item : items)
+                    group_candidates.push_back(item.candidate);
+
+                std::vector<std::optional<double>> group_results;
+                std::vector<unsigned char>         group_completed(items.size(), 0);
+                std::mutex                         group_completion_mutex;
+                auto complete_group_candidate = [&](size_t index) {
+                    if (index >= items.size())
+                        return;
+                    {
+                        std::lock_guard<std::mutex> lock(group_completion_mutex);
+                        if (group_completed[index] != 0)
+                            return;
+                        group_completed[index] = 1;
+                    }
+                    complete_candidate(items[index].index);
+                };
                 try {
-                    values[i] = evaluator(candidates[i]);
-                    evaluations.fetch_add(1, std::memory_order_relaxed);
+                    input.angle_evaluator(angle, group_candidates, group_results, complete_group_candidate);
                 } catch (...) {
-                    evaluations.fetch_add(1, std::memory_order_relaxed);
+                }
+
+                for (size_t i = 0; i < items.size(); ++i) {
+                    if (i < group_results.size())
+                        values[items[i].index] = group_results[i];
+                }
+                if (!check_canceled())
+                    for (size_t i = 0; i < items.size(); ++i)
+                        complete_group_candidate(i);
+            };
+
+            const size_t requested_workers = input.angle_group_concurrency == 0 ? angle_groups.size() : input.angle_group_concurrency;
+            const size_t worker_count      = std::max<size_t>(1, std::min(requested_workers, angle_groups.size()));
+            if (!parallel || worker_count == 1) {
+                for (size_t g = 0; g < angle_groups.size(); ++g)
+                    process_group(g);
+            } else {
+                std::atomic<size_t> next_group{0};
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, worker_count, 1), [&](const tbb::blocked_range<size_t> &range) {
+                    for (size_t worker = range.begin(); worker < range.end(); ++worker) {
+                        (void) worker;
+                        for (;;) {
+                            const size_t group_index = next_group.fetch_add(1, std::memory_order_relaxed);
+                            if (group_index >= angle_groups.size())
+                                break;
+                            process_group(group_index);
+                        }
+                    }
+                });
+            }
+        } else {
+            auto process_candidate_range = [&](size_t begin, size_t end) {
+                for (size_t i = begin; i < end; ++i) {
+                    if (check_canceled())
+                        return;
+                    try {
+                        values[i] = evaluator(candidates[i]);
+                    } catch (...) {
+                    }
+                    complete_candidate(i);
+                }
+            };
+
+            if (!parallel || input.concurrency == 1) {
+                process_candidate_range(0, candidates.size());
+            } else {
+                auto run_parallel = [&]() {
+                    tbb::parallel_for(tbb::blocked_range<size_t>(0, candidates.size()),
+                                      [&](const tbb::blocked_range<size_t> &range) {
+                                          process_candidate_range(range.begin(), range.end());
+                                      });
+                };
+                if (input.concurrency > 1) {
+                    tbb::task_arena arena(static_cast<int>(input.concurrency));
+                    arena.execute(run_parallel);
+                } else {
+                    run_parallel();
                 }
             }
-        });
-        const size_t evaluated_count = evaluations.load(std::memory_order_relaxed);
-        result.evaluations += evaluated_count;
-        completed += evaluated_count;
-        set_progress(static_cast<int>(100. * double(completed) / double(estimated_total)));
+        }
         return values;
     };
 
-    auto evaluate = [&](const PlacementCandidate &candidate) -> std::optional<double> {
-        if (cancel && cancel())
-            return std::nullopt;
+    std::vector<PlacementCandidate> unique_coarse;
+    unique_coarse.reserve(coarse.size());
+    for (const PlacementCandidate &candidate : coarse) {
         const PlacementCandidate normalized_candidate{normalized_rotation_deg(candidate.rotation_deg), candidate.delta_y};
-        if (!evaluated.emplace(candidate_key(normalized_candidate)).second)
-            return std::nullopt;
-        try {
-            std::optional<double> value = evaluator(normalized_candidate);
-            ++result.evaluations;
-            ++completed;
-            set_progress(static_cast<int>(100. * double(completed) / double(estimated_total)));
-            if (value && finite(*value) && *value >= 0.)
-                return value;
-        } catch (...) {
-            ++result.evaluations;
-            ++completed;
-            set_progress(static_cast<int>(100. * double(completed) / double(estimated_total)));
-        }
-        return std::nullopt;
-    };
-
-    if (has_rotation_ranges) {
-        std::vector<PlacementCandidate> unique_coarse;
-        unique_coarse.reserve(coarse.size());
-        for (const PlacementCandidate &candidate : coarse) {
-            const PlacementCandidate normalized_candidate{normalized_rotation_deg(candidate.rotation_deg), candidate.delta_y};
-            if (evaluated.emplace(candidate_key(normalized_candidate)).second)
-                unique_coarse.push_back(normalized_candidate);
-        }
-        const std::vector<std::optional<double>> values = evaluate_parallel(unique_coarse);
+        if (evaluated.emplace(candidate_key(normalized_candidate)).second)
+            unique_coarse.push_back(normalized_candidate);
+    }
+    set_stage(PlacementProgressStage::CoarseSearch);
+    {
+        const std::vector<std::optional<double>> values = evaluate_candidates(unique_coarse, 5, 75, has_rotation_ranges);
         if (check_canceled()) {
             result.status = PlacementStatus::Canceled;
             set_progress(100);
@@ -741,16 +1036,6 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
         for (size_t i = 0; i < unique_coarse.size(); ++i)
             if (values[i] && finite(*values[i]) && *values[i] >= 0.)
                 feasible.emplace_back(unique_coarse[i], *values[i]);
-    } else {
-        for (const PlacementCandidate &candidate : coarse) {
-            if (cancel && cancel()) {
-                result.status = PlacementStatus::Canceled;
-                set_progress(100);
-                return result;
-            }
-            if (const std::optional<double> value = evaluate(candidate))
-                feasible.emplace_back(candidate, *value);
-        }
     }
     if (feasible.empty()) {
         result.status = PlacementStatus::NoFeasiblePose;
@@ -766,17 +1051,18 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
     });
     const size_t seed_count = std::min<size_t>(5, feasible.size());
     std::set<CandidateKey> local_seen;
-    if (has_rotation_ranges) {
-        std::vector<PlacementCandidate> unique_local;
-        for (size_t seed_index = 0; seed_index < seed_count; ++seed_index) {
-            for (const PlacementCandidate &candidate : local_candidates(feasible[seed_index].first, pitch_y)) {
-                if (!local_seen.emplace(candidate_key(candidate)).second)
-                    continue;
-                if (evaluated.emplace(candidate_key(candidate)).second)
-                    unique_local.push_back(candidate);
-            }
+    std::vector<PlacementCandidate> unique_local;
+    for (size_t seed_index = 0; seed_index < seed_count; ++seed_index) {
+        for (const PlacementCandidate &candidate : local_candidates(feasible[seed_index].first, pitch_y)) {
+            if (!local_seen.emplace(candidate_key(candidate)).second)
+                continue;
+            if (evaluated.emplace(candidate_key(candidate)).second)
+                unique_local.push_back(candidate);
         }
-        const std::vector<std::optional<double>> values = evaluate_parallel(unique_local);
+    }
+    set_stage(PlacementProgressStage::LocalSearch);
+    {
+        const std::vector<std::optional<double>> values = evaluate_candidates(unique_local, 75, 99, has_rotation_ranges);
         if (check_canceled()) {
             result.status = PlacementStatus::Canceled;
             set_progress(100);
@@ -785,20 +1071,6 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
         for (size_t i = 0; i < unique_local.size(); ++i)
             if (values[i] && finite(*values[i]) && *values[i] >= 0.)
                 feasible.emplace_back(unique_local[i], *values[i]);
-    } else {
-        for (size_t seed_index = 0; seed_index < seed_count; ++seed_index) {
-            for (const PlacementCandidate &candidate : local_candidates(feasible[seed_index].first, pitch_y)) {
-                if (!local_seen.emplace(candidate_key(candidate)).second)
-                    continue;
-                if (cancel && cancel()) {
-                    result.status = PlacementStatus::Canceled;
-                    set_progress(100);
-                    return result;
-                }
-                if (const std::optional<double> value = evaluate(candidate))
-                    feasible.emplace_back(candidate, *value);
-            }
-        }
     }
 
     // A cancellation can be raised by the evaluator itself, including on the
@@ -810,6 +1082,7 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
         return result;
     }
 
+    set_stage(PlacementProgressStage::Finalizing);
     double best_volume = std::numeric_limits<double>::infinity();
     for (const auto &entry : feasible)
         if (strictly_better(entry.second, best_volume))

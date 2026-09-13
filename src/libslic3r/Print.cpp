@@ -187,9 +187,8 @@ void Print::update_dynapin_selection()
 template class PrintState<PrintStep, psCount>;
 template class PrintState<PrintObjectStep, posCount>;
 
-bool Print::generate_normal_support_geometry_only(std::vector<DynaPin::SupportSlab> &slabs, const std::function<bool()> &cancel)
+bool Print::prepare_slices_for_support_geometry(const std::function<bool()> &cancel)
 {
-    slabs.clear();
     if (m_objects.empty())
         return true;
 
@@ -205,9 +204,6 @@ bool Print::generate_normal_support_geometry_only(std::vector<DynaPin::SupportSl
     for (PrintObject *object : m_objects)
         object->clear_shared_object();
 
-    // The placement evaluator runs on a private Print, so it can prepare the
-    // normal support inputs serially without sharing sliced layers between
-    // candidates.  Stop before the normal generator emits support toolpaths.
     for (PrintObject *object : m_objects) {
         if (canceled())
             return false;
@@ -216,9 +212,23 @@ bool Print::generate_normal_support_geometry_only(std::vector<DynaPin::SupportSl
         object->infill();
         object->ironing();
     }
+    return !canceled();
+}
 
-    if (canceled())
-        return false;
+bool Print::generate_normal_support_geometry_for_current_shift(std::vector<DynaPin::SupportSlab> &slabs, const std::function<bool()> &cancel)
+{
+    slabs.clear();
+    if (m_objects.empty())
+        return true;
+
+    auto canceled = [this, &cancel]() {
+        if (cancel && cancel()) {
+            this->cancel();
+            return true;
+        }
+        return this->canceled();
+    };
+
     update_dynapin_selection();
 
     for (PrintObject *object : m_objects) {
@@ -227,10 +237,6 @@ bool Print::generate_normal_support_geometry_only(std::vector<DynaPin::SupportSl
         std::vector<DynaPin::SupportSlab> object_slabs;
         object->generate_support_geometry_only(object_slabs);
         for (const DynaPin::SupportSlab &slab : object_slabs) {
-            // SupportGenerator polygons are in the PrintObject's local
-            // coordinates.  Placement scoring unions every object in plate
-            // coordinates, so copy one slab per independent instance and
-            // apply the same shift used by the regular print pipeline.
             for (const PrintInstance &instance : object->instances()) {
                 DynaPin::SupportSlab plate_slab = slab;
                 for (Polygon &polygon : plate_slab.polygons)
@@ -240,6 +246,13 @@ bool Print::generate_normal_support_geometry_only(std::vector<DynaPin::SupportSl
         }
     }
     return !canceled();
+}
+
+bool Print::generate_normal_support_geometry_only(std::vector<DynaPin::SupportSlab> &slabs, const std::function<bool()> &cancel)
+{
+    if (!prepare_slices_for_support_geometry(cancel))
+        return false;
+    return generate_normal_support_geometry_for_current_shift(slabs, cancel);
 }
 
 PrintRegion::PrintRegion(const PrintRegionConfig &config) : PrintRegion(config, config.hash()) {}

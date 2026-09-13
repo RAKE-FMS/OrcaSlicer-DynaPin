@@ -1,9 +1,25 @@
 #include "DynaPinPlacementJob.hpp"
 
+#include <atomic>
 #include <exception>
 #include <utility>
 
 namespace Slic3r::GUI {
+namespace {
+
+const char *placement_progress_message(DynaPin::PlacementProgressStage stage)
+{
+    switch (stage) {
+    case DynaPin::PlacementProgressStage::EvaluatingCurrent:   return "Evaluating the current DynaPin placement";
+    case DynaPin::PlacementProgressStage::PreparingCandidates: return "Preparing DynaPin placement candidates";
+    case DynaPin::PlacementProgressStage::CoarseSearch:        return "Searching for an improved DynaPin placement";
+    case DynaPin::PlacementProgressStage::LocalSearch:         return "Refining the DynaPin placement";
+    case DynaPin::PlacementProgressStage::Finalizing:          return "Finishing the DynaPin placement search";
+    }
+    return "Searching for an improved DynaPin placement";
+}
+
+} // namespace
 
 DynaPinPlacementJob::DynaPinPlacementJob(DynaPinPlacementSnapshot snapshot, ApplyCallback apply, CompletionCallback completion) :
     m_snapshot(std::move(snapshot)),
@@ -14,7 +30,9 @@ DynaPinPlacementJob::DynaPinPlacementJob(DynaPinPlacementSnapshot snapshot, Appl
 
 void DynaPinPlacementJob::process(Ctl &ctl)
 {
-    ctl.update_status(0, "Searching for an improved DynaPin placement");
+    std::atomic<int>                             progress_value{0};
+    std::atomic<DynaPin::PlacementProgressStage> progress_stage{DynaPin::PlacementProgressStage::EvaluatingCurrent};
+    ctl.update_status(0, placement_progress_message(progress_stage.load()));
 
     std::string eligibility_error;
     if (!m_snapshot.eligibility.valid(&eligibility_error)) {
@@ -25,14 +43,25 @@ void DynaPinPlacementJob::process(Ctl &ctl)
     }
 
     DynaPin::PlacementEvaluator evaluator = m_snapshot.evaluator;
-    if (!evaluator && m_snapshot.scene.model)
+    if (!evaluator && m_snapshot.scene.model) {
+        if (!m_snapshot.search.angle_evaluator)
+            m_snapshot.search.angle_evaluator = DynaPin::make_scene_angle_evaluator(
+                m_snapshot.scene, [&ctl]() { return ctl.was_canceled(); });
         evaluator = DynaPin::make_scene_evaluator(m_snapshot.scene, [&ctl]() { return ctl.was_canceled(); });
+    }
 
     m_result = DynaPin::optimize_placement(
         m_snapshot.search,
         evaluator,
         [&ctl]() { return ctl.was_canceled(); },
-        [&ctl](int progress) { ctl.update_status(progress, "Searching for an improved DynaPin placement"); });
+        [&ctl, &progress_value, &progress_stage](int progress) {
+            progress_value.store(progress, std::memory_order_relaxed);
+            ctl.update_status(progress, placement_progress_message(progress_stage.load(std::memory_order_relaxed)));
+        },
+        [&ctl, &progress_value, &progress_stage](DynaPin::PlacementProgressStage stage) {
+            progress_stage.store(stage, std::memory_order_relaxed);
+            ctl.update_status(progress_value.load(std::memory_order_relaxed), placement_progress_message(stage));
+        });
 
     if (m_result.status == DynaPin::PlacementStatus::Canceled || ctl.was_canceled())
         ctl.update_status(100, "DynaPin placement search canceled");

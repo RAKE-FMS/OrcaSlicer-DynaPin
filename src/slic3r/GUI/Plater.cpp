@@ -16744,6 +16744,7 @@ bool Plater::start_dynapin_placement()
     search.y_max               = y_range->max;
     search.current_rotation_deg = 0.;
     search.current_delta_y      = 0.;
+    search.angle_group_concurrency = 2;
     search.delta_y_range_for_rotation = [scene](double rotation_deg) {
         return DynaPin::placement_delta_y_range_for_scene(scene, rotation_deg);
     };

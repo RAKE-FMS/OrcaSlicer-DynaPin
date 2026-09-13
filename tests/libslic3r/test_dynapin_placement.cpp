@@ -4,10 +4,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <future>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 using namespace Slic3r;
@@ -258,4 +262,226 @@ TEST_CASE("DynaPin placement eligibility is a complete snapshot gate", "[DynaPin
     eligibility.normal_support           = true;
     eligibility.selected_instance_count  = 1;
     CHECK(eligibility.valid(&error));
+}
+
+TEST_CASE("DynaPin placement angle evaluator matches flat evaluator deterministically", "[DynaPinPlacement]")
+{
+    auto objective_func = [](const DynaPin::PlacementCandidate &c) -> std::optional<double> {
+        const double rot_diff = std::abs(DynaPin::rotation_distance_deg(c.rotation_deg, 45.));
+        const double y_diff   = std::abs(c.delta_y - 3.2);
+        return 500. + rot_diff * 2. + y_diff * 5.;
+    };
+
+    DynaPin::PlacementSearchInput input_base;
+    input_base.pitch_y            = 16.;
+    input_base.y_min              = -8.;
+    input_base.y_max              = 8.;
+    input_base.current_volume_mm3 = 1000.;
+    input_base.delta_y_range_for_rotation = [](double rot) -> std::optional<DynaPin::DeltaYInterval> {
+        return DynaPin::DeltaYInterval{-8., 8.};
+    };
+
+    // 1. Flat parallel evaluation
+    DynaPin::PlacementSearchInput input_flat = input_base;
+    input_flat.concurrency                   = 0;
+    const DynaPin::PlacementResult result_flat = DynaPin::optimize_placement(input_flat, objective_func);
+
+    // 2. Grouped serial evaluation (concurrency = 1)
+    DynaPin::PlacementSearchInput input_grouped_serial = input_base;
+    input_grouped_serial.concurrency                   = 1;
+    input_grouped_serial.angle_group_concurrency       = 1;
+    input_grouped_serial.angle_evaluator = [&](double rot, const std::vector<DynaPin::PlacementCandidate> &cands,
+                                               std::vector<std::optional<double>> &res,
+                                               const DynaPin::CandidateCompletedCallback &completed) {
+        res.resize(cands.size());
+        for (size_t i = 0; i < cands.size(); ++i) {
+            res[i] = objective_func(cands[i]);
+            completed(i);
+        }
+    };
+    const DynaPin::PlacementResult result_grouped_serial = DynaPin::optimize_placement(input_grouped_serial, objective_func);
+
+    // 3. Grouped parallel evaluation (concurrency = 0)
+    DynaPin::PlacementSearchInput input_grouped_parallel = input_grouped_serial;
+    input_grouped_parallel.concurrency                   = 0;
+    input_grouped_parallel.angle_group_concurrency       = 0;
+    const DynaPin::PlacementResult result_grouped_parallel =
+        DynaPin::optimize_placement(input_grouped_parallel, objective_func);
+
+    CHECK(result_flat.status == DynaPin::PlacementStatus::Improved);
+    CHECK(result_grouped_serial.status == result_flat.status);
+    CHECK(result_grouped_parallel.status == result_flat.status);
+
+    CHECK(result_grouped_serial.candidate.rotation_deg == Catch::Approx(result_flat.candidate.rotation_deg));
+    CHECK(result_grouped_serial.candidate.delta_y == Catch::Approx(result_flat.candidate.delta_y));
+    CHECK(result_grouped_serial.volume_mm3 == Catch::Approx(result_flat.volume_mm3));
+
+    CHECK(result_grouped_parallel.candidate.rotation_deg == Catch::Approx(result_flat.candidate.rotation_deg));
+    CHECK(result_grouped_parallel.candidate.delta_y == Catch::Approx(result_flat.candidate.delta_y));
+    CHECK(result_grouped_parallel.volume_mm3 == Catch::Approx(result_flat.volume_mm3));
+}
+
+TEST_CASE("DynaPin placement reports progress before an angle batch completes", "[DynaPinPlacement]")
+{
+    DynaPin::PlacementSearchInput input;
+    input.pitch_y                 = 16.;
+    input.current_volume_mm3      = 1000.;
+    input.angle_group_concurrency = 1;
+    input.delta_y_range_for_rotation = [](double rotation_deg) -> std::optional<DynaPin::DeltaYInterval> {
+        return rotation_deg == 0. ? std::optional<DynaPin::DeltaYInterval>{{-8., 8.}} : std::nullopt;
+    };
+
+    std::mutex              gate_mutex;
+    std::condition_variable gate_cv;
+    bool                    first_candidate_completed = false;
+    bool                    release_batch             = false;
+    input.angle_evaluator = [&](double, const std::vector<DynaPin::PlacementCandidate> &candidates,
+                                std::vector<std::optional<double>> &results,
+                                const DynaPin::CandidateCompletedCallback &completed) {
+        results.assign(candidates.size(), 800.);
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            completed(i);
+            if (i == 0) {
+                std::unique_lock<std::mutex> lock(gate_mutex);
+                first_candidate_completed = true;
+                gate_cv.notify_one();
+                gate_cv.wait(lock, [&release_batch]() { return release_batch; });
+            }
+        }
+    };
+
+    std::mutex       progress_mutex;
+    std::vector<int> progress_values;
+    std::vector<DynaPin::PlacementProgressStage> progress_stages;
+    auto result = std::async(std::launch::async, [&]() {
+        return DynaPin::optimize_placement(
+            input,
+            [](const DynaPin::PlacementCandidate &) { return std::optional<double>{1000.}; },
+            {},
+            [&progress_mutex, &progress_values](int progress) {
+                std::lock_guard<std::mutex> lock(progress_mutex);
+                progress_values.push_back(progress);
+            },
+            [&progress_mutex, &progress_stages](DynaPin::PlacementProgressStage stage) {
+                std::lock_guard<std::mutex> lock(progress_mutex);
+                progress_stages.push_back(stage);
+            });
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        REQUIRE(gate_cv.wait_for(lock, std::chrono::seconds(5), [&first_candidate_completed]() {
+            return first_candidate_completed;
+        }));
+    }
+    {
+        std::lock_guard<std::mutex> lock(progress_mutex);
+        CHECK(std::any_of(progress_values.begin(), progress_values.end(), [](int progress) {
+            return progress > 5 && progress < 75;
+        }));
+    }
+    {
+        std::lock_guard<std::mutex> lock(gate_mutex);
+        release_batch = true;
+    }
+    gate_cv.notify_one();
+
+    CHECK(result.get().status == DynaPin::PlacementStatus::Improved);
+    {
+        std::lock_guard<std::mutex> lock(progress_mutex);
+        CHECK(std::is_sorted(progress_values.begin(), progress_values.end()));
+        CHECK(std::adjacent_find(progress_values.begin(), progress_values.end()) == progress_values.end());
+        REQUIRE(progress_stages.size() == 5);
+        CHECK(progress_stages == std::vector<DynaPin::PlacementProgressStage>{
+            DynaPin::PlacementProgressStage::EvaluatingCurrent,
+            DynaPin::PlacementProgressStage::PreparingCandidates,
+            DynaPin::PlacementProgressStage::CoarseSearch,
+            DynaPin::PlacementProgressStage::LocalSearch,
+            DynaPin::PlacementProgressStage::Finalizing,
+        });
+    }
+}
+
+TEST_CASE("DynaPin placement limits concurrent angle groups without concurrent progress callbacks", "[DynaPinPlacement]")
+{
+    DynaPin::PlacementSearchInput input;
+    input.pitch_y                 = 16.;
+    input.current_volume_mm3      = 1000.;
+    input.angle_group_concurrency = 2;
+    input.delta_y_range_for_rotation = [](double) -> std::optional<DynaPin::DeltaYInterval> {
+        return DynaPin::DeltaYInterval{0., 0.};
+    };
+
+    std::atomic<int> active_groups{0};
+    std::atomic<int> peak_groups{0};
+    std::mutex              group_mutex;
+    std::condition_variable group_cv;
+    int                     initial_groups_started = 0;
+    input.angle_evaluator = [&](double, const std::vector<DynaPin::PlacementCandidate> &candidates,
+                                std::vector<std::optional<double>> &results,
+                                const DynaPin::CandidateCompletedCallback &completed) {
+        const int active = active_groups.fetch_add(1) + 1;
+        int       peak   = peak_groups.load();
+        while (peak < active && !peak_groups.compare_exchange_weak(peak, active)) {}
+        {
+            std::unique_lock<std::mutex> lock(group_mutex);
+            if (initial_groups_started < 2) {
+                ++initial_groups_started;
+                group_cv.notify_all();
+                group_cv.wait_for(lock, std::chrono::seconds(5), [&initial_groups_started]() {
+                    return initial_groups_started >= 2;
+                });
+            }
+        }
+        results.assign(candidates.size(), 800.);
+        for (size_t i = 0; i < candidates.size(); ++i)
+            completed(i);
+        active_groups.fetch_sub(1);
+    };
+
+    std::atomic<int> active_progress_callbacks{0};
+    std::atomic<int> peak_progress_callbacks{0};
+    const DynaPin::PlacementResult result = DynaPin::optimize_placement(
+        input,
+        [](const DynaPin::PlacementCandidate &) { return std::optional<double>{1000.}; },
+        {},
+        [&](int) {
+            const int active = active_progress_callbacks.fetch_add(1) + 1;
+            int       peak   = peak_progress_callbacks.load();
+            while (peak < active && !peak_progress_callbacks.compare_exchange_weak(peak, active)) {}
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            active_progress_callbacks.fetch_sub(1);
+        });
+
+    CHECK(result.status == DynaPin::PlacementStatus::Improved);
+    CHECK(peak_groups.load() == 2);
+    CHECK(peak_progress_callbacks.load() == 1);
+}
+
+TEST_CASE("DynaPin placement angle evaluator supports cancellation", "[DynaPinPlacement]")
+{
+    DynaPin::PlacementSearchInput input;
+    input.pitch_y            = 16.;
+    input.y_min              = -8.;
+    input.y_max              = 8.;
+    input.current_volume_mm3 = 1000.;
+    input.delta_y_range_for_rotation = [](double rot) -> std::optional<DynaPin::DeltaYInterval> {
+        return DynaPin::DeltaYInterval{-8., 8.};
+    };
+
+    std::atomic<bool> canceled{false};
+    input.angle_evaluator = [&](double rot, const std::vector<DynaPin::PlacementCandidate> &cands,
+                                std::vector<std::optional<double>> &res,
+                                const DynaPin::CandidateCompletedCallback &completed) {
+        canceled.store(true);
+        res.assign(cands.size(), 800.);
+    };
+
+    const DynaPin::PlacementResult result = DynaPin::optimize_placement(
+        input,
+        [](const DynaPin::PlacementCandidate &) { return std::optional<double>{800.}; },
+        [&canceled]() { return canceled.load(); });
+
+    CHECK(result.status == DynaPin::PlacementStatus::Canceled);
+    CHECK(result.evaluations == 1);
 }

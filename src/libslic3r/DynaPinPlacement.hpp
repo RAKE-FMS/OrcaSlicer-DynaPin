@@ -56,6 +56,11 @@ struct DeltaYInterval
 
 struct PlacementSceneSnapshot;
 using DeltaYRangeProvider = std::function<std::optional<DeltaYInterval>(double rotation_deg)>;
+using CandidateCompletedCallback = std::function<void(size_t candidate_index)>;
+using AngleGroupEvaluator = std::function<void(double                                 rotation_deg,
+                                               const std::vector<PlacementCandidate> &candidates,
+                                               std::vector<std::optional<double>>    &results,
+                                               const CandidateCompletedCallback     &completed)>;
 
 // Return the continuous translation range that keeps a model bbox inside the
 // printable Y range.  The caller may further narrow this range to the
@@ -123,6 +128,9 @@ struct PlacementSearchInput
     // every rotation. The fixed y_min/y_max values remain the fallback used by
     // pure optimizer tests and callers without scene geometry.
     DeltaYRangeProvider delta_y_range_for_rotation;
+    size_t              concurrency = 0;
+    size_t              angle_group_concurrency = 0;
+    AngleGroupEvaluator angle_evaluator;
 };
 
 // Conditions checked before a background placement search is started.  The
@@ -175,17 +183,34 @@ struct PlacementSceneSnapshot
 using PlacementEvaluator = std::function<std::optional<double>(const PlacementCandidate &)>;
 using CancelCallback = std::function<bool()>;
 using ProgressCallback = std::function<void(int)>;
+enum class PlacementProgressStage {
+    EvaluatingCurrent,
+    PreparingCandidates,
+    CoarseSearch,
+    LocalSearch,
+    Finalizing,
+};
+using ProgressStageCallback = std::function<void(PlacementProgressStage)>;
 
 std::optional<double> evaluate_scene_candidate(const PlacementSceneSnapshot &scene,
                                                const PlacementCandidate     &candidate,
                                                const CancelCallback         &cancel = {});
 
-PlacementEvaluator make_scene_evaluator(PlacementSceneSnapshot scene, const CancelCallback &cancel = {});
+void evaluate_scene_angle_group(const PlacementSceneSnapshot          &scene,
+                                double                                 rotation_deg,
+                                const std::vector<PlacementCandidate> &candidates,
+                                std::vector<std::optional<double>>    &results,
+                                const CandidateCompletedCallback      &completed = {},
+                                const CancelCallback                  &cancel = {});
+
+PlacementEvaluator  make_scene_evaluator(PlacementSceneSnapshot scene, const CancelCallback &cancel = {});
+AngleGroupEvaluator make_scene_angle_evaluator(PlacementSceneSnapshot scene, const CancelCallback &cancel = {});
 
 PlacementResult optimize_placement(const PlacementSearchInput &input,
                                    const PlacementEvaluator   &evaluator,
                                    const CancelCallback        &cancel = {},
-                                   const ProgressCallback     &progress = {});
+                                   const ProgressCallback      &progress = {},
+                                   const ProgressStageCallback &progress_stage = {});
 
 } // namespace DynaPin
 } // namespace Slic3r

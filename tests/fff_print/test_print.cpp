@@ -211,6 +211,71 @@ SCENARIO("Print: Rotating a DynaPin model invalidates slicing", "[Print][DynaPin
     }
 }
 
+TEST_CASE("DynaPin cached angle evaluation matches individual scene evaluations", "[Print][DynaPin][DynaPinPlacement]")
+{
+    ResourcesDirGuard resources_guard(test_resources_dir());
+
+    auto model = std::make_shared<Model>();
+    TriangleMesh mesh = make_cube(5., 5., 10.);
+    TriangleMesh overhang = make_cube(60., 20., 5.);
+    overhang.translate(0., 0., 10.);
+    mesh.merge(overhang);
+
+    ModelObject *object = model->add_object();
+    object->name = "dynapin-placement-cache.stl";
+    object->add_volume(std::move(mesh));
+    ModelInstance *target = object->add_instance();
+    target->set_offset({50., 0., 0.});
+    ModelInstance *other = object->add_instance(*target);
+    other->set_offset({100., 100., 0.});
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_support", true},
+        {"enable_dynapin_support_optimization", true},
+        {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+        {"dynapin_selected_pins", ""},
+        {"support_type", "normal(auto)"},
+        {"printable_area", "0x0,180x0,180x180,0x180"},
+        {"printable_height", 180.},
+    });
+
+    DynaPin::PlacementSceneSnapshot scene;
+    scene.model              = model;
+    scene.config             = config;
+    scene.target_object_id   = object->id();
+    scene.target_instance_id = target->id();
+    scene.initial_transform  = target->get_matrix();
+    scene.world_center       = object->instance_bounding_box(*target, false).center();
+    scene.printable_area     = {{0., 0.}, {180., 0.}, {180., 180.}, {0., 180.}};
+    scene.printable_height   = 180.;
+    scene.plate_origin       = {10., 20., 0.};
+
+    const std::vector<DynaPin::PlacementCandidate> candidates{{90., 0.}, {90., 20.}, {90., 25.}, {90., 20.}};
+    std::vector<std::optional<double>> flat_results;
+    flat_results.reserve(candidates.size());
+    for (const DynaPin::PlacementCandidate &candidate : candidates)
+        flat_results.push_back(DynaPin::evaluate_scene_candidate(scene, candidate));
+
+    std::vector<std::optional<double>> grouped_results;
+    std::vector<size_t> completed;
+    DynaPin::evaluate_scene_angle_group(
+        scene, 90., candidates, grouped_results, [&completed](size_t index) { completed.push_back(index); });
+
+    CHECK_FALSE(flat_results[0]);
+    REQUIRE(grouped_results.size() == flat_results.size());
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        CHECK(bool(grouped_results[i]) == bool(flat_results[i]));
+        if (grouped_results[i] && flat_results[i]) {
+            const double tolerance = std::max(1e-3, std::abs(*flat_results[i]) * 1e-6);
+            CHECK(*grouped_results[i] == Catch::Approx(*flat_results[i]).margin(tolerance));
+        }
+    }
+    CHECK(grouped_results[1] == grouped_results[3]);
+    std::sort(completed.begin(), completed.end());
+    CHECK(completed == std::vector<size_t>{0, 1, 2, 3});
+}
+
 TEST_CASE("DynaPin debug stage gates selection and support geometry", "[Print][DynaPin]")
 {
     ResourcesDirGuard resources_guard(test_resources_dir());
