@@ -10,10 +10,14 @@
 
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
+#include <tbb/task_group.h>
+#include <tbb/task_arena.h>
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <exception>
 #include <limits>
 #include <mutex>
@@ -21,12 +25,33 @@
 #include <stdexcept>
 #include <tuple>
 
+#include <boost/log/trivial.hpp>
+
 namespace Slic3r::DynaPin {
 namespace {
 
 constexpr double angle_step_deg = 5.;
 constexpr double tie_angle_epsilon = 1e-9;
 constexpr double coordinate_epsilon = 1e-7;
+constexpr uint64_t gib = uint64_t(1024) * 1024 * 1024;
+constexpr uint64_t minimum_group_memory = gib / 2;
+
+bool can_admit_angle_group(const SystemResourceSample &sample, uint64_t group_estimate, size_t active)
+{
+    if (sample.total_memory_bytes == 0 || group_estimate == 0)
+        return false;
+    const uint64_t reserve = std::max(uint64_t(2) * gib, sample.total_memory_bytes / 5);
+    if (sample.available_memory_bytes <= reserve)
+        return false;
+    // Include active groups in the reservation, even though part of their
+    // footprint may already be reflected in the current OS sample.
+    const uint64_t slots = uint64_t(active) + 1;
+    const uint64_t headroom = sample.available_memory_bytes - reserve;
+    const uint64_t process_ceiling = sample.total_memory_bytes - sample.total_memory_bytes / 4;
+    return slots <= headroom / group_estimate &&
+           sample.process_resident_bytes < process_ceiling &&
+           slots <= (process_ceiling - sample.process_resident_bytes) / group_estimate;
+}
 
 bool finite(double value) { return std::isfinite(value); }
 
@@ -218,7 +243,7 @@ PlacementResliceAction placement_reslice_action(bool optimization_reslice_guard,
 
 bool placement_job_should_continue_reslice(PlacementStatus status, bool canceled, bool failed)
 {
-    return !canceled && !failed && status != PlacementStatus::Canceled;
+    return !canceled && !failed && status != PlacementStatus::Canceled && status != PlacementStatus::ResourceExhausted;
 }
 
 std::optional<DeltaYInterval> placement_delta_y_range_for_bbox(double bed_y_min,
@@ -808,6 +833,11 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
     try {
         ++result.evaluations;
         current_volume = evaluator(current);
+    } catch (const std::bad_alloc &) {
+        result.status = PlacementStatus::ResourceExhausted;
+        result.warning = "Insufficient memory for DynaPin placement search";
+        set_progress(100);
+        return result;
     } catch (const std::exception &error) {
         if (cancel && cancel()) {
             result.status = PlacementStatus::Canceled;
@@ -868,7 +898,10 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
     feasible.emplace_back(current, *current_volume);
 
     std::atomic<bool> canceled{false};
+    std::atomic<bool> resource_exhausted{false};
     auto check_canceled = [&]() {
+        if (resource_exhausted.load(std::memory_order_relaxed))
+            return true;
         if (canceled.load(std::memory_order_relaxed))
             return true;
         if (!cancel)
@@ -954,6 +987,8 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
                 };
                 try {
                     input.angle_evaluator(angle, group_candidates, group_results, complete_group_candidate);
+                } catch (const std::bad_alloc &) {
+                    throw;
                 } catch (...) {
                 }
 
@@ -965,13 +1000,19 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
                     for (size_t i = 0; i < items.size(); ++i)
                         complete_group_candidate(i);
             };
-
-            const size_t requested_workers = input.angle_group_concurrency == 0 ? angle_groups.size() : input.angle_group_concurrency;
-            const size_t worker_count      = std::max<size_t>(1, std::min(requested_workers, angle_groups.size()));
-            if (!parallel || worker_count == 1) {
-                for (size_t g = 0; g < angle_groups.size(); ++g)
+            auto safe_process_group = [&](size_t g) {
+                try {
                     process_group(g);
-            } else {
+                } catch (const std::bad_alloc &) {
+                    resource_exhausted.store(true, std::memory_order_relaxed);
+                }
+            };
+
+            if (!parallel || input.angle_group_concurrency == 1) {
+                for (size_t g = 0; g < angle_groups.size(); ++g)
+                    safe_process_group(g);
+            } else if (input.angle_group_concurrency > 1) {
+                const size_t worker_count = std::min(input.angle_group_concurrency, angle_groups.size());
                 std::atomic<size_t> next_group{0};
                 tbb::parallel_for(tbb::blocked_range<size_t>(0, worker_count, 1), [&](const tbb::blocked_range<size_t> &range) {
                     for (size_t worker = range.begin(); worker < range.end(); ++worker) {
@@ -980,10 +1021,137 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
                             const size_t group_index = next_group.fetch_add(1, std::memory_order_relaxed);
                             if (group_index >= angle_groups.size())
                                 break;
-                            process_group(group_index);
+                            safe_process_group(group_index);
                         }
                     }
                 });
+            } else {
+                const auto probe = input.resource_probe ? input.resource_probe : sample_system_resources;
+                auto sample_resources = [&]() -> std::optional<SystemResourceSample> {
+                    try {
+                        auto sample = probe();
+                        if (sample && sample->total_memory_bytes > 0 &&
+                            std::isfinite(sample->process_cpu_seconds))
+                            return sample;
+                    } catch (...) {
+                    }
+                    return std::nullopt;
+                };
+
+                const size_t cpu_limit = std::max<size_t>(1, std::min<size_t>(
+                    angle_groups.size(), size_t(tbb::this_task_arena::max_concurrency())));
+                uint64_t group_estimate = minimum_group_memory;
+                size_t desired_groups = 1;
+                size_t next_group = 0;
+                std::atomic<size_t> active_groups{0};
+                bool calibrated = false;
+                bool waiting_for_memory = false;
+                std::mutex completion_mutex;
+                std::condition_variable completion_cv;
+                tbb::task_group tasks;
+
+                std::optional<SystemResourceSample> initial_sample = sample_resources();
+                uint64_t calibration_baseline = initial_sample ? initial_sample->process_resident_bytes : 0;
+                uint64_t calibration_peak = calibration_baseline;
+                size_t peak_active_groups = 1;
+                auto cpu_window_start = std::chrono::steady_clock::now();
+                double cpu_seconds_start = initial_sample ? initial_sample->process_cpu_seconds : 0.;
+
+                auto launch = [&](size_t group_index) {
+                    active_groups.fetch_add(1, std::memory_order_relaxed);
+                    try {
+                        tasks.run([&, group_index]() {
+                            try {
+                                process_group(group_index);
+                            } catch (const std::bad_alloc &) {
+                                resource_exhausted.store(true, std::memory_order_relaxed);
+                            }
+                            active_groups.fetch_sub(1, std::memory_order_relaxed);
+                            completion_cv.notify_one();
+                        });
+                    } catch (const std::bad_alloc &) {
+                        active_groups.fetch_sub(1, std::memory_order_relaxed);
+                        resource_exhausted.store(true, std::memory_order_relaxed);
+                    }
+                };
+
+                while ((next_group < angle_groups.size() || active_groups.load(std::memory_order_relaxed) != 0) &&
+                       !check_canceled() && !resource_exhausted.load(std::memory_order_relaxed)) {
+                    const auto sample = sample_resources();
+                    if (!initial_sample && sample && calibration_baseline == 0) {
+                        calibration_baseline = sample->process_resident_bytes;
+                        cpu_seconds_start = sample->process_cpu_seconds;
+                    }
+                    if (!calibrated && sample)
+                        calibration_peak = std::max(calibration_peak, sample->process_resident_bytes);
+                    if (calibrated && sample) {
+                        peak_active_groups = std::max(peak_active_groups, active_groups.load(std::memory_order_relaxed));
+                        const uint64_t increment = sample->process_resident_bytes > calibration_baseline ?
+                            sample->process_resident_bytes - calibration_baseline : 0;
+                        const uint64_t per_group = increment / peak_active_groups;
+                        group_estimate = std::max(group_estimate,
+                            per_group > UINT64_MAX / 2 ? UINT64_MAX : per_group * 2);
+                    }
+
+                    if (!calibrated && next_group > 0 && active_groups.load(std::memory_order_relaxed) == 0) {
+                        const uint64_t observed = calibration_peak > calibration_baseline ? calibration_peak - calibration_baseline : 0;
+                        group_estimate = std::max(minimum_group_memory,
+                            observed > UINT64_MAX / 2 ? UINT64_MAX : observed * 2);
+                        calibrated = true;
+                        const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - cpu_window_start).count();
+                        const double used_cores = sample && elapsed > 0. ?
+                            (sample->process_cpu_seconds - cpu_seconds_start) / elapsed : 0.;
+                        if (sample && cpu_limit > 1 && (elapsed < 1. || used_cores < 0.7 * double(cpu_limit)))
+                            desired_groups = 2;
+                        BOOST_LOG_TRIVIAL(info) << "[DynaPin] automatic angle scheduling: estimate=" << group_estimate
+                                                << " bytes, cpu_limit=" << cpu_limit << ", target=" << desired_groups;
+                        cpu_window_start = std::chrono::steady_clock::now();
+                        cpu_seconds_start = sample ? sample->process_cpu_seconds : 0.;
+                    } else if (calibrated && sample && cpu_limit > desired_groups) {
+                        const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - cpu_window_start).count();
+                        if (elapsed >= 1.) {
+                            const double used_cores = (sample->process_cpu_seconds - cpu_seconds_start) / elapsed;
+                            if (used_cores >= 0. && used_cores < 0.7 * double(cpu_limit)) {
+                                ++desired_groups;
+                                BOOST_LOG_TRIVIAL(info) << "[DynaPin] angle group target=" << desired_groups
+                                                        << ", available=" << sample->available_memory_bytes
+                                                        << " bytes, rss=" << sample->process_resident_bytes
+                                                        << " bytes, estimate=" << group_estimate << " bytes";
+                            }
+                            cpu_window_start = std::chrono::steady_clock::now();
+                            cpu_seconds_start = sample->process_cpu_seconds;
+                        }
+                    }
+
+                    bool launched = false;
+                    while (next_group < angle_groups.size() && !resource_exhausted.load(std::memory_order_relaxed) &&
+                           active_groups.load(std::memory_order_relaxed) < desired_groups &&
+                           (calibrated || active_groups.load(std::memory_order_relaxed) == 0) &&
+                           (sample ? can_admit_angle_group(*sample, group_estimate, active_groups.load(std::memory_order_relaxed)) :
+                                     active_groups.load(std::memory_order_relaxed) == 0)) {
+                        if (check_canceled())
+                            break;
+                        if (waiting_for_memory) {
+                            set_stage(phase_start == 5 ? PlacementProgressStage::CoarseSearch : PlacementProgressStage::LocalSearch);
+                            waiting_for_memory = false;
+                        }
+                        launch(next_group++);
+                        launched = true;
+                    }
+                    if (next_group == angle_groups.size() && active_groups.load(std::memory_order_relaxed) == 0)
+                        break;
+                    if (!launched && active_groups.load(std::memory_order_relaxed) == 0 && next_group < angle_groups.size() && sample &&
+                        !can_admit_angle_group(*sample, group_estimate, 0) && !waiting_for_memory) {
+                        set_stage(PlacementProgressStage::WaitingForMemory);
+                        waiting_for_memory = true;
+                        BOOST_LOG_TRIVIAL(info) << "[DynaPin] waiting for memory: available=" << sample->available_memory_bytes
+                                                << " bytes, rss=" << sample->process_resident_bytes
+                                                << " bytes, estimate=" << group_estimate << " bytes";
+                    }
+                    std::unique_lock<std::mutex> lock(completion_mutex);
+                    completion_cv.wait_for(lock, std::chrono::milliseconds(100));
+                }
+                tasks.wait();
             }
         } else {
             auto process_candidate_range = [&](size_t begin, size_t end) {
@@ -992,6 +1160,9 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
                         return;
                     try {
                         values[i] = evaluator(candidates[i]);
+                    } catch (const std::bad_alloc &) {
+                        resource_exhausted.store(true, std::memory_order_relaxed);
+                        return;
                     } catch (...) {
                     }
                     complete_candidate(i);
@@ -1028,6 +1199,12 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
     set_stage(PlacementProgressStage::CoarseSearch);
     {
         const std::vector<std::optional<double>> values = evaluate_candidates(unique_coarse, 5, 75, has_rotation_ranges);
+        if (resource_exhausted.load(std::memory_order_relaxed)) {
+            result.status = PlacementStatus::ResourceExhausted;
+            result.warning = "Insufficient memory for DynaPin placement search";
+            set_progress(100);
+            return result;
+        }
         if (check_canceled()) {
             result.status = PlacementStatus::Canceled;
             set_progress(100);
@@ -1063,6 +1240,12 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
     set_stage(PlacementProgressStage::LocalSearch);
     {
         const std::vector<std::optional<double>> values = evaluate_candidates(unique_local, 75, 99, has_rotation_ranges);
+        if (resource_exhausted.load(std::memory_order_relaxed)) {
+            result.status = PlacementStatus::ResourceExhausted;
+            result.warning = "Insufficient memory for DynaPin placement search";
+            set_progress(100);
+            return result;
+        }
         if (check_canceled()) {
             result.status = PlacementStatus::Canceled;
             set_progress(100);

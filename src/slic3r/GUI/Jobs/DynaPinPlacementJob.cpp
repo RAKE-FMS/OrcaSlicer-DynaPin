@@ -14,6 +14,7 @@ const char *placement_progress_message(DynaPin::PlacementProgressStage stage)
     case DynaPin::PlacementProgressStage::PreparingCandidates: return "Preparing DynaPin placement candidates";
     case DynaPin::PlacementProgressStage::CoarseSearch:        return "Searching for an improved DynaPin placement";
     case DynaPin::PlacementProgressStage::LocalSearch:         return "Refining the DynaPin placement";
+    case DynaPin::PlacementProgressStage::WaitingForMemory:    return "Waiting for available memory for DynaPin placement";
     case DynaPin::PlacementProgressStage::Finalizing:          return "Finishing the DynaPin placement search";
     }
     return "Searching for an improved DynaPin placement";
@@ -65,6 +66,8 @@ void DynaPinPlacementJob::process(Ctl &ctl)
 
     if (m_result.status == DynaPin::PlacementStatus::Canceled || ctl.was_canceled())
         ctl.update_status(100, "DynaPin placement search canceled");
+    else if (m_result.status == DynaPin::PlacementStatus::ResourceExhausted)
+        ctl.update_status(100, "DynaPin placement search stopped: insufficient memory");
     else
         ctl.update_status(100, "DynaPin placement search finished");
 }

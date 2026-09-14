@@ -485,3 +485,191 @@ TEST_CASE("DynaPin placement angle evaluator supports cancellation", "[DynaPinPl
     CHECK(result.status == DynaPin::PlacementStatus::Canceled);
     CHECK(result.evaluations == 1);
 }
+
+TEST_CASE("DynaPin placement auto scheduling waits for memory and resumes", "[DynaPinPlacement]")
+{
+    DynaPin::PlacementSearchInput input;
+    input.pitch_y = 16.;
+    input.current_volume_mm3 = 1000.;
+    input.angle_group_concurrency = 0;
+    input.delta_y_range_for_rotation = [](double) -> std::optional<DynaPin::DeltaYInterval> {
+        return DynaPin::DeltaYInterval{0., 0.};
+    };
+    std::atomic<bool> memory_available{false};
+    std::atomic<int> evaluated_groups{0};
+    input.resource_probe = [&]() -> std::optional<SystemResourceSample> {
+        return SystemResourceSample{16ull << 30, memory_available.load() ? 8ull << 30 : 1ull << 30,
+                                    1ull << 30, 0.};
+    };
+    input.angle_evaluator = [&](double, const std::vector<DynaPin::PlacementCandidate> &candidates,
+                                std::vector<std::optional<double>> &results,
+                                const DynaPin::CandidateCompletedCallback &completed) {
+        ++evaluated_groups;
+        results.assign(candidates.size(), 800.);
+        for (size_t i = 0; i < candidates.size(); ++i)
+            completed(i);
+    };
+    std::mutex stage_mutex;
+    std::condition_variable stage_cv;
+    bool waiting = false;
+    bool resumed = false;
+    auto result = std::async(std::launch::async, [&]() {
+        return DynaPin::optimize_placement(input, [](const DynaPin::PlacementCandidate &) {
+            return std::optional<double>{1000.};
+        }, {}, {}, [&](DynaPin::PlacementProgressStage stage) {
+            std::lock_guard<std::mutex> lock(stage_mutex);
+            if (stage == DynaPin::PlacementProgressStage::WaitingForMemory)
+                waiting = true;
+            if (waiting && (stage == DynaPin::PlacementProgressStage::CoarseSearch ||
+                            stage == DynaPin::PlacementProgressStage::LocalSearch))
+                resumed = true;
+            stage_cv.notify_all();
+        });
+    });
+    {
+        std::unique_lock<std::mutex> lock(stage_mutex);
+        REQUIRE(stage_cv.wait_for(lock, std::chrono::seconds(5), [&]() { return waiting; }));
+    }
+    CHECK(evaluated_groups.load() == 0);
+    memory_available = true;
+    {
+        std::unique_lock<std::mutex> lock(stage_mutex);
+        REQUIRE(stage_cv.wait_for(lock, std::chrono::seconds(5), [&]() { return resumed; }));
+    }
+    CHECK(result.get().status == DynaPin::PlacementStatus::Improved);
+    CHECK(evaluated_groups.load() > 0);
+}
+
+TEST_CASE("DynaPin placement auto scheduling can cancel while waiting for memory", "[DynaPinPlacement]")
+{
+    DynaPin::PlacementSearchInput input;
+    input.pitch_y = 16.;
+    input.current_volume_mm3 = 1000.;
+    input.delta_y_range_for_rotation = [](double) -> std::optional<DynaPin::DeltaYInterval> {
+        return DynaPin::DeltaYInterval{0., 0.};
+    };
+    input.resource_probe = []() -> std::optional<SystemResourceSample> {
+        return SystemResourceSample{16ull << 30, 1ull << 30, 1ull << 30, 0.};
+    };
+    input.angle_evaluator = [](double, const std::vector<DynaPin::PlacementCandidate> &candidates,
+                               std::vector<std::optional<double>> &results,
+                               const DynaPin::CandidateCompletedCallback &completed) {
+        results.assign(candidates.size(), 800.);
+        for (size_t i = 0; i < candidates.size(); ++i)
+            completed(i);
+    };
+    std::atomic<bool> canceled{false};
+    std::mutex stage_mutex;
+    std::condition_variable stage_cv;
+    bool waiting = false;
+    auto result = std::async(std::launch::async, [&]() {
+        return DynaPin::optimize_placement(input, [](const DynaPin::PlacementCandidate &) {
+            return std::optional<double>{800.};
+        }, [&]() { return canceled.load(); }, {}, [&](DynaPin::PlacementProgressStage stage) {
+            if (stage == DynaPin::PlacementProgressStage::WaitingForMemory) {
+                std::lock_guard<std::mutex> lock(stage_mutex);
+                waiting = true;
+                stage_cv.notify_one();
+            }
+        });
+    });
+    {
+        std::unique_lock<std::mutex> lock(stage_mutex);
+        REQUIRE(stage_cv.wait_for(lock, std::chrono::seconds(5), [&]() { return waiting; }));
+    }
+    canceled = true;
+    CHECK(result.get().status == DynaPin::PlacementStatus::Canceled);
+}
+
+TEST_CASE("DynaPin placement auto scheduling falls back to one group when resource sampling fails", "[DynaPinPlacement]")
+{
+    DynaPin::PlacementSearchInput input;
+    input.pitch_y = 16.;
+    input.current_volume_mm3 = 1000.;
+    input.delta_y_range_for_rotation = [](double) -> std::optional<DynaPin::DeltaYInterval> {
+        return DynaPin::DeltaYInterval{0., 0.};
+    };
+    input.resource_probe = []() -> std::optional<SystemResourceSample> { return std::nullopt; };
+    std::atomic<int> active{0};
+    std::atomic<int> peak{0};
+    input.angle_evaluator = [&](double, const std::vector<DynaPin::PlacementCandidate> &candidates,
+                                std::vector<std::optional<double>> &results,
+                                const DynaPin::CandidateCompletedCallback &completed) {
+        const int now = ++active;
+        peak = std::max(peak.load(), now);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        results.assign(candidates.size(), 800.);
+        for (size_t i = 0; i < candidates.size(); ++i)
+            completed(i);
+        --active;
+    };
+    const auto result = DynaPin::optimize_placement(input, [](const DynaPin::PlacementCandidate &) {
+        return std::optional<double>{1000.};
+    });
+    CHECK(result.status == DynaPin::PlacementStatus::Improved);
+    CHECK(peak.load() == 1);
+}
+
+TEST_CASE("DynaPin placement reports resource exhaustion from angle evaluation", "[DynaPinPlacement]")
+{
+    DynaPin::PlacementSearchInput input;
+    input.pitch_y = 16.;
+    input.current_volume_mm3 = 1000.;
+    input.angle_group_concurrency = 1;
+    input.delta_y_range_for_rotation = [](double) -> std::optional<DynaPin::DeltaYInterval> {
+        return DynaPin::DeltaYInterval{0., 0.};
+    };
+    input.angle_evaluator = [](double, const std::vector<DynaPin::PlacementCandidate> &,
+                               std::vector<std::optional<double>> &,
+                               const DynaPin::CandidateCompletedCallback &) {
+        throw std::bad_alloc();
+    };
+    const auto result = DynaPin::optimize_placement(input, [](const DynaPin::PlacementCandidate &) {
+        return std::optional<double>{1000.};
+    });
+    CHECK(result.status == DynaPin::PlacementStatus::ResourceExhausted);
+    CHECK(!DynaPin::placement_job_should_continue_reslice(result.status, false, false));
+}
+
+TEST_CASE("DynaPin placement auto scheduling respects memory admission", "[DynaPinPlacement]")
+{
+    DynaPin::PlacementSearchInput input;
+    input.pitch_y = 16.;
+    input.current_volume_mm3 = 1000.;
+    input.delta_y_range_for_rotation = [](double) -> std::optional<DynaPin::DeltaYInterval> {
+        return DynaPin::DeltaYInterval{0., 0.};
+    };
+    input.resource_probe = []() -> std::optional<SystemResourceSample> {
+        return SystemResourceSample{16ull << 30, 43ull * (1ull << 30) / 10, 1ull << 30, 0.};
+    };
+    std::atomic<int> active{0};
+    std::atomic<int> peak{0};
+    std::atomic<int> groups{0};
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    int waiting_groups = 0;
+    input.angle_evaluator = [&](double, const std::vector<DynaPin::PlacementCandidate> &candidates,
+                                std::vector<std::optional<double>> &results,
+                                const DynaPin::CandidateCompletedCallback &completed) {
+        const int group = ++groups;
+        const int now = ++active;
+        int old_peak = peak.load();
+        while (old_peak < now && !peak.compare_exchange_weak(old_peak, now)) {}
+        if (group == 2 || group == 3) {
+            std::unique_lock<std::mutex> lock(gate_mutex);
+            ++waiting_groups;
+            gate_cv.notify_all();
+            gate_cv.wait_for(lock, std::chrono::seconds(5), [&]() { return waiting_groups >= 2; });
+        }
+        results.assign(candidates.size(), 800.);
+        for (size_t i = 0; i < candidates.size(); ++i)
+            completed(i);
+        --active;
+    };
+    const auto result = DynaPin::optimize_placement(input, [](const DynaPin::PlacementCandidate &) {
+        return std::optional<double>{1000.};
+    });
+    CHECK(result.status == DynaPin::PlacementStatus::Improved);
+    CHECK(waiting_groups == 2);
+    CHECK(peak.load() == 2);
+}

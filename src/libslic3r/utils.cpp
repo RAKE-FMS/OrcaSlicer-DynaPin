@@ -2,11 +2,14 @@
 #include "I18N.hpp"
 
 #include <atomic>
+#include <algorithm>
 #include <locale>
 #include <ctime>
 #include <cstdarg>
 #include <stdio.h>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 
 #include "format.hpp"
 #include "Platform.hpp"
@@ -1559,6 +1562,102 @@ size_t total_physical_memory()
 #else
 	return 0L;			// Unknown OS.
 #endif
+}
+
+std::optional<SystemResourceSample> sample_system_resources()
+{
+    SystemResourceSample sample;
+    sample.total_memory_bytes = total_physical_memory();
+    if (sample.total_memory_bytes == 0)
+        return std::nullopt;
+
+#ifdef WIN32
+    MEMORYSTATUSEX memory_status{};
+    memory_status.dwLength = sizeof(memory_status);
+    PROCESS_MEMORY_COUNTERS process_memory{};
+    FILETIME creation{}, exit{}, kernel{}, user{};
+    if (!GlobalMemoryStatusEx(&memory_status) ||
+        !GetProcessMemoryInfo(GetCurrentProcess(), &process_memory, sizeof(process_memory)) ||
+        !GetProcessTimes(GetCurrentProcess(), &creation, &exit, &kernel, &user))
+        return std::nullopt;
+    auto filetime_seconds = [](const FILETIME &value) {
+        ULARGE_INTEGER ticks;
+        ticks.LowPart = value.dwLowDateTime;
+        ticks.HighPart = value.dwHighDateTime;
+        return double(ticks.QuadPart) / 10000000.;
+    };
+    sample.available_memory_bytes = memory_status.ullAvailPhys;
+    sample.process_resident_bytes = process_memory.WorkingSetSize;
+    sample.process_cpu_seconds = filetime_seconds(kernel) + filetime_seconds(user);
+#elif defined(__APPLE__)
+    mach_port_t host = mach_host_self();
+    vm_statistics64_data_t vm{};
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    vm_size_t page_size = 0;
+    const bool memory_ok = host_statistics64(host, HOST_VM_INFO64, reinterpret_cast<host_info64_t>(&vm), &count) == KERN_SUCCESS &&
+                           host_page_size(host, &page_size) == KERN_SUCCESS;
+    mach_port_deallocate(mach_task_self(), host);
+
+    mach_task_basic_info_data_t task_memory{};
+    mach_msg_type_number_t task_count = MACH_TASK_BASIC_INFO_COUNT;
+    rusage usage{};
+    if (!memory_ok || task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                                reinterpret_cast<task_info_t>(&task_memory), &task_count) != KERN_SUCCESS ||
+        getrusage(RUSAGE_SELF, &usage) != 0)
+        return std::nullopt;
+    // Match the non-compressed available memory used by macOS memory-pressure
+    // accounting; free + inactive alone can report too little to start a job.
+    sample.available_memory_bytes = (uint64_t(vm.active_count) + uint64_t(vm.inactive_count) +
+                                     uint64_t(vm.free_count) + uint64_t(vm.speculative_count)) * uint64_t(page_size);
+    sample.process_resident_bytes = task_memory.resident_size;
+    sample.process_cpu_seconds = double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) +
+                                 double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1000000.;
+#elif defined(__linux__)
+    std::ifstream meminfo("/proc/meminfo");
+    std::string line;
+    uint64_t available_kib = 0;
+    bool found_available = false;
+    while (std::getline(meminfo, line)) {
+        std::istringstream entry(line);
+        std::string name;
+        if (entry >> name && name == "MemAvailable:") {
+            entry >> available_kib;
+            found_available = bool(entry);
+            break;
+        }
+    }
+    std::ifstream statm("/proc/self/statm");
+    uint64_t virtual_pages = 0, resident_pages = 0;
+    rusage usage{};
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (!found_available || !(statm >> virtual_pages >> resident_pages) ||
+        page_size <= 0 || getrusage(RUSAGE_SELF, &usage) != 0)
+        return std::nullopt;
+    sample.available_memory_bytes = available_kib * 1024;
+    sample.process_resident_bytes = resident_pages * uint64_t(page_size);
+    sample.process_cpu_seconds = double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) +
+                                 double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1000000.;
+
+    std::ifstream cgroup_limit("/sys/fs/cgroup/memory.max");
+    std::ifstream cgroup_current("/sys/fs/cgroup/memory.current");
+    std::string limit_text;
+    uint64_t current_bytes = 0;
+    if (cgroup_limit >> limit_text && limit_text != "max" && cgroup_current >> current_bytes) {
+        try {
+            const uint64_t limit_bytes = std::stoull(limit_text);
+            if (limit_bytes > 0) {
+                sample.total_memory_bytes = std::min(sample.total_memory_bytes, limit_bytes);
+                sample.available_memory_bytes = std::min(sample.available_memory_bytes,
+                    current_bytes < limit_bytes ? limit_bytes - current_bytes : uint64_t(0));
+            }
+        } catch (const std::exception &) {
+            return std::nullopt;
+        }
+    }
+#else
+    return std::nullopt;
+#endif
+    return sample;
 }
 
 bool makedir(const std::string path) {

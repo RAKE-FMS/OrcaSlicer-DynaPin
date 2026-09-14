@@ -5,6 +5,7 @@
 #include "ObjectID.hpp"
 #include "Polygon.hpp"
 #include "PrintConfig.hpp"
+#include "Utils.hpp"
 
 #include <Eigen/Geometry>
 
@@ -99,6 +100,7 @@ enum class PlacementStatus {
     Canceled,
     InvalidConfig,
     NoFeasiblePose,
+    ResourceExhausted,
 };
 
 // Pure state decisions used by the GUI reslice bridge.  Keeping these rules
@@ -129,7 +131,10 @@ struct PlacementSearchInput
     // pure optimizer tests and callers without scene geometry.
     DeltaYRangeProvider delta_y_range_for_rotation;
     size_t              concurrency = 0;
+    // Zero selects resource-aware scheduling; a positive value is a fixed
+    // maximum number of concurrently cached angle groups.
     size_t              angle_group_concurrency = 0;
+    std::function<std::optional<SystemResourceSample>()> resource_probe;
     AngleGroupEvaluator angle_evaluator;
 };
 
@@ -188,6 +193,7 @@ enum class PlacementProgressStage {
     PreparingCandidates,
     CoarseSearch,
     LocalSearch,
+    WaitingForMemory,
     Finalizing,
 };
 using ProgressStageCallback = std::function<void(PlacementProgressStage)>;
