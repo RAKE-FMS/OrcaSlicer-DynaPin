@@ -2,11 +2,13 @@
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/DynaPin.hpp"
+#include "libslic3r/DynaPinPlacement.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <boost/filesystem/path.hpp>
 
 #include "test_data.hpp"
@@ -30,6 +32,29 @@ std::string test_resources_dir()
 {
     return (boost::filesystem::path(TEST_DATA_DIR).parent_path().parent_path() / "resources").string();
 }
+
+class DebugStageEnvGuard
+{
+public:
+    DebugStageEnvGuard() : m_previous(std::getenv("DYNAPIN_DEBUG_STAGE")), m_had_previous(m_previous != nullptr)
+    {
+        if (m_had_previous)
+            m_value = m_previous;
+    }
+
+    ~DebugStageEnvGuard()
+    {
+        if (m_had_previous)
+            ::setenv("DYNAPIN_DEBUG_STAGE", m_value.c_str(), 1);
+        else
+            ::unsetenv("DYNAPIN_DEBUG_STAGE");
+    }
+
+private:
+    const char *m_previous;
+    bool        m_had_previous;
+    std::string m_value;
+};
 
 void init_dynapin_print(Print& print, Model& model, const DynamicPrintConfig& config)
 {
@@ -184,6 +209,126 @@ SCENARIO("Print: Rotating a DynaPin model invalidates slicing", "[Print][DynaPin
             }
         }
     }
+}
+
+TEST_CASE("DynaPin cached angle evaluation matches individual scene evaluations", "[Print][DynaPin][DynaPinPlacement]")
+{
+    ResourcesDirGuard resources_guard(test_resources_dir());
+
+    auto model = std::make_shared<Model>();
+    TriangleMesh mesh = make_cube(5., 5., 10.);
+    TriangleMesh overhang = make_cube(60., 20., 5.);
+    overhang.translate(0., 0., 10.);
+    mesh.merge(overhang);
+
+    ModelObject *object = model->add_object();
+    object->name = "dynapin-placement-cache.stl";
+    object->add_volume(std::move(mesh));
+    ModelInstance *target = object->add_instance();
+    target->set_offset({50., 0., 0.});
+    ModelInstance *other = object->add_instance(*target);
+    other->set_offset({100., 100., 0.});
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_support", true},
+        {"enable_dynapin_support_optimization", true},
+        {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+        {"dynapin_selected_pins", ""},
+        {"support_type", "normal(auto)"},
+        {"printable_area", "0x0,180x0,180x180,0x180"},
+        {"printable_height", 180.},
+    });
+
+    DynaPin::PlacementSceneSnapshot scene;
+    scene.model              = model;
+    scene.config             = config;
+    scene.target_object_id   = object->id();
+    scene.target_instance_id = target->id();
+    scene.initial_transform  = target->get_matrix();
+    scene.world_center       = object->instance_bounding_box(*target, false).center();
+    scene.printable_area     = {{0., 0.}, {180., 0.}, {180., 180.}, {0., 180.}};
+    scene.printable_height   = 180.;
+    scene.plate_origin       = {10., 20., 0.};
+
+    const std::vector<DynaPin::PlacementCandidate> candidates{{90., 0.}, {90., 20.}, {90., 25.}, {90., 20.}};
+    std::vector<std::optional<double>> flat_results;
+    flat_results.reserve(candidates.size());
+    for (const DynaPin::PlacementCandidate &candidate : candidates)
+        flat_results.push_back(DynaPin::evaluate_scene_candidate(scene, candidate));
+
+    std::vector<std::optional<double>> grouped_results;
+    std::vector<size_t> completed;
+    DynaPin::evaluate_scene_angle_group(
+        scene, 90., candidates, grouped_results, [&completed](size_t index) { completed.push_back(index); });
+
+    CHECK_FALSE(flat_results[0]);
+    REQUIRE(grouped_results.size() == flat_results.size());
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        CHECK(bool(grouped_results[i]) == bool(flat_results[i]));
+        if (grouped_results[i] && flat_results[i]) {
+            const double tolerance = std::max(1e-3, std::abs(*flat_results[i]) * 1e-6);
+            CHECK(*grouped_results[i] == Catch::Approx(*flat_results[i]).margin(tolerance));
+        }
+    }
+    CHECK(grouped_results[1] == grouped_results[3]);
+    std::sort(completed.begin(), completed.end());
+    CHECK(completed == std::vector<size_t>{0, 1, 2, 3});
+}
+
+TEST_CASE("DynaPin debug stage gates selection and support geometry", "[Print][DynaPin]")
+{
+    ResourcesDirGuard resources_guard(test_resources_dir());
+
+    for (const int stage : {0, 1, 2}) {
+        Print print;
+        Model model;
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            {"enable_dynapin_support_optimization", true},
+            {"enable_support", true},
+            {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+            {"dynapin_selected_pins", "1,0"},
+            {"dynapin_debug_stage", stage},
+        });
+        init_dynapin_print(print, model, config);
+
+        const auto &selection = print.dynapin_selection();
+        const auto *object = print.objects().front();
+        if (stage == 0) {
+            CHECK(selection.pins.empty());
+            CHECK(DynaPin::selected_blocker_boxes(print).empty());
+            CHECK(DynaPin::pin_top_surfaces_for_object(*object).empty());
+            CHECK(DynaPin::support_blocker_regions_local(*object).empty());
+        } else {
+            REQUIRE(selection.pins == std::vector<DynaPin::Pin>{{1, 0}});
+            CHECK(DynaPin::selected_blocker_boxes(print).size() == 1);
+            CHECK(DynaPin::pin_top_surfaces_for_object(*object).size() == 1);
+            if (stage == 1)
+                CHECK(DynaPin::support_blocker_regions_local(*object).empty());
+            else
+                CHECK(DynaPin::support_blocker_regions_local(*object).size() == 1);
+        }
+    }
+
+    // The environment override is read for the same snapshot as the config;
+    // restore the process environment before the test returns.
+    DebugStageEnvGuard env_guard;
+    REQUIRE(::setenv("DYNAPIN_DEBUG_STAGE", "0", 1) == 0);
+
+    Print print;
+    Model model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_dynapin_support_optimization", true},
+        {"enable_support", true},
+        {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+        {"dynapin_selected_pins", "1,0"},
+        {"dynapin_debug_stage", 2},
+    });
+    init_dynapin_print(print, model, config);
+    CHECK(print.dynapin_selection().pins.empty());
+    CHECK(DynaPin::selected_blocker_boxes(print).empty());
 }
 
 SCENARIO("Print: Empty DynaPin selection is resolved automatically without writeback", "[Print][DynaPin]") {
@@ -367,8 +512,43 @@ SCENARIO("Print: Automatic DynaPin pin collision check evaluates all model insta
     }
 }
 
+SCENARIO("Print: Model geometry before x_front does not collide with a DynaPin blocker", "[Print][DynaPin]") {
+    GIVEN("A model entirely before the pull path") {
+        ResourcesDirGuard resources_guard(test_resources_dir());
+        Print print;
+        Model model;
+        TriangleMesh mesh = make_cube(10., 10., 5.);
+        mesh.translate(5.f, 5.f, 0.f);
+        ModelObject *object = model.add_object();
+        object->name        = "dynapin-before-x-front-test.stl";
+        object->add_volume(std::move(mesh));
+        object->add_instance();
+        object->ensure_on_bed();
+
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            {"enable_support", true},
+            {"enable_dynapin_support_optimization", true},
+            {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+            {"dynapin_selected_pins", ""},
+            {"dynapin_debug_stage", 0},
+            {"support_type", "normal(auto)"},
+        });
+        print.auto_assign_extruders(object);
+        print.apply(model, config);
+        print.validate();
+        print.set_status_silent();
+        print.process();
+
+        DynaPin::Config dynapin_config;
+        REQUIRE(DynaPin::load_config_for_print(print, dynapin_config));
+        CHECK(dynapin_config.pull_gcode.x_front == Catch::Approx(20.));
+        CHECK_FALSE(DynaPin::pin_collides_with_model(print, dynapin_config, {0, 0}));
+    }
+}
+
 SCENARIO("Print: Automatic DynaPin collision check covers the full pull path", "[Print][DynaPin]") {
-    GIVEN("A model in the pin pull path but outside the pin body X range") {
+    GIVEN("A model inside the blocker pull-path range") {
         ResourcesDirGuard resources_guard(test_resources_dir());
         Print print;
         Model model;
@@ -392,12 +572,13 @@ SCENARIO("Print: Automatic DynaPin collision check covers the full pull path", "
         print.apply(model, config);
         print.validate();
         print.set_status_silent();
-        print.process();
+        std::vector<DynaPin::SupportSlab> slabs;
+        REQUIRE(print.generate_normal_support_geometry_only(slabs, {}));
 
         DynaPin::Config dynapin_config;
         REQUIRE(DynaPin::load_config_for_print(print, dynapin_config));
 
-        THEN("The pin is rejected because its pull path intersects the model") {
+        THEN("The blocker collision is handled without rejecting the candidate Print") {
             CHECK(DynaPin::pin_collides_with_model(print, dynapin_config, {0, 0}));
         }
     }

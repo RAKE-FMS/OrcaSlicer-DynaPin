@@ -5,6 +5,8 @@
 #include <locale>
 #include <utility>
 #include <functional>
+#include <optional>
+#include <cstdint>
 #include <type_traits>
 #include <system_error>
 #include <regex>
@@ -93,6 +95,18 @@ extern std::string log_memory_info(bool ignore_loglevel = false);
 extern void disable_multi_threading();
 // Returns the size of physical memory (RAM) in bytes.
 extern size_t total_physical_memory();
+
+struct SystemResourceSample
+{
+    uint64_t total_memory_bytes = 0;
+    uint64_t available_memory_bytes = 0;
+    uint64_t process_resident_bytes = 0;
+    double process_cpu_seconds = 0.;
+};
+
+// Returns numeric, current resource usage. An unavailable metric invalidates
+// the sample so callers can use a conservative fallback.
+extern std::optional<SystemResourceSample> sample_system_resources();
 
 // Set a path with GUI resource files.
 void set_var_dir(const std::string &path);

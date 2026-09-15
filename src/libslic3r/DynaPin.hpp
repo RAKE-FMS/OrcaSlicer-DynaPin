@@ -4,6 +4,7 @@
 #include "ExPolygon.hpp"
 
 #include <string>
+#include <optional>
 #include <vector>
 
 namespace Slic3r {
@@ -139,6 +140,10 @@ std::vector<BlockerBox> selected_blocker_boxes(const Print& print);
 std::string             pull_gcode_for_pin(const Config& config, const Pin& pin);
 double                  pin_y(const Config& config, const Pin& pin);
 BlockerZRange           blocker_z_range(const Config& config, const Pin& pin);
+
+// The support generator and G-code writer must use the same stage override.
+// 0 = normal support, 1 = landing surfaces, 2 = full DynaPin support/pulls.
+int                     effective_debug_stage(const Print& print);
 
 } // namespace DynaPin
 } // namespace Slic3r

@@ -17,6 +17,7 @@
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "Jobs/Job.hpp"
 #include "Jobs/Worker.hpp"
+#include "Jobs/DynaPinPlacementJob.hpp"
 #include "Search.hpp"
 #include "PartPlate.hpp"
 #include "GUI_App.hpp"
@@ -502,7 +503,7 @@ public:
     void reload_all_from_disk();
     bool has_toolpaths_to_export() const;
     void export_toolpaths_to_obj() const;
-    void reslice();
+    void reslice(bool force_dynapin_placement = false);
     void record_slice_preset(std::string action);
     void reslice_SLA_supports(const ModelObject &object, bool postpone_error_messages = false);
     void reslice_SLA_hollowing(const ModelObject &object, bool postpone_error_messages = false);
@@ -610,6 +611,15 @@ public:
     wxWindow* get_select_machine_dialog();
 
     void arrange();
+    // Build a UI-thread snapshot for the selected single instance and start
+    // the background placement search when all DynaPin eligibility gates pass.
+    bool start_dynapin_placement();
+    // Start a DynaPin placement search from a fully prepared snapshot.  The
+    // snapshot/evaluator are built on the UI thread; the apply callback runs
+    // in finalize() on the UI thread after the worker completes.
+    bool start_dynapin_placement(DynaPinPlacementSnapshot snapshot,
+                                 DynaPinPlacementJob::ApplyCallback apply = {},
+                                 DynaPinPlacementJob::CompletionCallback completion = {});
     void orient();
     void find_new_position(const ModelInstancePtrs  &instances);
     //BBS: add job state related functions

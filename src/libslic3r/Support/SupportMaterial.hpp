@@ -10,6 +10,10 @@
 #include "../DynaPin.hpp"
 namespace Slic3r {
 
+namespace DynaPin {
+struct SupportSlab;
+}
+
 class PrintObject;
 class PrintConfig;
 class PrintObjectConfig;
@@ -42,6 +46,9 @@ public:
     std::pair<std::vector<DynaPin::Pin>, std::vector<DynaPin::Pin>> detect_dynapin_pins(
         const PrintObject &object, const DynaPin::Config &config, const std::vector<DynaPin::Pin> &candidates,
         const std::vector<DynaPin::Pin> &colliding) const;
+
+    // Generate Normal support regions without emitting support toolpaths.
+    void generate_geometry_only(PrintObject &object, std::vector<DynaPin::SupportSlab> &slabs);
 
 private:
 	std::vector<Polygons> buildplate_covered(const PrintObject &object) const;
@@ -103,6 +110,9 @@ private:
 	SlicingParameters	     m_slicing_params;
 	// Various precomputed support parameters to be shared with external functions.
 	SupportParameters   	 m_support_params;
+
+    bool                               m_geometry_only = false;
+    std::vector<DynaPin::SupportSlab> *m_geometry_slabs = nullptr;
 };
 
 } // namespace Slic3r

@@ -264,6 +264,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Jobs/ArrangeJob.hpp
     GUI/Jobs/BindJob.cpp
     GUI/Jobs/BindJob.hpp
+    GUI/Jobs/DynaPinPlacementJob.cpp
+    GUI/Jobs/DynaPinPlacementJob.hpp
     GUI/Jobs/BoostThreadWorker.cpp
     GUI/Jobs/BoostThreadWorker.hpp
     GUI/Jobs/BusyCursorJob.hpp

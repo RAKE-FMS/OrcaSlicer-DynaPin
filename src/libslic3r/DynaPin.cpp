@@ -16,6 +16,7 @@
 #include <cctype>
 #include <cmath>
 #include <iomanip>
+#include <cstdlib>
 #include <set>
 #include <sstream>
 
@@ -64,6 +65,21 @@ BlockerZRange blocker_z_range(const Config& config, const Pin& pin)
 {
     const double z_max = config.support_origin_z + double(pin.row) * config.row_pitch_z;
     return {z_max - config.blocker_height_z, z_max};
+}
+
+int effective_debug_stage(const Print& print)
+{
+    int stage = print.config().dynapin_debug_stage.value;
+    if (const char *override_stage = std::getenv("DYNAPIN_DEBUG_STAGE")) {
+        try {
+            stage = std::stoi(override_stage);
+        } catch (...) {
+            // Keep the configured value when an environment override is not an
+            // integer.  This mirrors the permissive handling of other debug
+            // configuration values.
+        }
+    }
+    return std::max(0, std::min(2, stage));
 }
 
 static double pull_y(const Config& config, const Pin& pin)
@@ -418,7 +434,7 @@ std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
 {
     std::vector<Polygons> out(object.layer_count());
     const Print&          print = *object.print();
-    if (!print.config().enable_dynapin_support_optimization.value)
+    if (!print.config().enable_dynapin_support_optimization.value || effective_debug_stage(print) < 2)
         return out;
 
     Config      config;
@@ -452,7 +468,7 @@ std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject& objec
 {
     std::vector<LocalBlocker> out;
     const Print&              print = *object.print();
-    if (!print.config().enable_dynapin_support_optimization.value)
+    if (!print.config().enable_dynapin_support_optimization.value || effective_debug_stage(print) < 2)
         return out;
 
     Config      config;
@@ -473,7 +489,7 @@ std::vector<VirtualSupportSurface> pin_top_surfaces_for_object(const PrintObject
 {
     std::vector<VirtualSupportSurface> out;
     const Print&                       print = *object.print();
-    if (!print.config().enable_dynapin_support_optimization.value)
+    if (!print.config().enable_dynapin_support_optimization.value || effective_debug_stage(print) < 1)
         return out;
 
     Config      config;
@@ -493,7 +509,7 @@ std::vector<VirtualSupportSurface> pin_top_surfaces_for_object(const PrintObject
 std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
 {
     std::vector<BlockerBox> out;
-    if (!print.config().enable_dynapin_support_optimization.value)
+    if (!print.config().enable_dynapin_support_optimization.value || effective_debug_stage(print) < 1)
         return out;
 
     Config      config;

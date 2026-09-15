@@ -255,6 +255,8 @@ set(lisbslic3r_sources
     GCode/WipeTower.hpp
     DynaPin.cpp
     DynaPin.hpp
+    DynaPinPlacement.cpp
+    DynaPinPlacement.hpp
     GCodeWriter.cpp
     GCodeWriter.hpp
     Geometry/ArcWelder.hpp
