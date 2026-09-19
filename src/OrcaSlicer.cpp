@@ -54,6 +54,7 @@ using namespace nlohmann;
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Platform.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/SliceStatisticsLog.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Format/AMF.hpp"
@@ -6182,6 +6183,13 @@ int CLI::run(int argc, char **argv)
                                         record_exit_reson(outfile_dir, CLI_SLICING_TIME_EXCEEDS_LIMIT, index+1, cli_errors[CLI_SLICING_TIME_EXCEEDS_LIMIT], sliced_info);
                                         flush_and_exit(CLI_SLICING_TIME_EXCEEDS_LIMIT);
                                     }
+                                }
+                                if (printer_technology == ptFFF) {
+                                    if (gcode_result == nullptr)
+                                        throw std::runtime_error("G-code result is unavailable for slice statistics");
+                                    const auto statistics = make_slice_statistics_log(*gcode_result, print_fff->print_statistics(), index + 1, false);
+                                    write_slice_statistics_sidecar(outfile, statistics);
+                                    boost::nowide::cerr << "slice_statistics " << statistics.dump() << std::endl;
                                 }
                                 sliced_info.sliced_plates.push_back(sliced_plate_info);
                             } catch (const std::exception &ex) {

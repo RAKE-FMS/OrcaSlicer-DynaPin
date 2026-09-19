@@ -18,6 +18,7 @@
 // Print now includes tbb, and tbb includes Windows. This breaks compilation of wxWidgets if included before wx.
 #include "libslic3r/Print.hpp"
 #include "libslic3r/SLAPrint.hpp"
+#include "libslic3r/SliceStatisticsLog.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/GCode/PostProcessor.hpp"
 #include "libslic3r/Format/SL1.hpp"
@@ -786,6 +787,28 @@ bool BackgroundSlicingProcess::invalidate_all_steps()
 	return m_step_state.invalidate_all([this](){ this->stop_internal(); });
 }
 
+const nlohmann::ordered_json& BackgroundSlicingProcess::current_slice_statistics()
+{
+    if (m_fff_print == nullptr || m_gcode_result == nullptr || m_current_plate == nullptr)
+        throw Slic3r::ExportError("Slice statistics are unavailable for the current plate.");
+    if (m_slice_statistics.is_null() || m_slice_statistics_result_id != m_gcode_result->id) {
+        const bool imperial_units = wxGetApp().app_config->get("use_inches") == "1";
+        m_slice_statistics = make_slice_statistics_log(*m_gcode_result, m_fff_print->print_statistics(), m_current_plate->get_index() + 1,
+                                                       imperial_units);
+        m_slice_statistics_result_id = m_gcode_result->id;
+    }
+    return m_slice_statistics;
+}
+
+void BackgroundSlicingProcess::write_slice_statistics_for_export(const std::string& export_path)
+{
+    try {
+        write_slice_statistics_sidecar(export_path, current_slice_statistics());
+    } catch (const std::exception& error) {
+        throw Slic3r::ExportError(std::string("Failed to save slice statistics next to G-code: ") + error.what());
+    }
+}
+
 // G-code is generated in m_temp_output_path.
 // Optionally run a post-processing script on a copy of m_temp_output_path.
 // Copy the final G-code to target location (possibly a SD card, if it is a removable media, then verify that the file was written without an error).
@@ -848,6 +871,7 @@ void BackgroundSlicingProcess::finalize_gcode()
 		break;
 	}
 
+	write_slice_statistics_for_export(export_path);
 	m_print->set_status(100, GUI::format(_L("G-code file exported to %1%"), export_path));
 }
 
@@ -895,15 +919,15 @@ void BackgroundSlicingProcess::export_gcode()
 		break;
 	}
 
+	// BBS: to be checked. Whether use export_path or output_path.
+	gcode_add_line_number(export_path, m_fff_print->full_print_config());
+	write_slice_statistics_for_export(export_path);
+
 	// BBS
 	auto evt = new wxCommandEvent(m_event_export_finished_id, GUI::wxGetApp().mainframe->m_plater->GetId());
 	wxString output_gcode_str = wxString::FromUTF8(export_path.c_str(), export_path.length());
 	evt->SetString(output_gcode_str);
 	wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt);
-
-	// BBS: to be checked. Whether use export_path or output_path.
-	gcode_add_line_number(export_path, m_fff_print->full_print_config());
-
 }
 
 // A print host upload job has been scheduled, enqueue it to the printhost job queue

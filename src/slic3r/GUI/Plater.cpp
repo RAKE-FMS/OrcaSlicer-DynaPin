@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <algorithm>
+#include <exception>
 #include <numeric>
 #include <limits>
 #include <vector>
@@ -63,6 +64,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SLAPrint.hpp"
+#include "libslic3r/SliceStatisticsLog.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/ClipperUtils.hpp"
@@ -4253,6 +4255,7 @@ struct Plater::priv
     //BBS: add a flag to ignore cancel event
     bool m_ignore_event{false};
     bool m_slice_all{false};
+    unsigned int m_last_logged_slice_result_id{0};
     bool m_is_slicing {false};
     bool auto_reslice_pending {false};
     bool auto_reslice_after_cancel {false};
@@ -9588,6 +9591,22 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     //BBS: set the current plater's slice result to valid
     if (!this->background_process.empty())
         this->background_process.get_current_plate()->update_slice_result_valid_state(evt.success());
+
+    // Record each completed FFF result once, independently of preview reloads or file export.
+    if (evt.success() && this->printer_technology == ptFFF && !this->background_process.empty()) {
+        PartPlate *sliced_plate = this->background_process.get_current_plate();
+        GCodeProcessorResult *result = this->background_process.get_current_gcode_result();
+        const Print *print = this->background_process.fff_print();
+        if (sliced_plate != nullptr && print != nullptr &&
+            should_log_slice_statistics(evt.success(), this->printer_technology == ptFFF, result, m_last_logged_slice_result_id)) {
+            try {
+                BOOST_LOG_TRIVIAL(warning) << "slice_statistics " << this->background_process.current_slice_statistics().dump();
+                m_last_logged_slice_result_id = result->id;
+            } catch (const std::exception &error) {
+                BOOST_LOG_TRIVIAL(error) << "Could not format slice statistics: " << error.what();
+            }
+        }
+    }
 
     //BBS: update the action button according to the current plate's status
     bool ready_to_slice = !this->partplate_list.get_curr_plate()->is_slice_result_valid();
