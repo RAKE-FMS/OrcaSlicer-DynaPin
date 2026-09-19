@@ -362,6 +362,8 @@ set(lisbslic3r_sources
     PrintConfig.hpp
     Print.cpp
     Print.hpp
+    SliceStatisticsLog.cpp
+    SliceStatisticsLog.hpp
     PrintObject.cpp
     PrintObjectSlice.cpp
     PrintRegion.cpp

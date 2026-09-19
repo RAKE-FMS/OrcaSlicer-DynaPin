@@ -6,6 +6,7 @@
 #include <mutex>
 
 #include <boost/thread.hpp>
+#include <nlohmann/json.hpp>
 
 #include <wx/event.h>
 
@@ -95,6 +96,7 @@ public:
 	void set_current_plate(GUI::PartPlate* plate) { m_current_plate = plate; }
 	GUI::PartPlate* get_current_plate() { return m_current_plate; }
 	GCodeProcessorResult* get_current_gcode_result() { return m_gcode_result;}
+	const nlohmann::ordered_json& current_slice_statistics();
 
 	// The following wxCommandEvent will be sent to the UI thread / Plater window, when the slicing is finished
 	// and the background processing will transition into G-code export.
@@ -236,6 +238,8 @@ private:
 	SLAPrint 				   *m_sla_print			 = nullptr;
 	// Data structure, to which the G-code export writes its annotations.
 	GCodeProcessorResult     *m_gcode_result 		 = nullptr;
+    unsigned int              m_slice_statistics_result_id = 0;
+    nlohmann::ordered_json    m_slice_statistics;
 	// Callback function, used to write thumbnails into gcode.
 	ThumbnailsGeneratorCallback m_thumbnail_cb 	     = nullptr;
 	SL1Archive                  m_sla_archive;
@@ -288,6 +292,7 @@ private:
     void                throw_if_canceled() const { if (m_print->canceled()) throw CanceledException(); }
 	void				finalize_gcode();
 	void				export_gcode();
+    void                write_slice_statistics_for_export(const std::string& export_path);
     void                prepare_upload();
     // To be executed at the background thread.
 	ThumbnailsList		render_thumbnails(const ThumbnailsParams &params);

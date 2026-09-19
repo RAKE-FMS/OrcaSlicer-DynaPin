@@ -12,6 +12,7 @@ add_executable(${_TEST_NAME}_tests
     test_elephant_foot_compensation.cpp
     test_dynapin_preview.cpp
     test_dynapin_placement.cpp
+    test_slice_statistics_log.cpp
     test_geometry.cpp
     test_placeholder_parser.cpp
     test_polygon.cpp
