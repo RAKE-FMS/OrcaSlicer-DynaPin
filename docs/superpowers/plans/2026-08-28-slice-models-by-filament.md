@@ -1,8 +1,11 @@
 # Batch-slice model 3MF files by filament Implementation Plan
 
+> **履歴文書（旧仕様）:** この文書の4材料プロファイル上書き、`models/outputs/`、ルート直下のみの探索は現在の実装と異なります。現行の使い方は [DynaPin最小G-codeの作成手順](../../dynapin-min-gcode-extraction.ja.md) を参照してください。
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a Python standard-library command that slices each root-level `models/*.3mf` with the four Bambu filament presets and writes one G-code file per material under `models/outputs/<model>/`.
+**Goal:** Add a Python standard-library command that slices each root-level `models/*.3mf` with the four filament presets and writes one G-code file per material under `models/outputs/<model>/`.
 
 **Architecture:** Keep the batch orchestration in `scripts/slice_models_by_filament.py`. Separate model discovery, profile discovery/matching, slicer resolution, command construction, and atomic publication into small functions so they can be tested without a real OrcaSlicer process. Use the 3MF as the source of every setting except the filament profile supplied through `--load-filaments`.
 
@@ -71,7 +74,7 @@ class BatchSliceTests(unittest.TestCase):
             self.write_profile(root, "Bambu PLA Basic @base.json", "Bambu PLA Basic @base")
             self.write_profile(root, "Bambu ABS @System.json", "Bambu ABS @System")
             self.write_profile(root, "Bambu PETG Basic @System.json", "Bambu PETG Basic @System")
-            self.write_profile(root, "Bambu TPU-AMS @System.json", "Bambu TPU-AMS @System")
+            self.write_profile(root, "Generic TPU @System.json", "Generic TPU @System")
 
             profiles = batch.discover_profiles([root])
             resolved, errors = batch.resolve_filament_profiles(profiles, batch.FILAMENT_NAMES)
@@ -86,11 +89,11 @@ class BatchSliceTests(unittest.TestCase):
             self.write_profile(root, "two.json", "Bambu ABS")
 
             profiles = batch.discover_profiles([root])
-            resolved, errors = batch.resolve_filament_profiles(profiles, ["Bambu ABS", "Bambu TPU-AMS"])
+            resolved, errors = batch.resolve_filament_profiles(profiles, ["Bambu ABS", "Generic TPU"])
 
             self.assertNotIn("Bambu ABS", resolved)
             self.assertIn("Bambu ABS", errors)
-            self.assertIn("Bambu TPU-AMS", errors)
+            self.assertIn("Generic TPU", errors)
 ```
 
 - [ ] **Step 3: Run the focused tests and verify they fail because the script API is absent**
@@ -115,7 +118,7 @@ FILAMENT_NAMES = (
     "Bambu PLA Basic",
     "Bambu ABS",
     "Bambu PETG Basic",
-    "Bambu TPU-AMS",
+    "Generic TPU",
 )
 
 
@@ -207,7 +210,7 @@ def resolve_filament_profiles(profiles, requested_names):
 
 - [ ] **Step 4: Implement platform-aware profile roots and slicer lookup**
 
-Use `ORCASLICER_DATA_DIR` when set, otherwise macOS `~/Library/Application Support/OrcaSlicer` or Windows `%APPDATA%/OrcaSlicer`. Resolve an explicit `--slicer`, then `orca-slicer`/`OrcaSlicer` on `PATH`, then conventional application paths. Keep all command arguments as a list so spaces in filenames work on both platforms.
+Use `ORCASLICER_DATA_DIR` when set, otherwise macOS `~/Library/Application Support/OrcaSlicer` or Windows `%APPDATA%/OrcaSlicer`. Resolve an explicit `--slicer`, then the newest repository-local Release build, then `orca-slicer`/`OrcaSlicer` on `PATH`, then conventional application paths. Exclude repository install-prefix copies such as `build/arm64/OrcaSlicer/` from automatic build discovery because their bundled resources may be stale. Keep all command arguments as a list so spaces in filenames work on both platforms.
 
 - [ ] **Step 5: Run the focused tests and verify they pass**
 
@@ -282,7 +285,7 @@ Support `--repo-root PATH` and `--slicer PATH`; default the repository root to `
 
 - [ ] **Step 2: Implement `main` with preflight validation and continue-on-error behavior**
 
-Preflight all four Bambu profile names and the slicer before starting. For every model/material pair, call `slice_one`, print the selected profile and result, retain diagnostics for failures, and continue to the next pair. Return `0` only when all `len(models) * 4` jobs succeed; return `2` for preflight/input errors and `1` for slice failures.
+Preflight all four filament profile names and the slicer before starting. For every model/material pair, call `slice_one`, print the selected profile and result, retain diagnostics for failures, and continue to the next pair. Return `0` only when all `len(models) * 4` jobs succeed; return `2` for preflight/input errors and `1` for slice failures.
 
 - [ ] **Step 3: Add a CLI integration test with a fake runner**
 
@@ -310,7 +313,7 @@ Expected: all tests PASS.
 
 Run: `git diff -- scripts/slice_models_by_filament.py tests/scripts/test_slice_models_by_filament.py docs/superpowers/specs/2026-08-28-slice-models-by-filament-design.md`
 
-Confirm that only root-level `models/*.3mf` files are selected, all four names are exactly `Bambu PLA Basic`, `Bambu ABS`, `Bambu PETG Basic`, and `Bambu TPU-AMS`, and no DynaPin or vendored files are changed.
+Confirm that only root-level `models/*.3mf` files are selected, all four names are exactly `Bambu PLA Basic`, `Bambu ABS`, `Bambu PETG Basic`, and `Generic TPU`, and no DynaPin or vendored files are changed.
 
 - [ ] **Step 2: Run a real CLI dry-run when a compatible binary and all four profiles are available**
 

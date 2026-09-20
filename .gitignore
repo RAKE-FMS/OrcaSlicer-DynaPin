@@ -50,3 +50,5 @@ docs/plans/
 docs/research/
 models/
 __pycache__/
+old-models/
+outputs/

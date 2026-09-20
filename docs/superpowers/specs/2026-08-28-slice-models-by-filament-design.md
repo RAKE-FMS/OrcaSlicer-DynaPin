@@ -1,5 +1,8 @@
 # Batch-slice model 3MF files by filament
 
+> **履歴文書（旧仕様）:** この文書の4材料プロファイル上書き、`models/outputs/`、ルート直下のみの探索は現在の実装と異なります。現行の使い方は [DynaPin最小G-codeの作成手順](../../dynapin-min-gcode-extraction.ja.md) を参照してください。
+
+
 ## Goal
 
 Provide one Windows/macOS-compatible command file that batch-slices every `.3mf` file directly under `models/` four times, once for each filament preset name:
@@ -7,7 +10,7 @@ Provide one Windows/macOS-compatible command file that batch-slices every `.3mf`
 - `Bambu PLA Basic`
 - `Bambu ABS`
 - `Bambu PETG Basic`
-- `Bambu TPU-AMS`
+- `Generic TPU`
 
 For each input `models/<model>.3mf`, write the successful result to:
 
@@ -41,8 +44,11 @@ For each requested filament, an exact profile-name match is preferred. The commo
 The slicer executable is resolved in this order:
 
 1. `--slicer` when supplied;
-2. `orca-slicer` / `OrcaSlicer` available on `PATH`;
-3. conventional macOS application-bundle and Windows installation paths.
+2. the newest repository-local Release build (`build/**/src/Release/...` or an equivalent `Release` layout);
+3. `orca-slicer` / `OrcaSlicer` available on `PATH`;
+4. conventional macOS application-bundle and Windows installation paths.
+
+Repository-local install-prefix copies such as macOS `build/arm64/OrcaSlicer/` are excluded from automatic build discovery because they may contain stale binaries or bundled resources.
 
 The script validates all required profiles and the executable before beginning work.
 
