@@ -34,7 +34,15 @@ cd C:\path\to\OrcaSlicer
 uv run python scripts/slice_models_by_filament.py
 ```
 
-このスクリプトは`models/`以下の3MFを再帰的に検索し、各ファイルを1回だけスライスします。`old-models/`は対象外です。3MFと同じ相対パスで、リポジトリ直下の`outputs/`にG-codeを作成します。スクリプト名には`by_filament`が残っていますが、フィラメントプロファイルは別途設定せず、3MFに保存された設定を使用します。
+このスクリプトは`models/`以下の3MFを再帰的に検索し、各ファイルを1回だけスライスします。`old-models/`は対象外です。3MFと同じ相対パスで、リポジトリ直下の`outputs/`にG-codeとスライス統計JSONを作成します。スクリプト名には`by_filament`が残っていますが、フィラメントプロファイルは別途設定せず、3MFに保存された設定を使用します。
+
+3MFでDynaPinサポートと配置最適化が有効な場合、CLIはGUIと同じ配置探索APIを同期実行します。改善候補が見つかった場合だけ実行中のモデルへ回転・Y移動を適用し、再検証後にG-codeを生成します。入力3MFは変更しません。成功時には各入力の`OK`の下に、例えば次の結果が表示されます。
+
+```text
+dynapin_placement improved plate=1 rotation_deg=90 delta_y=4 support_volume_mm3=123
+```
+
+`skipped`は対象が複数あるなど探索条件を満たさない場合、`unchanged`は有意な改善がなかった場合、`fallback`は候補を安全に適用できなかった場合を表します。どの場合も元配置で通常のスライスを続けます。
 
 ```text
 models/part/Bambu PLA Basic.3mf → outputs/part/Bambu PLA Basic.gcode
@@ -42,7 +50,15 @@ models/part/Bambu ABS.3mf       → outputs/part/Bambu ABS.gcode
 models/top.3mf                  → outputs/top.gcode
 ```
 
-出力できるのは単一プレートの3MFです。OrcaSlicerが複数プレートのG-codeを生成した場合はその入力を失敗として報告し、同名の既存G-codeは置き換えません。ほかの3MFの処理は続行します。
+各G-codeと同じディレクトリには、印刷時間、フィラメント使用量、重量、コスト、造形種別ごとの内訳を含むsidecar JSONも生成されます。
+
+```text
+outputs/part/Bambu PLA Basic.gcode.slice_statistics.json
+outputs/part/Bambu ABS.gcode.slice_statistics.json
+outputs/top.gcode.slice_statistics.json
+```
+
+出力できるのは単一プレートの3MFです。OrcaSlicerが複数プレートのG-codeを生成した場合や統計JSONが欠落・破損している場合は、その入力を失敗として報告し、同名の既存G-codeと統計JSONは置き換えません。ほかの3MFの処理は続行します。
 
 ## 2. DynaPin用の最小G-codeを作成する
 

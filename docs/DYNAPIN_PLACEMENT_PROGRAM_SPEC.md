@@ -1,23 +1,26 @@
 # DynaPin 配置最適化のクラス設計・プログラム仕様
 
-対象: 2026-09-14 時点の作業ツリー。探索の目的・候補数・評価式・GUI上の振る舞いは [配置最適化の動作仕様](DYNAPIN_PLACEMENT_SPEC.md) にまとめる。本書は C++ の型、API、所有関係、呼び出し順、変更時の境界を扱う。
+対象: 2026-09-21 時点の作業ツリー。探索の目的・候補数・評価式・GUI上の振る舞いは [配置最適化の動作仕様](DYNAPIN_PLACEMENT_SPEC.md) にまとめる。本書は C++ の型、API、所有関係、呼び出し順、変更時の境界を扱う。
 
 ## 設計の骨格
 
-探索本体を表す `PlacementOptimizer` のようなクラスは**存在しない**。`Slic3r::DynaPin` 名前空間の値型・関数・`std::function` callback が探索を構成する。状態を持つ実クラスは GUI の `Slic3r::GUI::DynaPinPlacementJob` で、ジョブ開始・ライブモデルへの反映は `Plater` が担当する。この分割により探索ロジックのテストでは wxWidgets の画面を生成しない。
+探索本体を表す状態付きクラスは置かず、`Slic3r::DynaPin` 名前空間の不変な `PlacementTask` と関数で準備・実行・適用を構成する。GUI の `DynaPinPlacementJob` は非同期実行の薄いアダプターであり、CLI は同じAPIを同期実行する。GUIのUndoや再スライス制御、CLIのプレートループや検証は各呼び出し側に残す。
 
 ```mermaid
 flowchart LR
-  P[GUI::Plater] -->|所有・起動| J[GUI::DynaPinPlacementJob]
-  P -->|作成| S[GUI::DynaPinPlacementSnapshot]
-  S --> I[DynaPin::PlacementSearchInput]
-  S --> C[DynaPin::PlacementSceneSnapshot]
-  S --> E[DynaPin::PlacementEligibility]
-  J -->|process: worker| O[DynaPin::optimize_placement]
+  P[GUI::Plater] --> A[DynaPin::prepare_placement_task]
+  C[CLI plate loop] --> A
+  A --> T[DynaPin::PlacementTask]
+  T --> J[GUI::DynaPinPlacementJob]
+  T --> R[DynaPin::run_placement_task]
+  J -->|worker| R
+  R --> O[DynaPin::optimize_placement]
   O -->|callback| V[evaluate_scene_candidate / evaluate_scene_angle_group]
   V -->|一時 Model・Print| G[Print のサポート幾何専用生成]
-  O --> R[DynaPin::PlacementResult]
-  J -->|finalize: UI thread| P
+  O --> PR[DynaPin::PlacementResult]
+  PR --> AP[DynaPin::apply_placement_result]
+  AP --> P
+  AP --> C
 ```
 
 ## 型と所有権
@@ -31,7 +34,9 @@ flowchart LR
 | `DynaPin::PlacementSceneSnapshot` | `shared_ptr<const Model>`、`DynamicPrintConfig`、対象 ID、初期変換、中心、プレート形状・高さ・原点・番号 | GUI で作成したモデルのコピーを所有する。`const Model` 共有ポインタだが、候補評価時にはさらに `Model` を複製する。変更中の `Plater` を worker から参照しない。 |
 | `DynaPin::PlacementSearchInput` | pitch、Y 範囲、現在姿勢・体積、範囲計算/角度評価 callback、並列設定、資源 probe | 探索を駆動する入力。callback の capture は呼び出し終了まで有効であること。GUI の `delta_y_range_for_rotation` は `scene` を値で capture する。 |
 | `DynaPin::PlacementResult` | `status`、`candidate`、`volume_mm3`、評価回数、警告 | `Improved` の場合だけ候補をライブモデルへ適用できる。`Unchanged` は現在姿勢を返す。失敗時の候補・体積を有効値として扱わない。 |
-| `GUI::DynaPinPlacementSnapshot` / `DynaPinPlacementJob.hpp` | 上記 eligibility/search/scene と任意の単体 evaluator、対象 ID、`input_generation` | ジョブに値渡しされて所有される。`scene.target_instance_id` と `target_instance_id` は同じ対象を指す想定。世代値は GUI 適用時の鮮度確認に使う。 |
+| `DynaPin::PlacementTask` | eligibility、search、scene | GUI型に依存しない共通の不変入力。準備成功時だけ `PlacementPreparationResult::task` に入る。 |
+| `DynaPin::PlacementPreparationResult` / `PlacementApplyResult` | taskまたは理由、適用有無または理由 | 例外で表さない通常の不適格・古い結果を呼び出し側へ返す。 |
+| `GUI::DynaPinPlacementSnapshot` / `DynaPinPlacementJob.hpp` | 共通 `PlacementTask` と `input_generation` | GUI固有の世代値だけを追加する。探索条件や対象IDは重複保持しない。 |
 | `GUI::DynaPinPlacementJob` | snapshot、apply/completion callback、result、applied フラグ | `Job` の派生クラス。`process()` が探索結果を設定し、`finalize()` が UI thread の適用 callback を呼ぶ。apply callback が安全性検証を所有する。 |
 
 `Slic3r::DynaPin` は幾何と探索の名前空間として整合している。`Slic3r::GUI` に置かれたジョブと GUI snapshot も適切。`PlacementSceneSnapshot` と `DynaPinPlacementSnapshot` は前者が評価可能な不変シーン、後者がジョブ制御用の包みであり、似た名前だが別の責務を持つ。
@@ -56,16 +61,20 @@ flowchart LR
 
 `optimize_placement(input, evaluator, cancel, progress, progress_stage)` は現在姿勢を単体 evaluator で最初に測る。`input.angle_evaluator` があれば残りの候補を角度別に評価し、なければ単体 evaluator で評価する。戻り値は常に `PlacementResult`。`cancel` は polling 型で、進捗 callback はパーセント、段階 callback は `PlacementProgressStage` を受ける。並列評価中の callback は worker 側から呼ばれるため、GUI へ渡す実装はスレッド安全でなければならない。`DynaPinPlacementJob` は `Ctl::update_status()` へ橋渡しする。
 
+`prepare_placement_task()` は対象解決、DynaPin設定と適格性の検証、scene/search構築を一度だけ行う。対象IDが指定された場合はその印刷可能インスタンスを使い、未指定ならプレート上の印刷可能インスタンスが1個の場合だけ自動選択する。`run_placement_task()` はscene evaluatorを生成して同じ探索器を呼ぶ。`apply_placement_result()` は `Improved`、対象ID一致、初期変換一致を確認してから候補を適用し、bboxを無効化する。
+
 `PlacementResliceAction placement_reslice_action(...)` と `placement_job_should_continue_reslice(...)` は GUI の再スライス制御を純粋関数にした API。`Plater` に依存しないため単体テスト可能だが、ドメイン探索ではなく UI orchestration の責務を `libslic3r` に公開している。
 
 ## 実行時のシーケンスと変更可能な状態
 
-1. **UI thread / `Plater::reslice()`**: 現在プレートの `Print` を更新し、スライス結果がすでに有効か、一回限りのガードがあるか、worker が空いているかを判定する。
-2. **UI thread / `Plater::start_dynapin_placement()`**: 対象インスタンスと設定を確認し、`PlacementSceneSnapshot` と GUI snapshot を作る。モデル・設定・初期変換・modified count をここで固定する。
-3. **worker / `DynaPinPlacementJob::process()`**: `PlacementEligibility::valid()` を再確認し、評価 callback を構築して `optimize_placement()` を実行する。ライブの `Plater`/`Model`/`Print` を変更しない。
+1. **UI thread / `Plater::reslice()`**: 現在プレートの `Print` を更新し、一回限りのガードとworker状態を判定する。
+2. **UI thread / `Plater::start_dynapin_placement()`**: 選択IDとプレート情報を `prepare_placement_task()` に渡し、共通taskとmodified countを固定する。
+3. **worker / `DynaPinPlacementJob::process()`**: `run_placement_task()` にキャンセルと進捗callbackを渡す。ライブの `Plater`/`Model`/`Print` を変更しない。
 4. **worker / 評価 API**: 候補ごとまたは角度群ごとに一時 `Model`/`Print` を変更する。`Print::prepare_slices_for_support_geometry()`、`Print::generate_normal_support_geometry_for_current_shift()`、`PrintObjectSupportMaterial::generate_geometry_only()` を通り、サポート幾何だけを採取する。`Print::update_dynapin_selection()` は候補姿勢に合わせて一時 `Print` のピン選択を更新する。
-5. **UI thread / `DynaPinPlacementJob::finalize()`**: `Improved` の時だけ apply callback を呼ぶ。`Plater` はプレート番号、modified count、object/instance ID、初期行列を照合してから Undo snapshot を取り、ライブインスタンスを変換する。結果が古ければ適用しない。
+5. **UI thread / `DynaPinPlacementJob::finalize()`**: `Plater` はプレート番号とmodified countを確認し、`apply_placement_result()` の適用直前callbackでUndo snapshotを取る。共通APIが対象IDと初期行列を照合する。
 6. **UI thread / completion callback**: 継続可能ならガード付きで `reslice()` を呼ぶ。ガードは次の `reslice()` の入口で消費され、最適化の再帰起動を防ぐ。
+
+CLIは最初の `Print::apply()` と検証後に対象未指定でtaskを準備し、同期探索する。改善時だけ共通適用APIを呼び、`Print::apply()` と検証をやり直す。再検証に失敗した場合は初期変換へ戻して再applyし、元配置でG-code生成を続ける。変更は実行中のplate modelだけに入り、入力3MFへ保存しない。
 
 ### 重要な境界
 
@@ -88,6 +97,7 @@ flowchart LR
 - サポート幾何専用の入口: `src/libslic3r/Print.cpp`、`PrintObject.cpp`、`Support/SupportMaterial.cpp`
 - ジョブ: `src/slic3r/GUI/Jobs/DynaPinPlacementJob.hpp/.cpp`
 - 起動・適用: `src/slic3r/GUI/Plater.cpp`
+- CLI同期実行・再検証: `src/OrcaSlicer.cpp`
 - 契約テスト: `tests/libslic3r/test_dynapin_placement.cpp`
 
 API または状態復元を変更する場合は、単体候補と角度群の評価一致、キャンセル時の非適用、古い snapshot の棄却、プレート座標の体積集計、メモリ制御、ガード付き再スライスを確認する。
