@@ -56,6 +56,7 @@ struct DeltaYInterval
 };
 
 struct PlacementSceneSnapshot;
+struct PlacementTask;
 using DeltaYRangeProvider = std::function<std::optional<DeltaYInterval>(double rotation_deg)>;
 using CandidateCompletedCallback = std::function<void(size_t candidate_index)>;
 using AngleGroupEvaluator = std::function<void(double                                 rotation_deg,
@@ -160,6 +161,12 @@ struct PlacementResult
     std::string        warning;
 };
 
+struct PlacementTarget
+{
+    ObjectID object_id;
+    ObjectID instance_id;
+};
+
 // Immutable input for a real placement evaluation.  The model and config are
 // copied on the UI thread and owned by the snapshot; each candidate evaluation
 // clones the model again before applying its transform, so the worker never
@@ -180,6 +187,25 @@ struct PlacementSceneSnapshot
     double                        printable_height = std::numeric_limits<double>::quiet_NaN();
     Vec3d                         plate_origin = Vec3d::Zero();
     int                           plate_index = 0;
+};
+
+struct PlacementTask
+{
+    PlacementEligibility   eligibility;
+    PlacementSearchInput   search;
+    PlacementSceneSnapshot scene;
+};
+
+struct PlacementPreparationResult
+{
+    std::optional<PlacementTask> task;
+    std::string                  warning;
+};
+
+struct PlacementApplyResult
+{
+    bool        applied = false;
+    std::string warning;
 };
 
 // The evaluator returns nullopt for a candidate rejected by bed or model
@@ -211,6 +237,24 @@ void evaluate_scene_angle_group(const PlacementSceneSnapshot          &scene,
 
 PlacementEvaluator  make_scene_evaluator(PlacementSceneSnapshot scene, const CancelCallback &cancel = {});
 AngleGroupEvaluator make_scene_angle_evaluator(PlacementSceneSnapshot scene, const CancelCallback &cancel = {});
+
+PlacementPreparationResult prepare_placement_task(const Model&                          model,
+                                                  const Print&                          print,
+                                                  const std::vector<Vec2d>&             printable_area,
+                                                  double                                printable_height,
+                                                  const Vec3d&                          plate_origin,
+                                                  int                                   plate_index,
+                                                  const std::optional<PlacementTarget>& preferred_target = {});
+
+PlacementResult run_placement_task(PlacementTask                task,
+                                   const CancelCallback&        cancel         = {},
+                                   const ProgressCallback&      progress       = {},
+                                   const ProgressStageCallback& progress_stage = {});
+
+PlacementApplyResult apply_placement_result(Model&                       model,
+                                            const PlacementTask&         task,
+                                            const PlacementResult&       result,
+                                            const std::function<void()>& before_apply = {});
 
 PlacementResult optimize_placement(const PlacementSearchInput &input,
                                    const PlacementEvaluator   &evaluator,

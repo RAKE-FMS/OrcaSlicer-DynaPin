@@ -577,6 +577,208 @@ AngleGroupEvaluator make_scene_angle_evaluator(PlacementSceneSnapshot scene, con
     };
 }
 
+static PlacementPreparationResult prepare_placement_task_impl(const Model&                          model,
+                                                              const Print&                          print,
+                                                              const std::vector<Vec2d>&             printable_area,
+                                                              double                                printable_height,
+                                                              const Vec3d&                          plate_origin,
+                                                              int                                   plate_index,
+                                                              const std::optional<PlacementTarget>& preferred_target)
+{
+    PlacementPreparationResult preparation;
+    const ModelObject*         target_object       = nullptr;
+    const ModelInstance*       target_instance     = nullptr;
+    const PrintObject*         target_print_object = nullptr;
+    size_t                     printable_instances = 0;
+
+    for (const PrintObject* print_object : print.objects()) {
+        if (print_object == nullptr || print_object->model_object() == nullptr)
+            continue;
+        for (const PrintInstance& print_instance : print_object->instances()) {
+            const ModelInstance* instance = print_instance.model_instance;
+            if (instance == nullptr || instance->get_object() == nullptr)
+                continue;
+            ++printable_instances;
+            const ModelObject* object    = instance->get_object();
+            const bool         requested = preferred_target && object->id() == preferred_target->object_id &&
+                                           instance->id() == preferred_target->instance_id;
+            if (requested || (!preferred_target && target_instance == nullptr)) {
+                target_object       = object;
+                target_instance     = instance;
+                target_print_object = print_object;
+            }
+        }
+    }
+
+    if (preferred_target) {
+        if (target_instance == nullptr) {
+            preparation.warning = "The requested DynaPin placement target is not printable on this plate";
+            return preparation;
+        }
+    } else if (printable_instances != 1 || target_instance == nullptr) {
+        preparation.warning = "DynaPin placement optimization requires exactly one printable instance";
+        return preparation;
+    }
+
+    DynaPin::Config dynapin_config;
+    if (!DynaPin::load_config_for_print(print, dynapin_config, &preparation.warning))
+        return preparation;
+
+    PlacementEligibility eligibility;
+    eligibility.dynapin_enabled   = print.config().enable_dynapin_support_optimization.value && DynaPin::effective_debug_stage(print) >= 1;
+    eligibility.placement_enabled = print.config().enable_dynapin_placement_optimization.value;
+    eligibility.automatic_pin_selection = !DynaPin::has_manual_selection(print);
+    eligibility.normal_support          = target_print_object != nullptr && target_print_object->has_support() &&
+                                          !is_tree(target_print_object->config().support_type.value);
+    eligibility.selected_instance_count = target_instance == nullptr ? 0 : 1;
+    if (!eligibility.valid(&preparation.warning))
+        return preparation;
+
+    const BoundingBoxf3 initial_bbox = target_object->instance_bounding_box(*target_instance, false);
+    if (!initial_bbox.defined) {
+        preparation.warning = "The DynaPin placement target has no valid bounding box";
+        return preparation;
+    }
+    if (printable_area.size() < 3 || !finite(printable_height)) {
+        preparation.warning = "The DynaPin placement build volume is invalid";
+        return preparation;
+    }
+
+    PlacementSceneSnapshot scene;
+    scene.model              = std::make_shared<Model>(model);
+    scene.config             = print.full_print_config();
+    scene.target_object_id   = target_object->id();
+    scene.target_instance_id = target_instance->id();
+    scene.initial_transform  = target_instance->get_matrix();
+    scene.world_center       = initial_bbox.center();
+    scene.printable_area     = printable_area;
+    scene.printable_height   = printable_height;
+    scene.plate_origin       = plate_origin;
+    scene.plate_index        = plate_index;
+
+    double bed_y_min = std::numeric_limits<double>::infinity();
+    double bed_y_max = -std::numeric_limits<double>::infinity();
+    for (const Vec2d& point : printable_area) {
+        bed_y_min = std::min(bed_y_min, point.y());
+        bed_y_max = std::max(bed_y_max, point.y());
+    }
+    const std::optional<DeltaYInterval> y_range = placement_delta_y_range_for_bbox(bed_y_min, bed_y_max, initial_bbox.min.y(),
+                                                                                   initial_bbox.max.y());
+    if (!y_range) {
+        preparation.warning = "The DynaPin placement target does not fit the printable Y range";
+        return preparation;
+    }
+
+    PlacementSearchInput search;
+    search.pitch_y                    = dynapin_config.col_pitch_y;
+    search.y_min                      = y_range->min;
+    search.y_max                      = y_range->max;
+    search.current_rotation_deg       = 0.;
+    search.current_delta_y            = 0.;
+    search.current_volume_mm3         = std::numeric_limits<double>::quiet_NaN();
+    search.angle_group_concurrency    = 0;
+    search.delta_y_range_for_rotation = [scene](double rotation_deg) { return placement_delta_y_range_for_scene(scene, rotation_deg); };
+
+    preparation.task = PlacementTask{eligibility, std::move(search), std::move(scene)};
+    return preparation;
+}
+
+PlacementPreparationResult prepare_placement_task(const Model&                          model,
+                                                  const Print&                          print,
+                                                  const std::vector<Vec2d>&             printable_area,
+                                                  double                                printable_height,
+                                                  const Vec3d&                          plate_origin,
+                                                  int                                   plate_index,
+                                                  const std::optional<PlacementTarget>& preferred_target)
+{
+    try {
+        return prepare_placement_task_impl(model, print, printable_area, printable_height, plate_origin, plate_index, preferred_target);
+    } catch (const std::bad_alloc&) {
+        return {{}, "Insufficient memory while preparing DynaPin placement optimization"};
+    } catch (const std::exception& error) {
+        return {{}, std::string("Could not prepare DynaPin placement optimization: ") + error.what()};
+    } catch (...) {
+        return {{}, "Could not prepare DynaPin placement optimization"};
+    }
+}
+
+PlacementResult run_placement_task(PlacementTask                task,
+                                   const CancelCallback&        cancel,
+                                   const ProgressCallback&      progress,
+                                   const ProgressStageCallback& progress_stage)
+{
+    try {
+        std::string eligibility_error;
+        if (!task.eligibility.valid(&eligibility_error)) {
+            PlacementResult result;
+            result.status  = PlacementStatus::InvalidConfig;
+            result.warning = std::move(eligibility_error);
+            return result;
+        }
+        if (!task.search.angle_evaluator)
+            task.search.angle_evaluator = make_scene_angle_evaluator(task.scene, cancel);
+        return optimize_placement(task.search, make_scene_evaluator(task.scene, cancel), cancel, progress, progress_stage);
+    } catch (const std::bad_alloc&) {
+        PlacementResult result;
+        result.status  = PlacementStatus::ResourceExhausted;
+        result.warning = "Insufficient memory during DynaPin placement optimization";
+        return result;
+    } catch (const std::exception& error) {
+        PlacementResult result;
+        result.status  = PlacementStatus::NoFeasiblePose;
+        result.warning = std::string("DynaPin placement optimization failed: ") + error.what();
+        return result;
+    } catch (...) {
+        PlacementResult result;
+        result.status  = PlacementStatus::NoFeasiblePose;
+        result.warning = "DynaPin placement optimization failed";
+        return result;
+    }
+}
+
+PlacementApplyResult apply_placement_result(Model&                       model,
+                                            const PlacementTask&         task,
+                                            const PlacementResult&       result,
+                                            const std::function<void()>& before_apply)
+{
+    PlacementApplyResult applied;
+    if (result.status != PlacementStatus::Improved) {
+        applied.warning = result.warning.empty() ? "DynaPin placement did not find a significant improvement" : result.warning;
+        return applied;
+    }
+
+    ModelObject*   target_object   = nullptr;
+    ModelInstance* target_instance = nullptr;
+    for (ModelObject* object : model.objects) {
+        if (object == nullptr || object->id() != task.scene.target_object_id)
+            continue;
+        target_object = object;
+        for (ModelInstance* instance : object->instances)
+            if (instance != nullptr && instance->id() == task.scene.target_instance_id) {
+                target_instance = instance;
+                break;
+            }
+        break;
+    }
+    if (target_object == nullptr || target_instance == nullptr) {
+        applied.warning = "The DynaPin placement target no longer exists";
+        return applied;
+    }
+    if (!target_instance->get_matrix().isApprox(task.scene.initial_transform, 1e-7)) {
+        applied.warning = "The DynaPin placement target changed while the search was running";
+        return applied;
+    }
+
+    const Geometry::Transformation candidate(candidate_transform(task.scene.initial_transform, task.scene.world_center,
+                                                                 result.candidate.rotation_deg, result.candidate.delta_y));
+    if (before_apply)
+        before_apply();
+    target_instance->set_transformation(candidate);
+    target_object->invalidate_bounding_box();
+    applied.applied = true;
+    return applied;
+}
+
 std::vector<SupportSlab> generate_normal_support_geometry(PrintObject &object)
 {
     std::vector<SupportSlab> slabs;

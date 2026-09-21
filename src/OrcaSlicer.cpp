@@ -47,6 +47,7 @@ using namespace nlohmann;
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/DynaPinPlacement.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/GCode/PostProcessor.hpp"
@@ -5998,6 +5999,84 @@ int CLI::run(int argc, char **argv)
                         }
                         else if (!warning.string.empty()) {
                             BOOST_LOG_TRIVIAL(warning) << "got warnings: "<< warning.string << std::endl;
+                        }
+
+                        if (new_print_config.opt_bool("enable_dynapin_support_optimization") &&
+                            new_print_config.opt_bool("enable_dynapin_placement_optimization") &&
+                            new_print_config.opt_int("dynapin_debug_stage") >= 1) {
+                            DynaPin::PlacementPreparationResult preparation = DynaPin::prepare_placement_task(model, *print_fff,
+                                                                                                              part_plate->get_shape(),
+                                                                                                              new_print_config.opt_float(
+                                                                                                                  "printable_height"),
+                                                                                                              part_plate->get_origin(),
+                                                                                                              index);
+                            if (!preparation.task) {
+                                boost::nowide::cout << "dynapin_placement skipped plate=" << index + 1 << " reason=" << preparation.warning
+                                                    << std::endl;
+                                BOOST_LOG_TRIVIAL(warning)
+                                    << "DynaPin placement skipped on plate " << index + 1 << ": " << preparation.warning;
+                            } else {
+                                DynaPin::PlacementTask   task   = std::move(*preparation.task);
+                                DynaPin::PlacementResult result = DynaPin::run_placement_task(task);
+                                if (result.status == DynaPin::PlacementStatus::Improved) {
+                                    const DynaPin::PlacementApplyResult applied = DynaPin::apply_placement_result(model, task, result);
+                                    if (applied.applied) {
+                                        print->apply(model, new_print_config);
+                                        print->set_no_check_flag(no_check);
+                                        print_fff->is_BBL_printer() = is_bbl_vendor_preset;
+                                        print_fff->set_check_multi_filaments_compatibility(!allow_mix_temp);
+
+                                        StringObjectException placement_warning;
+                                        const auto            placement_error = print->validate(&placement_warning);
+                                        if (placement_error.string.empty()) {
+                                            boost::nowide::cout << "dynapin_placement improved plate=" << index + 1
+                                                                << " rotation_deg=" << result.candidate.rotation_deg
+                                                                << " delta_y=" << result.candidate.delta_y
+                                                                << " support_volume_mm3=" << result.volume_mm3 << std::endl;
+                                        } else {
+                                            ModelObject*   object   = nullptr;
+                                            ModelInstance* instance = nullptr;
+                                            for (ModelObject* candidate_object : model.objects) {
+                                                if (candidate_object == nullptr || candidate_object->id() != task.scene.target_object_id)
+                                                    continue;
+                                                object = candidate_object;
+                                                for (ModelInstance* candidate_instance : object->instances)
+                                                    if (candidate_instance != nullptr &&
+                                                        candidate_instance->id() == task.scene.target_instance_id) {
+                                                        instance = candidate_instance;
+                                                        break;
+                                                    }
+                                                break;
+                                            }
+                                            if (instance != nullptr) {
+                                                instance->set_transformation(Geometry::Transformation(task.scene.initial_transform));
+                                                object->invalidate_bounding_box();
+                                            }
+                                            print->apply(model, new_print_config);
+                                            print->set_no_check_flag(no_check);
+                                            print_fff->is_BBL_printer() = is_bbl_vendor_preset;
+                                            print_fff->set_check_multi_filaments_compatibility(!allow_mix_temp);
+                                            boost::nowide::cout << "dynapin_placement fallback plate=" << index + 1
+                                                                << " reason=" << placement_error.string << std::endl;
+                                            BOOST_LOG_TRIVIAL(warning) << "DynaPin placement validation failed on plate " << index + 1
+                                                                       << "; restored the original transform: " << placement_error.string;
+                                        }
+                                    } else {
+                                        boost::nowide::cout << "dynapin_placement fallback plate=" << index + 1
+                                                            << " reason=" << applied.warning << std::endl;
+                                        BOOST_LOG_TRIVIAL(warning)
+                                            << "DynaPin placement could not be applied on plate " << index + 1 << ": " << applied.warning;
+                                    }
+                                } else {
+                                    boost::nowide::cout << "dynapin_placement unchanged plate=" << index + 1;
+                                    if (!result.warning.empty())
+                                        boost::nowide::cout << " reason=" << result.warning;
+                                    boost::nowide::cout << std::endl;
+                                    if (!result.warning.empty())
+                                        BOOST_LOG_TRIVIAL(warning) << "DynaPin placement kept the original transform on plate " << index + 1
+                                                                   << ": " << result.warning;
+                                }
+                            }
                         }
 
                         if (print->empty()) {

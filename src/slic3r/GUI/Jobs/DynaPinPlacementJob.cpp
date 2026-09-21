@@ -35,26 +35,8 @@ void DynaPinPlacementJob::process(Ctl &ctl)
     std::atomic<DynaPin::PlacementProgressStage> progress_stage{DynaPin::PlacementProgressStage::EvaluatingCurrent};
     ctl.update_status(0, placement_progress_message(progress_stage.load()));
 
-    std::string eligibility_error;
-    if (!m_snapshot.eligibility.valid(&eligibility_error)) {
-        m_result.status  = DynaPin::PlacementStatus::InvalidConfig;
-        m_result.warning = std::move(eligibility_error);
-        ctl.update_status(100, m_result.warning);
-        return;
-    }
-
-    DynaPin::PlacementEvaluator evaluator = m_snapshot.evaluator;
-    if (!evaluator && m_snapshot.scene.model) {
-        if (!m_snapshot.search.angle_evaluator)
-            m_snapshot.search.angle_evaluator = DynaPin::make_scene_angle_evaluator(
-                m_snapshot.scene, [&ctl]() { return ctl.was_canceled(); });
-        evaluator = DynaPin::make_scene_evaluator(m_snapshot.scene, [&ctl]() { return ctl.was_canceled(); });
-    }
-
-    m_result = DynaPin::optimize_placement(
-        m_snapshot.search,
-        evaluator,
-        [&ctl]() { return ctl.was_canceled(); },
+    m_result = DynaPin::run_placement_task(
+        m_snapshot.task, [&ctl]() { return ctl.was_canceled(); },
         [&ctl, &progress_value, &progress_stage](int progress) {
             progress_value.store(progress, std::memory_order_relaxed);
             ctl.update_status(progress, placement_progress_message(progress_stage.load(std::memory_order_relaxed)));

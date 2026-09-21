@@ -16,11 +16,7 @@ namespace Slic3r::GUI {
 // capture Plater or another live UI object.
 struct DynaPinPlacementSnapshot
 {
-    DynaPin::PlacementEligibility eligibility;
-    DynaPin::PlacementSearchInput search;
-    DynaPin::PlacementSceneSnapshot scene;
-    DynaPin::PlacementEvaluator evaluator;
-    ObjectID target_instance_id;
+    DynaPin::PlacementTask task;
     std::uint64_t input_generation = 0;
 };
 
