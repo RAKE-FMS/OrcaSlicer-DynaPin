@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/DynaPinPlacement.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
 #include <algorithm>
 #include <array>
@@ -145,6 +146,61 @@ TEST_CASE("DynaPin placement transform preserves world center while moving Y", "
     CHECK(moved_center.x() == Catch::Approx(center.x()));
     CHECK(moved_center.y() == Catch::Approx(center.y() + 4.));
     CHECK(moved_center.z() == Catch::Approx(center.z()));
+}
+
+TEST_CASE("DynaPin placement result applies atomically to the original target", "[DynaPinPlacement]")
+{
+    Model        model;
+    ModelObject* object = model.add_object();
+    object->add_volume(make_cube(10., 20., 5.));
+    ModelInstance* instance = object->add_instance();
+    instance->set_offset({30., 40., 0.});
+
+    DynaPin::PlacementTask task;
+    task.scene.target_object_id   = object->id();
+    task.scene.target_instance_id = instance->id();
+    task.scene.initial_transform  = instance->get_matrix();
+    task.scene.world_center       = object->instance_bounding_box(*instance, false).center();
+
+    DynaPin::PlacementResult improved;
+    improved.status    = DynaPin::PlacementStatus::Improved;
+    improved.candidate = {90., 4.};
+
+    bool                                before_apply_called = false;
+    const DynaPin::PlacementApplyResult applied = DynaPin::apply_placement_result(model, task, improved,
+                                                                                  [&before_apply_called]() { before_apply_called = true; });
+    CHECK(applied.applied);
+    CHECK(before_apply_called);
+    CHECK(instance->get_matrix().isApprox(DynaPin::candidate_transform(task.scene.initial_transform, task.scene.world_center, 90., 4.),
+                                          1e-7));
+
+    SECTION("a stale initial transform is rejected without another change")
+    {
+        const Transform3d                   already_applied = instance->get_matrix();
+        const DynaPin::PlacementApplyResult stale           = DynaPin::apply_placement_result(model, task, improved);
+        CHECK_FALSE(stale.applied);
+        CHECK(instance->get_matrix().isApprox(already_applied, 1e-7));
+    }
+}
+
+TEST_CASE("DynaPin placement result leaves the model unchanged when no improvement exists", "[DynaPinPlacement]")
+{
+    Model        model;
+    ModelObject* object = model.add_object();
+    object->add_volume(make_cube(10., 20., 5.));
+    ModelInstance* instance = object->add_instance();
+
+    DynaPin::PlacementTask task;
+    task.scene.target_object_id   = object->id();
+    task.scene.target_instance_id = instance->id();
+    task.scene.initial_transform  = instance->get_matrix();
+
+    DynaPin::PlacementResult unchanged;
+    unchanged.status                            = DynaPin::PlacementStatus::Unchanged;
+    const Transform3d                   before  = instance->get_matrix();
+    const DynaPin::PlacementApplyResult applied = DynaPin::apply_placement_result(model, task, unchanged);
+    CHECK_FALSE(applied.applied);
+    CHECK(instance->get_matrix().isApprox(before, 1e-7));
 }
 
 TEST_CASE("DynaPin placement applies only significant improvements", "[DynaPinPlacement]")

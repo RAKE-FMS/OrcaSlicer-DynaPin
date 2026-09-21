@@ -16655,9 +16655,7 @@ bool Plater::start_dynapin_placement()
         return false;
     Print &current_print = p->partplate_list.get_current_fff_print();
 
-    ModelObject         *object                = nullptr;
-    const ModelInstance *instance              = nullptr;
-    const PrintObject   *selected_print_object = nullptr;
+    std::optional<DynaPin::PlacementTarget> preferred_target;
 
     const Selection &selection = get_selection();
     if (selection.is_single_full_instance()) {
@@ -16667,154 +16665,44 @@ bool Plater::start_dynapin_placement()
             ModelObject *selected_object = model().objects[size_t(object_idx)];
             if (selected_object != nullptr && size_t(instance_idx) < selected_object->instances.size()) {
                 const ModelInstance *selected_instance = selected_object->instances[size_t(instance_idx)];
-                for (const PrintObject *print_object : current_print.objects()) {
-                    if (print_object == nullptr || print_object->model_object() == nullptr ||
-                        print_object->model_object()->id() != selected_object->id())
-                        continue;
-                    if (std::any_of(print_object->instances().begin(), print_object->instances().end(),
-                                    [selected_instance](const PrintInstance &print_instance) {
-                                        return print_instance.model_instance != nullptr && selected_instance != nullptr &&
-                                               print_instance.model_instance->id() == selected_instance->id();
-                                    })) {
-                        object                = selected_object;
-                        instance              = selected_instance;
-                        selected_print_object = print_object;
-                        break;
-                    }
-                }
+                if (selected_instance != nullptr)
+                    preferred_target = DynaPin::PlacementTarget{selected_object->id(), selected_instance->id()};
             }
         }
     }
-
-    // A freshly loaded 3MF may have no selected instance.  In that case the
-    // sole printable instance on the current plate is an unambiguous target.
-    if (instance == nullptr) {
-        for (const PrintObject *print_object : current_print.objects()) {
-            if (print_object == nullptr || print_object->model_object() == nullptr)
-                continue;
-            for (const PrintInstance &print_instance : print_object->instances()) {
-                if (print_instance.model_instance == nullptr)
-                    continue;
-                if (instance != nullptr)
-                    return false;
-                object                = print_instance.model_instance->get_object();
-                instance              = print_instance.model_instance;
-                selected_print_object = print_object;
-            }
-        }
-    }
-
-    if (object == nullptr || instance == nullptr || !instance->id().valid() || !object->id().valid())
-        return false;
-
-    DynaPin::Config dynapin_config;
-    std::string     config_error;
-    if (!DynaPin::load_config_for_print(current_print, dynapin_config, &config_error))
-        return false;
-    DynaPin::PlacementEligibility eligibility;
-    // Debug stage 0 is the standard-support mode and must not start any
-    // DynaPin side job even when the persisted feature flag is enabled.
-    eligibility.dynapin_enabled         = current_print.config().enable_dynapin_support_optimization.value &&
-                                  DynaPin::effective_debug_stage(current_print) >= 1;
-    eligibility.placement_enabled       = current_print.config().enable_dynapin_placement_optimization.value;
-    eligibility.automatic_pin_selection = !DynaPin::has_manual_selection(current_print);
-    eligibility.normal_support          = selected_print_object != nullptr && selected_print_object->has_support() &&
-                                 !is_tree(selected_print_object->config().support_type.value);
-    eligibility.selected_instance_count = 1;
-
-    std::string eligibility_error;
-    if (!eligibility.valid(&eligibility_error))
-        return false;
-
-    const BoundingBoxf3 initial_bbox = object->instance_bounding_box(*instance, false);
-    if (!initial_bbox.defined)
-        return false;
 
     const Pointfs &plate_shape = plate->get_shape();
-    if (plate_shape.size() < 3)
+    DynaPin::PlacementPreparationResult preparation = DynaPin::prepare_placement_task(model(), current_print, plate_shape,
+                                                                                      p->bed.build_volume().printable_height(),
+                                                                                      plate->get_origin(),
+                                                                                      p->partplate_list.get_curr_plate_index(),
+                                                                                      preferred_target);
+    if (!preparation.task)
         return false;
-
-    DynaPin::PlacementSceneSnapshot scene;
-    scene.model               = std::make_shared<Model>(model());
-    scene.config              = current_print.full_print_config();
-    scene.target_object_id   = object->id();
-    scene.target_instance_id = instance->id();
-    scene.initial_transform  = instance->get_matrix();
-    scene.world_center       = initial_bbox.center();
-    scene.printable_area     = plate_shape;
-    scene.printable_height   = p->bed.build_volume().printable_height();
-    scene.plate_origin       = plate->get_origin();
-    scene.plate_index        = p->partplate_list.get_curr_plate_index();
-
-    double bed_y_min = std::numeric_limits<double>::infinity();
-    double bed_y_max = -std::numeric_limits<double>::infinity();
-    for (const Vec2d &point : scene.printable_area) {
-        bed_y_min = std::min(bed_y_min, point.y());
-        bed_y_max = std::max(bed_y_max, point.y());
-    }
-
-    DynaPin::PlacementSearchInput search;
-    search.pitch_y             = dynapin_config.col_pitch_y;
-    const std::optional<DynaPin::DeltaYInterval> y_range = DynaPin::placement_delta_y_range_for_bbox(
-        bed_y_min, bed_y_max, initial_bbox.min.y(), initial_bbox.max.y());
-    if (!y_range)
-        return false;
-    search.y_min               = y_range->min;
-    search.y_max               = y_range->max;
-    search.current_rotation_deg = 0.;
-    search.current_delta_y      = 0.;
-    search.angle_group_concurrency = 0;
-    search.delta_y_range_for_rotation = [scene](double rotation_deg) {
-        return DynaPin::placement_delta_y_range_for_scene(scene, rotation_deg);
-    };
-    // The temporary evaluator computes the exact current volume on the worker
-    // thread, avoiding a stale support volume from the live Print.
-    search.current_volume_mm3 = std::numeric_limits<double>::quiet_NaN();
 
     DynaPinPlacementSnapshot snapshot;
-    snapshot.eligibility        = eligibility;
-    snapshot.search             = search;
-    snapshot.scene              = std::move(scene);
-    snapshot.target_instance_id = instance->id();
+    snapshot.task               = std::move(*preparation.task);
     snapshot.input_generation   = static_cast<std::uint64_t>(current_print.get_modified_count());
 
     return start_dynapin_placement(
         std::move(snapshot),
-        [this](const DynaPinPlacementSnapshot &snapshot, const DynaPin::PlacementResult &result) {
-            if (p == nullptr || p->partplate_list.get_curr_plate_index() != snapshot.scene.plate_index)
+        [this](const DynaPinPlacementSnapshot& snapshot, const DynaPin::PlacementResult& result) {
+            if (p == nullptr || p->partplate_list.get_curr_plate_index() != snapshot.task.scene.plate_index)
                 return false;
 
             Print &live_print = p->partplate_list.get_current_fff_print();
             if (static_cast<std::uint64_t>(live_print.get_modified_count()) != snapshot.input_generation)
                 return false;
 
-            ModelObject *live_object = nullptr;
-            ModelInstance *live_instance = nullptr;
-            for (ModelObject *candidate_object : model().objects) {
-                if (candidate_object == nullptr || candidate_object->id() != snapshot.scene.target_object_id)
-                    continue;
-                live_object = candidate_object;
-                for (ModelInstance *candidate_instance : candidate_object->instances)
-                    if (candidate_instance != nullptr && candidate_instance->id() == snapshot.scene.target_instance_id) {
-                        live_instance = candidate_instance;
-                        break;
-                    }
-                break;
-            }
-            if (live_object == nullptr || live_instance == nullptr)
+            const DynaPin::PlacementApplyResult applied = DynaPin::apply_placement_result(model(), snapshot.task, result, [this]() {
+                p->take_snapshot(_u8L("DynaPin placement"));
+            });
+            if (!applied.applied)
                 return false;
-
-            if (!live_instance->get_matrix().isApprox(snapshot.scene.initial_transform, 1e-7))
-                return false;
-
-            p->take_snapshot(_u8L("DynaPin placement"));
-            live_instance->set_transformation(Geometry::Transformation(DynaPin::candidate_transform(
-                snapshot.scene.initial_transform, snapshot.scene.world_center, result.candidate.rotation_deg, result.candidate.delta_y)));
-            live_object->invalidate_bounding_box();
             p->view3D->reload_scene(false);
             return true;
         },
-        [this](const DynaPinPlacementSnapshot &, const DynaPin::PlacementResult &result, bool canceled, bool, bool failed) {
+        [this](const DynaPinPlacementSnapshot&, const DynaPin::PlacementResult& result, bool canceled, bool, bool failed) {
             if (p == nullptr)
                 return;
 
