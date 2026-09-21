@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -16,6 +17,8 @@ from typing import Callable, Mapping, Sequence
 
 
 PLATE_GCODE_RE = re.compile(r"plate_(\d+)\.gcode$", re.IGNORECASE)
+DYNAPIN_RESULT_RE = re.compile(r"^dynapin_placement\s+.+$", re.MULTILINE)
+SLICE_STATISTICS_SUFFIX = ".slice_statistics.json"
 
 
 @dataclass(frozen=True)
@@ -211,6 +214,10 @@ def _diagnostics(completed_process: object) -> str:
     return str(output).strip()
 
 
+def _dynapin_results(diagnostics: str) -> str:
+    return "\n".join(match.group(0) for match in DYNAPIN_RESULT_RE.finditer(diagnostics))
+
+
 def slice_one(
     slicer: Path,
     model: Path,
@@ -254,8 +261,15 @@ def slice_one(
                     f"found: {names}",
                 )
 
+            statistics_source = Path(f"{expected_output}{SLICE_STATISTICS_SUFFIX}")
+            if not statistics_source.is_file():
+                return SliceResult(False, model, "Slice statistics sidecar was not generated.")
+            json.loads(statistics_source.read_text(encoding="utf-8"))
+
+            statistics_destination = Path(f"{destination}{SLICE_STATISTICS_SUFFIX}")
+            publish_gcode(statistics_source, statistics_destination)
             publish_gcode(expected_output, destination)
-            return SliceResult(True, model)
+            return SliceResult(True, model, _dynapin_results(diagnostics))
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         return SliceResult(False, model, str(error))
 
@@ -273,6 +287,9 @@ def run_batch(
         result = slice_one(slicer, model, destination, runner)
         if result.success:
             print(f"  OK: {destination}")
+            if result.message:
+                for line in result.message.splitlines():
+                    print(f"  {line}")
         else:
             print(f"  FAILED: {result.message}", file=sys.stderr)
         results.append(result)

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -78,6 +79,60 @@ class BatchSliceTests(unittest.TestCase):
                 self.assertFalse(result.success)
                 self.assertEqual("old", final.read_text(encoding="utf-8"))
 
+    def test_slice_one_reports_dynapin_result_on_success(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            model = root / "part.3mf"
+            model.touch()
+            final = root / "outputs/part.gcode"
+
+            def succeeded(command, **kwargs):
+                output = Path(command[command.index("--outputdir") + 1])
+                (output / "plate_1.gcode").write_text("ok", encoding="utf-8")
+                (output / "plate_1.gcode.slice_statistics.json").write_text(
+                    '{"plate_index": 1}', encoding="utf-8"
+                )
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=(
+                        "ordinary slicer diagnostic\n"
+                        "dynapin_placement improved plate=1 rotation_deg=90 delta_y=4 "
+                        "support_volume_mm3=123\n"
+                    ),
+                )
+
+            result = batch.slice_one(Path("orca-slicer"), model, final, succeeded)
+            self.assertTrue(result.success)
+            self.assertEqual(
+                "dynapin_placement improved plate=1 rotation_deg=90 delta_y=4 support_volume_mm3=123",
+                result.message,
+            )
+            self.assertEqual(
+                {"plate_index": 1},
+                json.loads(Path(f"{final}.slice_statistics.json").read_text(encoding="utf-8")),
+            )
+
+    def test_slice_one_preserves_existing_outputs_when_statistics_are_missing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            model = root / "part.3mf"
+            model.touch()
+            final = root / "outputs/part.gcode"
+            statistics = Path(f"{final}.slice_statistics.json")
+            final.parent.mkdir()
+            final.write_text("old gcode", encoding="utf-8")
+            statistics.write_text('{"old": true}', encoding="utf-8")
+
+            def missing_statistics(command, **kwargs):
+                output = Path(command[command.index("--outputdir") + 1])
+                (output / "plate_1.gcode").write_text("new gcode", encoding="utf-8")
+                return SimpleNamespace(returncode=0, stdout="")
+
+            result = batch.slice_one(Path("orca-slicer"), model, final, missing_statistics)
+            self.assertFalse(result.success)
+            self.assertEqual("old gcode", final.read_text(encoding="utf-8"))
+            self.assertEqual('{"old": true}', statistics.read_text(encoding="utf-8"))
+
     def test_run_batch_preserves_relative_paths_and_runs_once_per_file(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -92,6 +147,9 @@ class BatchSliceTests(unittest.TestCase):
                 commands.append(command)
                 output = Path(command[command.index("--outputdir") + 1])
                 (output / "plate_1.gcode").write_text("ok", encoding="utf-8")
+                (output / "plate_1.gcode.slice_statistics.json").write_text(
+                    '{"plate_index": 1}', encoding="utf-8"
+                )
                 return SimpleNamespace(returncode=0, stdout="")
 
             results = batch.run_batch(models, root / "outputs", Path("orca-slicer"), fake_run)
@@ -101,6 +159,9 @@ class BatchSliceTests(unittest.TestCase):
             self.assertTrue(all("--load-filaments" not in command for command in commands))
             for relative in ("root.gcode", "part/PLA.gcode", "deep/part/ABS.gcode"):
                 self.assertTrue((root / "outputs" / relative).is_file())
+                self.assertTrue(
+                    Path(f"{root / 'outputs' / relative}.slice_statistics.json").is_file()
+                )
 
     def test_main_uses_outputs_sibling_to_models(self):
         with tempfile.TemporaryDirectory() as temp:
