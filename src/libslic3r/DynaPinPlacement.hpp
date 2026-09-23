@@ -147,7 +147,7 @@ struct PlacementEligibility
     bool dynapin_enabled = false;
     bool placement_enabled = false;
     bool automatic_pin_selection = false;
-    bool dynapin_optimizable_support_mode = false;
+    bool support_configuration_eligible = false;
     size_t selected_instance_count = 0;
     bool valid(std::string *error = nullptr) const;
 };

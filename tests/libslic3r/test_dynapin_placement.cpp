@@ -316,7 +316,7 @@ TEST_CASE("DynaPin placement eligibility is a complete snapshot gate", "[DynaPin
 
     eligibility.placement_enabled        = true;
     eligibility.automatic_pin_selection  = true;
-    eligibility.dynapin_optimizable_support_mode = true;
+    eligibility.support_configuration_eligible = true;
     eligibility.selected_instance_count  = 1;
     CHECK(eligibility.valid(&error));
 }

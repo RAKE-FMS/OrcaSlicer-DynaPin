@@ -222,7 +222,7 @@ bool PlacementEligibility::valid(std::string *error) const
         return fail("DynaPin position/rotation optimization is disabled");
     if (!automatic_pin_selection)
         return fail("DynaPin placement optimization requires automatic pin selection");
-    if (!dynapin_optimizable_support_mode)
+    if (!support_configuration_eligible)
         return fail("DynaPin placement optimization requires Normal or non-Organic Tree support");
     if (selected_instance_count != 1)
         return fail("DynaPin placement optimization requires exactly one selected instance");
@@ -628,9 +628,9 @@ static PlacementPreparationResult prepare_placement_task_impl(const Model&      
     eligibility.dynapin_enabled   = print.config().enable_dynapin_support_optimization.value && DynaPin::effective_debug_stage(print) >= 1;
     eligibility.placement_enabled = print.config().enable_dynapin_placement_optimization.value;
     eligibility.automatic_pin_selection = !DynaPin::has_manual_selection(print);
-    eligibility.dynapin_optimizable_support_mode = target_print_object != nullptr && target_print_object->has_support() &&
-                                        !is_tree_organic(target_print_object->config().support_type.value,
-                                                         target_print_object->config().support_style.value);
+    eligibility.support_configuration_eligible = target_print_object != nullptr && target_print_object->has_support() &&
+                                                 !is_tree_organic(target_print_object->config().support_type.value,
+                                                                  target_print_object->config().support_style.value);
     eligibility.selected_instance_count = target_instance == nullptr ? 0 : 1;
     if (!eligibility.valid(&preparation.warning))
         return preparation;
