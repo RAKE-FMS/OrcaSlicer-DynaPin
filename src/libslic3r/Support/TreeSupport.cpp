@@ -1,5 +1,6 @@
 #include <chrono>
 #include <math.h>
+#include <unordered_map>
 
 #include "format.hpp"
 #include "ClipperUtils.hpp"
@@ -2655,6 +2656,7 @@ void TreeSupport::drop_nodes()
     if (layer_heights.empty()) return;
     std::vector<DynaPin::VirtualSupportSurface> dynapin_surfaces = DynaPin::pin_top_surfaces_for_object(*m_object);
     std::vector<DynaPin::LocalBlocker>          dynapin_blockers = DynaPin::support_blocker_regions_local(*m_object);
+    std::unordered_map<const SupportNode*, DynaPin::Pin> dynapin_route_targets;
     if (m_dynapin_allowed_pins) {
         const auto allowed = [this](const DynaPin::Pin& pin) {
             return std::find(m_dynapin_allowed_pins->begin(), m_dynapin_allowed_pins->end(), pin) != m_dynapin_allowed_pins->end();
@@ -2672,15 +2674,25 @@ void TreeSupport::drop_nodes()
         Point                                 point;
         double                                distance2 = 0.;
     };
-    auto dynapin_target = [&](const SupportNode& node, coordf_t max_step) -> std::optional<DynaPinTarget> {
+    struct DynaPinTargetSearch {
+        size_t surfaces_above = 0;
+        size_t safe_regions = 0;
+        size_t reachable_regions = 0;
+    };
+    auto dynapin_target = [&](const SupportNode& node, coordf_t max_step, const DynaPin::Pin* route_pin = nullptr,
+                              DynaPinTargetSearch* search = nullptr) -> std::optional<DynaPinTarget> {
         if (dynapin_surfaces.empty() || node.type == ePolygon)
             return {};
         const DynaPin::VirtualSupportSurface* best_surface = nullptr;
         Point                                 best_target;
         double                                best_distance2 = std::numeric_limits<double>::max();
         for (const DynaPin::VirtualSupportSurface& surface : dynapin_surfaces) {
+            if (route_pin != nullptr && !(surface.pin == *route_pin))
+                continue;
             if (surface.print_z + EPSILON >= node.print_z)
                 continue;
+            if (search != nullptr)
+                ++search->surfaces_above;
             const double landing_radius = std::max(node.radius, calc_radius(node.dist_mm_to_top + node.print_z - surface.print_z));
             const double remaining_z = node.print_z - surface.print_z;
             const double guide_margin = remaining_z > 2. * node.height ? 2. * max_step : 0.;
@@ -2688,6 +2700,8 @@ void TreeSupport::drop_nodes()
             const Polygons safe_regions = offset(surface.poly, -inset);
             if (safe_regions.empty())
                 continue;
+            if (search != nullptr)
+                search->safe_regions += safe_regions.size();
             const double reachable   = max_step * std::max(1., std::ceil(remaining_z / std::max(node.height, coordf_t(EPSILON))));
             for (const Polygon& region : safe_regions) {
                 Point target = node.position;
@@ -2700,6 +2714,8 @@ void TreeSupport::drop_nodes()
                 const double distance2 = vsize2_with_unscale(target - node.position);
                 if (distance2 > reachable * reachable + EPSILON)
                     continue;
+                if (search != nullptr)
+                    ++search->reachable_regions;
                 if (best_surface == nullptr || surface.print_z > best_surface->print_z + EPSILON ||
                     (std::abs(surface.print_z - best_surface->print_z) <= EPSILON &&
                      (distance2 < best_distance2 - EPSILON ||
@@ -2809,8 +2825,77 @@ void TreeSupport::drop_nodes()
         {
             SupportNode& node = *p_node;
 
+            if (!dynapin_surfaces.empty() && node.type != ePolygon && node.parent != nullptr && !node.dynapin_landed) {
+                const coordf_t max_step = get_max_move_dist(&node);
+                const auto parent_route = dynapin_route_targets.find(node.parent);
+                const DynaPin::Pin* route_pin = parent_route == dynapin_route_targets.end() ? nullptr : &parent_route->second;
+                DynaPinTargetSearch search;
+                std::optional<DynaPinTarget> target = dynapin_target(node, max_step, route_pin, &search);
+                if (!target && route_pin != nullptr) {
+                    BOOST_LOG_TRIVIAL(debug) << "[DynaPin] Tree branch " << node.branch_id << " lost landing target "
+                                             << route_pin->row << "," << route_pin->col
+                                             << " at z=" << node.print_z;
+                    search = {};
+                    target = dynapin_target(node, max_step, nullptr, &search);
+                }
+                if (!target && node.to_buildplate) {
+                    const coord_t margin = scale_(node.radius + 0.5 * m_support_params.support_extrusion_width);
+                    const bool crosses_pin_corridor = std::any_of(dynapin_blockers.begin(), dynapin_blockers.end(), [&](const DynaPin::LocalBlocker& blocker) {
+                        if (blocker.z_max >= node.print_z - EPSILON)
+                            return false;
+                        const BoundingBox bounds = get_extents(blocker.poly);
+                        return node.position.x() >= bounds.min.x() - margin && node.position.x() <= bounds.max.x() + margin &&
+                               node.position.y() >= bounds.min.y() - margin && node.position.y() <= bounds.max.y() + margin;
+                    });
+                    if (crosses_pin_corridor)
+                        BOOST_LOG_TRIVIAL(debug) << "[DynaPin] Tree branch " << node.branch_id << " has no reachable pin landing at z="
+                                                 << node.print_z << " (surfaces=" << search.surfaces_above
+                                                 << ", safe_regions=" << search.safe_regions
+                                                 << ", reachable_regions=" << search.reachable_regions
+                                                 << "); continuing toward build plate";
+                }
+                if (target && node.print_z > target->surface->print_z + EPSILON) {
+                    const double parent_height = node.parent->print_z - node.print_z;
+                    const double step = std::min({double(max_step), tan_angle * parent_height, double(support_extrusion_width)});
+                    const Point toward_target = target->point - node.parent->position;
+                    const double distance = unscale_(toward_target.cast<double>().norm());
+                    if (step > EPSILON) {
+                        const Point guided = distance > EPSILON ?
+                            node.parent->position + normal(toward_target, scale_(std::min(distance, step))) : node.parent->position;
+                        bool blocked = is_inside_ex(get_collision(node.radius, obj_layer_nr), guided) ||
+                                       is_line_cut_by_contour(node.parent->position, guided);
+                        if (!blocked) {
+                            const coord_t margin = scale_(node.radius + 0.5 * m_support_params.support_extrusion_width);
+                            Polygon footprint;
+                            for (size_t i = 0; i < 32; ++i) {
+                                const double angle = double(i) / 32. * 2. * M_PI;
+                                footprint.points.emplace_back(guided + Point(coord_t(std::cos(angle) * margin), coord_t(std::sin(angle) * margin)));
+                            }
+                            for (const DynaPin::LocalBlocker& blocker : dynapin_blockers) {
+                                if (node.print_z - node.height < blocker.z_max - EPSILON && node.print_z > blocker.z_min + EPSILON &&
+                                    !intersection_ex({footprint}, {blocker.poly}).empty()) {
+                                    blocked = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!blocked) {
+                            node.position = guided;
+                            node.movement = guided - node.parent->position;
+                            dynapin_route_targets[&node] = target->surface->pin;
+                        } else {
+                            BOOST_LOG_TRIVIAL(debug) << "[DynaPin] Tree branch " << node.branch_id << " cannot reach pin "
+                                                     << target->surface->pin.row << "," << target->surface->pin.col
+                                                     << " at z=" << node.print_z << ": collision";
+                        }
+                    }
+                }
+            }
+
             if (!dynapin_surfaces.empty() && node.type != ePolygon) {
-                const std::optional<DynaPinTarget> target = dynapin_target(node, get_max_move_dist(&node));
+                const auto route = dynapin_route_targets.find(&node);
+                const DynaPin::Pin* route_pin = route == dynapin_route_targets.end() ? nullptr : &route->second;
+                const std::optional<DynaPinTarget> target = dynapin_target(node, get_max_move_dist(&node), route_pin);
                 const double parent_move = target && node.parent != nullptr && node.parent->distance_to_top >= 0 ?
                     unscale_((target->point - node.parent->position).cast<double>().norm()) : 0.;
                 const double parent_height = node.parent != nullptr ? node.parent->print_z - node.print_z : node.height;
@@ -3157,7 +3242,9 @@ void TreeSupport::drop_nodes()
 
                 next_layer_vertex += movement;
 
-                if (const std::optional<DynaPinTarget> target = dynapin_target(node, get_max_move_dist(&node))) {
+                const auto route = dynapin_route_targets.find(&node);
+                const DynaPin::Pin* route_pin = route == dynapin_route_targets.end() ? nullptr : &route->second;
+                if (const std::optional<DynaPinTarget> target = dynapin_target(node, get_max_move_dist(&node), route_pin)) {
                     const Point  to_target       = target->point - next_layer_vertex;
                     const double target_distance = unscale_(to_target.cast<double>().norm());
                     if (target_distance > EPSILON)

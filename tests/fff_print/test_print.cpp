@@ -507,6 +507,56 @@ TEST_CASE("DynaPin Tree rejects pins when a wide overhang has unlandable branche
     CHECK_FALSE(print.objects().front()->support_layers().empty());
 }
 
+TEST_CASE("DynaPin Tree keeps all three Simple Bridge pins", "[DynaPin][Print]")
+{
+    ResourcesDirGuard resources_guard(test_resources_dir());
+    Print print;
+    Model model;
+    TriangleMesh bridge = Test::mesh(TestMesh::cube_20x20x20);
+    TriangleMesh far_leg = Test::mesh(TestMesh::cube_20x20x20);
+    far_leg.translate(0.f, 60.f, 0.f);
+    bridge.merge(far_leg);
+    TriangleMesh deck = Test::mesh(TestMesh::cube_20x20x20);
+    deck.scale(Vec3f(1.f, 4.f, 1.f));
+    deck.translate(0.f, 0.f, 20.f);
+    bridge.merge(deck);
+    ModelObject* object = model.add_object();
+    object->add_volume(std::move(bridge));
+    ModelInstance* instance = object->add_instance();
+    instance->set_offset({80., 45., 0.});
+    object->ensure_on_bed();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_support", true},
+        {"enable_dynapin_support_optimization", true},
+        {"enable_dynapin_placement_optimization", false},
+        {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+        {"dynapin_selected_pins", ""},
+        {"support_type", "tree(auto)"},
+        {"support_style", "tree_slim"},
+        {"layer_height", 0.3},
+        {"support_top_z_distance", 0.2},
+        {"support_bottom_z_distance", 0.2},
+        {"support_interface_top_layers", 2},
+        {"support_interface_bottom_layers", 2},
+        {"support_line_width", 0.44},
+        {"tree_support_branch_angle", 45},
+        {"tree_support_branch_diameter", 5},
+        {"printable_area", "0x0,180x0,180x180,0x180"},
+    });
+
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    print.process();
+
+    const std::vector<DynaPin::Pin> expected{{1, 5}, {1, 6}, {1, 7}};
+    REQUIRE(print.dynapin_selection().pins == expected);
+    REQUIRE(print.objects().front()->dynapin_tree_landing_plan().used_pins == expected);
+}
+
 TEST_CASE("DynaPin Tree uses a manually selected pin as a landing", "[DynaPin][Print]")
 {
     ResourcesDirGuard resources_guard(test_resources_dir());
