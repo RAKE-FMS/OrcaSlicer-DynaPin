@@ -36,7 +36,7 @@ struct SupportSlab
 // and XY; each XY region is counted once in every active Z interval.
 double support_volume_mm3(const std::vector<SupportSlab> &slabs);
 double support_volume_mm3(const Print &print);
-std::vector<SupportSlab> generate_normal_support_geometry(PrintObject &object);
+std::vector<SupportSlab> generate_support_geometry(PrintObject &object);
 
 struct PlacementCandidate
 {
@@ -147,7 +147,7 @@ struct PlacementEligibility
     bool dynapin_enabled = false;
     bool placement_enabled = false;
     bool automatic_pin_selection = false;
-    bool normal_support = false;
+    bool dynapin_optimizable_support_mode = false;
     size_t selected_instance_count = 0;
     bool valid(std::string *error = nullptr) const;
 };
@@ -194,6 +194,7 @@ struct PlacementTask
     PlacementEligibility   eligibility;
     PlacementSearchInput   search;
     PlacementSceneSnapshot scene;
+    bool                   tree_support = false;
 };
 
 struct PlacementPreparationResult

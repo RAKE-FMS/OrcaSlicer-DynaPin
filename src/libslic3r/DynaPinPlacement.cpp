@@ -222,8 +222,8 @@ bool PlacementEligibility::valid(std::string *error) const
         return fail("DynaPin position/rotation optimization is disabled");
     if (!automatic_pin_selection)
         return fail("DynaPin placement optimization requires automatic pin selection");
-    if (!normal_support)
-        return fail("DynaPin placement optimization requires Normal support");
+    if (!dynapin_optimizable_support_mode)
+        return fail("DynaPin placement optimization requires Normal or non-Organic Tree support");
     if (selected_instance_count != 1)
         return fail("DynaPin placement optimization requires exactly one selected instance");
     return true;
@@ -401,7 +401,7 @@ std::optional<double> evaluate_scene_candidate(const PlacementSceneSnapshot &sce
     // This call runs update_dynapin_selection() before support generation.
     // The existing blocker collision scan therefore removes only colliding
     // pins while the candidate pose remains eligible for volume scoring.
-    if (!candidate_print.generate_normal_support_geometry_only(slabs, cancel))
+    if (!candidate_print.generate_support_geometry_only(slabs, cancel))
         return std::nullopt;
     if (cancel && cancel())
         return std::nullopt;
@@ -547,7 +547,7 @@ void evaluate_scene_angle_group(const PlacementSceneSnapshot          &scene,
                                        target_print_instance->print_object->center_offset();
 
         std::vector<SupportSlab> slabs;
-        if (!candidate_print.generate_normal_support_geometry_for_current_shift(slabs, cancel)) {
+        if (!candidate_print.generate_support_geometry_for_current_shift(slabs, cancel)) {
             if (!(cancel && cancel()) && completed)
                 completed(i);
             continue;
@@ -628,8 +628,9 @@ static PlacementPreparationResult prepare_placement_task_impl(const Model&      
     eligibility.dynapin_enabled   = print.config().enable_dynapin_support_optimization.value && DynaPin::effective_debug_stage(print) >= 1;
     eligibility.placement_enabled = print.config().enable_dynapin_placement_optimization.value;
     eligibility.automatic_pin_selection = !DynaPin::has_manual_selection(print);
-    eligibility.normal_support          = target_print_object != nullptr && target_print_object->has_support() &&
-                                          !is_tree(target_print_object->config().support_type.value);
+    eligibility.dynapin_optimizable_support_mode = target_print_object != nullptr && target_print_object->has_support() &&
+                                        !is_tree_organic(target_print_object->config().support_type.value,
+                                                         target_print_object->config().support_style.value);
     eligibility.selected_instance_count = target_instance == nullptr ? 0 : 1;
     if (!eligibility.valid(&preparation.warning))
         return preparation;
@@ -679,7 +680,9 @@ static PlacementPreparationResult prepare_placement_task_impl(const Model&      
     search.angle_group_concurrency    = 0;
     search.delta_y_range_for_rotation = [scene](double rotation_deg) { return placement_delta_y_range_for_scene(scene, rotation_deg); };
 
-    preparation.task = PlacementTask{eligibility, std::move(search), std::move(scene)};
+    const bool tree_support = is_tree(target_print_object->config().support_type.value);
+
+    preparation.task = PlacementTask{eligibility, std::move(search), std::move(scene), tree_support};
     return preparation;
 }
 
@@ -715,6 +718,8 @@ PlacementResult run_placement_task(PlacementTask                task,
             result.warning = std::move(eligibility_error);
             return result;
         }
+        if (task.tree_support)
+            task.search.angle_group_concurrency = 1;
         if (!task.search.angle_evaluator)
             task.search.angle_evaluator = make_scene_angle_evaluator(task.scene, cancel);
         return optimize_placement(task.search, make_scene_evaluator(task.scene, cancel), cancel, progress, progress_stage);
@@ -779,7 +784,7 @@ PlacementApplyResult apply_placement_result(Model&                       model,
     return applied;
 }
 
-std::vector<SupportSlab> generate_normal_support_geometry(PrintObject &object)
+std::vector<SupportSlab> generate_support_geometry(PrintObject &object)
 {
     std::vector<SupportSlab> slabs;
     object.generate_support_geometry_only(slabs);

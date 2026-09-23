@@ -180,7 +180,7 @@ struct SupportParameters {
         if (support_style == smsDefault) {
             if (is_tree(object_config.support_type)) {
                 // Orca: use organic as default
-                support_style = smsTreeOrganic;
+                support_style = object.print()->dynapin_selection().pins.empty() ? smsTreeOrganic : smsTreeSlim;
             } else {
                 support_style = smsGrid;
             }

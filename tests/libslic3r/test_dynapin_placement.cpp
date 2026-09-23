@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/DynaPinPlacement.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
 #include <algorithm>
@@ -315,7 +316,7 @@ TEST_CASE("DynaPin placement eligibility is a complete snapshot gate", "[DynaPin
 
     eligibility.placement_enabled        = true;
     eligibility.automatic_pin_selection  = true;
-    eligibility.normal_support           = true;
+    eligibility.dynapin_optimizable_support_mode = true;
     eligibility.selected_instance_count  = 1;
     CHECK(eligibility.valid(&error));
 }

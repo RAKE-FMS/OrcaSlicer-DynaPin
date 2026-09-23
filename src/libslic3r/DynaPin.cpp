@@ -182,6 +182,78 @@ ProjectionSelection select_from_projection(std::vector<ProjectionEvent> events)
     return result;
 }
 
+ProjectionSelection select_tree_pins(const PrintObject&      object,
+                                     const Config&           config,
+                                     const std::vector<Pin>& candidates,
+                                     const std::vector<Pin>& colliding)
+{
+    std::vector<ProjectionEvent> events;
+    std::vector<ProjectionEvent> contacts;
+    events.reserve(object.layers().size() + candidates.size());
+    for (size_t layer_id = 0; layer_id < object.layers().size(); ++layer_id) {
+        const Layer& layer = *object.layers()[layer_id];
+        if (layer_id == 0)
+            continue;
+        const Layer& lower    = *object.layers()[layer_id - 1];
+        Polygons     overhang = diff(to_polygons(layer.lslices), offset(to_polygons(lower.lslices), scale_(0.05)));
+        if (!overhang.empty()) {
+            events.push_back({ProjectionEventType::Contact, layer.print_z, std::move(overhang), {}, false});
+            contacts.push_back(events.back());
+        }
+    }
+    for (const Pin& pin : candidates) {
+        const VirtualSupportSurface surface = surface_for_pin(object, config, pin);
+        events.push_back({ProjectionEventType::PinSurface,
+                          surface.print_z,
+                          {surface.poly},
+                          pin,
+                          std::find(colliding.begin(), colliding.end(), pin) != colliding.end()});
+    }
+    ProjectionSelection selection = select_from_projection(std::move(events));
+    const PrintObjectConfig& object_config = object.config();
+    const double layer_height = std::max(object_config.layer_height.value, EPSILON);
+    const double angle = object_config.tree_support_branch_angle.value * M_PI / 180.;
+    double line_width = object_config.get_abs_value("support_line_width", object.print()->config().nozzle_diameter.get_at(0));
+    if (line_width <= 0.)
+        line_width = Flow::auto_extrusion_width(FlowRole::frSupportMaterial,
+                                               float(object.print()->config().nozzle_diameter.get_at(0)));
+    const double move_per_layer = std::min(std::tan(angle) * layer_height, line_width);
+    std::vector<Pin> nearby_candidates = candidates;
+    std::sort(nearby_candidates.begin(), nearby_candidates.end(), [](const Pin& lhs, const Pin& rhs) {
+        return std::tie(lhs.row, lhs.col) > std::tie(rhs.row, rhs.col);
+    });
+    for (const Pin& pin : nearby_candidates) {
+        if (std::find(colliding.begin(), colliding.end(), pin) != colliding.end() ||
+            std::find(selection.selected.begin(), selection.selected.end(), pin) != selection.selected.end())
+            continue;
+        const VirtualSupportSurface surface = surface_for_pin(object, config, pin);
+        for (const ProjectionEvent& contact : contacts) {
+            if (contact.print_z <= surface.print_z + EPSILON)
+                continue;
+            Polygons remaining = contact.polygons;
+            bool shadowed = false;
+            for (const Pin& selected_pin : selection.selected) {
+                const VirtualSupportSurface selected_surface = surface_for_pin(object, config, selected_pin);
+                if (selected_surface.print_z > surface.print_z + EPSILON && selected_surface.print_z < contact.print_z - EPSILON) {
+                    if (!intersection({selected_surface.poly}, {surface.poly}).empty() &&
+                        !intersection(contact.polygons, {selected_surface.poly}).empty())
+                        shadowed = true;
+                    remaining = diff(remaining, {selected_surface.poly});
+                }
+            }
+            if (shadowed || remaining.empty())
+                continue;
+            const double travel = move_per_layer * std::ceil((contact.print_z - surface.print_z) / layer_height);
+            if (!intersection(offset(remaining, float(scale_(travel))), {surface.poly}).empty()) {
+                selection.selected.push_back(pin);
+                break;
+            }
+        }
+    }
+    sort_unique_pins(selection.selected, config);
+    return selection;
+}
+
 const std::vector<Pin>& resolved_pins(const Print& print) { return print.dynapin_selection().pins; }
 
 static std::vector<fs::path> config_candidates(const std::string& path)
@@ -344,6 +416,7 @@ static LocalBlocker blocker_for_pin_shift(const Config& config, const Pin& pin, 
     const double        max_y   = block_y + 0.5 * config.blocker_width_y;
 
     LocalBlocker blocker;
+    blocker.pin         = pin;
     blocker.z_min       = z_range.z_min;
     blocker.z_max       = z_range.z_max;
     blocker.poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
@@ -372,6 +445,7 @@ static VirtualSupportSurface surface_for_pin_shift(const Config& config, const P
     const double max_y   = block_y + 0.5 * config.blocker_width_y;
 
     VirtualSupportSurface surface;
+    surface.pin         = pin;
     surface.print_z     = blocker_z_range(config, pin).z_max;
     surface.poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
                            Point(scale_(max_x) - shift.x(), scale_(min_y) - shift.y()),
@@ -388,6 +462,31 @@ VirtualSupportSurface surface_for_pin(const PrintObject& object, const Config& c
     if (!max_x_bed)
         return {};
     return surface_for_pin_shift(config, pin, shift, *max_x_bed);
+}
+
+std::optional<Point> nearest_pin_landing_point(const Polygon& safe_region, const Point& from)
+{
+    if (safe_region.contains(from))
+        return from;
+    std::optional<Point> closest;
+    double best_distance2 = std::numeric_limits<double>::max();
+    for (const Line& edge : safe_region.lines()) {
+        const Vec2d direction = (edge.b - edge.a).cast<double>();
+        const double length2 = direction.squaredNorm();
+        if (length2 <= 0.)
+            continue;
+        const double edge_margin = std::min(0.25, double(scale_(0.001)) / std::sqrt(length2));
+        const double fraction = std::clamp((from - edge.a).cast<double>().dot(direction) / length2,
+                                           edge_margin, 1. - edge_margin);
+        const Point candidate = edge.a + Point(coord_t(std::llround(direction.x() * fraction)),
+                                               coord_t(std::llround(direction.y() * fraction)));
+        const double distance2 = (candidate - from).cast<double>().squaredNorm();
+        if (distance2 < best_distance2) {
+            best_distance2 = distance2;
+            closest = candidate;
+        }
+    }
+    return closest;
 }
 
 bool pin_collides_with_model(const Print& print, const Config& config, const Pin& pin)

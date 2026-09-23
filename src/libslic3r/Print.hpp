@@ -337,6 +337,9 @@ public:
     // Whoever will get a non-const pointer to PrintObject will be able to modify its layers.
     LayerPtrs&                   layers()               { return m_layers; }
     SupportLayerPtrs&            support_layers()       { return m_support_layers; }
+    const DynaPin::TreePinLandingPlan& dynapin_tree_landing_plan() const { return m_dynapin_tree_landing_plan; }
+    void set_dynapin_tree_landing_plan(DynaPin::TreePinLandingPlan plan) { m_dynapin_tree_landing_plan = std::move(plan); }
+    void clear_dynapin_tree_landing_plan() { m_dynapin_tree_landing_plan = {}; }
 
     template<typename PolysType>
     static void remove_bridges_from_contacts(
@@ -505,6 +508,7 @@ private:
     void infill();
     void ironing();
     void generate_support_material();
+    void generate_tree_support_with_dynapin_retries();
     void estimate_curled_extrusions();
     void simplify_extrusion_path();
 
@@ -563,6 +567,7 @@ private:
     SlicingParameters                       m_slicing_params;
     LayerPtrs                               m_layers;
     SupportLayerPtrs                        m_support_layers;
+    DynaPin::TreePinLandingPlan             m_dynapin_tree_landing_plan;
     // BBS
     std::shared_ptr<TreeSupportData>        m_tree_support_preview_cache;
 
@@ -918,10 +923,10 @@ public:
     // Normal support generator is stopped before support toolpaths are built;
     // callers receive owned support slabs in plate coordinates only after
     // collecting each PrintObject's geometry.
-    bool                generate_normal_support_geometry_only(std::vector<DynaPin::SupportSlab> &slabs,
+    bool                generate_support_geometry_only(std::vector<DynaPin::SupportSlab> &slabs,
                                                               const std::function<bool()> &cancel = {});
     bool                prepare_slices_for_support_geometry(const std::function<bool()> &cancel = {});
-    bool                generate_normal_support_geometry_for_current_shift(std::vector<DynaPin::SupportSlab> &slabs,
+    bool                generate_support_geometry_for_current_shift(std::vector<DynaPin::SupportSlab> &slabs,
                                                                           const std::function<bool()> &cancel = {});
     // Exports G-code into a file name based on the path_template, returns the file path of the generated G-code file.
     // If preview_data is not null, the preview_data is filled in for the G-code visualization (not used by the command line Slic3r).
@@ -963,6 +968,7 @@ public:
     const DynaPin::SelectionResult& dynapin_selection() const { return m_dynapin_selection; }
     void set_dynapin_selection(DynaPin::SelectionResult selection) { m_dynapin_selection = std::move(selection); }
     void update_dynapin_selection();
+    void finalize_dynapin_tree_selection();
     const PrintObjectConfig&    default_object_config() const { return m_default_object_config; }
     const PrintRegionConfig& default_region_config() const { return m_default_region_config; }
     ConstPrintObjectPtrsAdaptor objects() const { return ConstPrintObjectPtrsAdaptor(&m_objects); }
@@ -1148,6 +1154,7 @@ private:
 
     PrintConfig                             m_config;
     DynaPin::SelectionResult                m_dynapin_selection;
+    DynaPin::SelectionResult                m_dynapin_candidate_selection;
     PrintObjectConfig                       m_default_object_config;
     PrintRegionConfig                       m_default_region_config;
     PrintObjectPtrs                         m_objects;

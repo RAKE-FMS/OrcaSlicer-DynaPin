@@ -100,6 +100,7 @@ struct BlockerBox
 // directly from generated support layers; [z_min, z_max] are print_z bounds (mm).
 struct LocalBlocker
 {
+    Pin     pin;
     Polygon poly;
     double  z_min = 0.;
     double  z_max = 0.;
@@ -111,8 +112,26 @@ struct LocalBlocker
 // print_z はピン上面の高さ (mm)。
 struct VirtualSupportSurface
 {
+    Pin     pin;          // ピン識別子。着地後の枝とG-code出力を対応付ける。
     Polygon poly;         // ピン上面の XY 形状（object-local 座標）
     double  print_z = 0.; // ピン上面の Z 高さ (mm)
+};
+
+struct TreePinLanding
+{
+    Pin      pin;
+    uint64_t branch_id = 0;
+    size_t   layer_id  = 0;
+    Point    position;
+    Polygon  footprint;
+    double   print_z = 0.;
+    double   support_print_z = 0.;
+};
+
+struct TreePinLandingPlan
+{
+    std::vector<TreePinLanding> landings;
+    std::vector<Pin>            used_pins;
 };
 
 std::vector<Pin>        parse_pin_list(const std::string& pins);
@@ -120,10 +139,15 @@ bool                    has_manual_selection(const Print& print);
 std::vector<Pin>        candidate_pins(const Config& config);
 void                    sort_unique_pins(std::vector<Pin>& pins, const Config& config);
 ProjectionSelection     select_from_projection(std::vector<ProjectionEvent> events);
+ProjectionSelection     select_tree_pins(const PrintObject&      object,
+                                         const Config&           config,
+                                         const std::vector<Pin>& candidates,
+                                         const std::vector<Pin>& colliding);
 const std::vector<Pin>& resolved_pins(const Print& print);
 bool                    load_config_for_print(const Print& print, Config& config, std::string* error = nullptr);
 LocalBlocker            blocker_for_pin(const PrintObject& object, const Config& config, const Pin& pin);
 VirtualSupportSurface   surface_for_pin(const PrintObject& object, const Config& config, const Pin& pin);
+std::optional<Point>    nearest_pin_landing_point(const Polygon& safe_region, const Point& from);
 bool                    pin_collides_with_model(const Print& print, const Config& config, const Pin& pin);
 std::vector<Polygons>   support_blockers_for_object(const PrintObject& object);
 // Blocker prisms in object-local coordinates, used to clip already-generated
