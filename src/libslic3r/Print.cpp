@@ -71,8 +71,10 @@ static const char* dynapin_selection_source_text(DynaPin::SelectionSource source
     return "none";
 }
 
-void Print::update_dynapin_selection()
+void Print::update_dynapin_selection(const ObjectID* tree_target_instance_id, std::vector<DynaPin::Pin>* projected_tree_pins)
 {
+    if (projected_tree_pins != nullptr)
+        projected_tree_pins->clear();
     DynaPin::SelectionResult next;
     BOOST_LOG_TRIVIAL(info) << "[DynaPin] selection begin: enabled=" << m_config.enable_dynapin_support_optimization.value
                             << ", manual=" << DynaPin::has_manual_selection(*this)
@@ -144,6 +146,12 @@ void Print::update_dynapin_selection()
                 std::vector<DynaPin::Pin> rejected;
                 if (is_tree(object->config().support_type.value)) {
                     DynaPin::ProjectionSelection tree_selection = DynaPin::select_tree_pins(*object, dynapin_config, candidates, colliding);
+                    const bool is_target_instance = tree_target_instance_id != nullptr && projected_tree_pins != nullptr &&
+                        std::any_of(object->instances().begin(), object->instances().end(), [tree_target_instance_id](const PrintInstance &instance) {
+                            return instance.model_instance != nullptr && instance.model_instance->id() == *tree_target_instance_id;
+                        });
+                    if (is_target_instance)
+                        *projected_tree_pins = tree_selection.selected;
                     selected                                    = std::move(tree_selection.selected);
                     rejected                                    = std::move(tree_selection.rejected_collisions);
                 } else {
@@ -265,9 +273,17 @@ bool Print::prepare_slices_for_support_geometry(const std::function<bool()> &can
     return !canceled();
 }
 
-bool Print::generate_support_geometry_for_current_shift(std::vector<DynaPin::SupportSlab> &slabs, const std::function<bool()> &cancel)
+bool Print::generate_support_geometry_for_current_shift(std::vector<DynaPin::SupportSlab>& slabs,
+                                                        const std::function<bool()>&       cancel,
+                                                        const ObjectID*                    tree_target_instance_id,
+                                                        std::vector<DynaPin::Pin>*         generated_tree_pins,
+                                                        std::vector<DynaPin::Pin>*         projected_tree_pins)
 {
     slabs.clear();
+    if (generated_tree_pins != nullptr)
+        generated_tree_pins->clear();
+    if (projected_tree_pins != nullptr)
+        projected_tree_pins->clear();
     if (m_objects.empty())
         return true;
 
@@ -279,13 +295,17 @@ bool Print::generate_support_geometry_for_current_shift(std::vector<DynaPin::Sup
         return this->canceled();
     };
 
-    update_dynapin_selection();
+    update_dynapin_selection(tree_target_instance_id, projected_tree_pins);
 
     for (PrintObject *object : m_objects) {
         if (canceled())
             return false;
         std::vector<DynaPin::SupportSlab> object_slabs;
-        object->generate_support_geometry_only(object_slabs);
+        const bool is_target_instance = tree_target_instance_id != nullptr &&
+            std::any_of(object->instances().begin(), object->instances().end(), [tree_target_instance_id](const PrintInstance &instance) {
+                return instance.model_instance != nullptr && instance.model_instance->id() == *tree_target_instance_id;
+            });
+        object->generate_support_geometry_only(object_slabs, is_target_instance ? generated_tree_pins : nullptr);
         for (const DynaPin::SupportSlab &slab : object_slabs) {
             for (const PrintInstance &instance : object->instances()) {
                 DynaPin::SupportSlab plate_slab = slab;
@@ -298,11 +318,19 @@ bool Print::generate_support_geometry_for_current_shift(std::vector<DynaPin::Sup
     return !canceled();
 }
 
-bool Print::generate_support_geometry_only(std::vector<DynaPin::SupportSlab> &slabs, const std::function<bool()> &cancel)
+bool Print::generate_support_geometry_only(std::vector<DynaPin::SupportSlab>& slabs,
+                                           const std::function<bool()>&       cancel,
+                                           const ObjectID*                    tree_target_instance_id,
+                                           std::vector<DynaPin::Pin>*         generated_tree_pins,
+                                           std::vector<DynaPin::Pin>*         projected_tree_pins)
 {
+    if (generated_tree_pins != nullptr)
+        generated_tree_pins->clear();
+    if (projected_tree_pins != nullptr)
+        projected_tree_pins->clear();
     if (!prepare_slices_for_support_geometry(cancel))
         return false;
-    return generate_support_geometry_for_current_shift(slabs, cancel);
+    return generate_support_geometry_for_current_shift(slabs, cancel, tree_target_instance_id, generated_tree_pins, projected_tree_pins);
 }
 
 PrintRegion::PrintRegion(const PrintRegionConfig &config) : PrintRegion(config, config.hash()) {}

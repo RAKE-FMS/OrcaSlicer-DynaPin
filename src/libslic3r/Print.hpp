@@ -362,9 +362,9 @@ public:
 
     // BBS
     void generate_support_preview();
-    // Generate only Normal support polygons for placement scoring.  The
+    // Generate temporary support geometry for placement scoring.  The
     // temporary generator clears any support layers before returning.
-    void generate_support_geometry_only(std::vector<DynaPin::SupportSlab> &slabs);
+    void generate_support_geometry_only(std::vector<DynaPin::SupportSlab>& slabs, std::vector<DynaPin::Pin>* generated_tree_pins = nullptr);
     const std::vector<VolumeSlices>& firstLayerObjSlice() const { return firstLayerObjSliceByVolume; }
     std::vector<VolumeSlices>& firstLayerObjSliceMod() { return firstLayerObjSliceByVolume; }
     const std::vector<groupedVolumeSlices>& firstLayerObjGroups() const { return firstLayerObjSliceByGroups; }
@@ -919,15 +919,20 @@ public:
     ApplyStatus         apply(const Model &model, DynamicPrintConfig config) override;
 
     void                process(long long *time_cost_with_cache = nullptr, bool use_cache = false) override;
-    // Run the slice/infill/support stages needed for placement scoring.  The
-    // Normal support generator is stopped before support toolpaths are built;
-    // callers receive owned support slabs in plate coordinates only after
-    // collecting each PrintObject's geometry.
-    bool                generate_support_geometry_only(std::vector<DynaPin::SupportSlab> &slabs,
-                                                              const std::function<bool()> &cancel = {});
-    bool                prepare_slices_for_support_geometry(const std::function<bool()> &cancel = {});
-    bool                generate_support_geometry_for_current_shift(std::vector<DynaPin::SupportSlab> &slabs,
-                                                                          const std::function<bool()> &cancel = {});
+    // Run slice, infill, and support generation for placement scoring. Return
+    // owned support slabs in plate coordinates; optional Tree pin outputs
+    // capture target-instance projection selections and usable landings.
+    bool generate_support_geometry_only(std::vector<DynaPin::SupportSlab>& slabs,
+                                        const std::function<bool()>&       cancel                  = {},
+                                        const ObjectID*                    tree_target_instance_id = nullptr,
+                                        std::vector<DynaPin::Pin>*         generated_tree_pins     = nullptr,
+                                        std::vector<DynaPin::Pin>*         projected_tree_pins     = nullptr);
+    bool prepare_slices_for_support_geometry(const std::function<bool()>& cancel = {});
+    bool generate_support_geometry_for_current_shift(std::vector<DynaPin::SupportSlab>& slabs,
+                                                     const std::function<bool()>&       cancel                  = {},
+                                                     const ObjectID*                    tree_target_instance_id = nullptr,
+                                                     std::vector<DynaPin::Pin>*         generated_tree_pins     = nullptr,
+                                                     std::vector<DynaPin::Pin>*         projected_tree_pins     = nullptr);
     // Exports G-code into a file name based on the path_template, returns the file path of the generated G-code file.
     // If preview_data is not null, the preview_data is filled in for the G-code visualization (not used by the command line Slic3r).
     std::string         export_gcode(const std::string& path_template, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
@@ -967,7 +972,8 @@ public:
     const PrintConfig&          config() const { return m_config; }
     const DynaPin::SelectionResult& dynapin_selection() const { return m_dynapin_selection; }
     void set_dynapin_selection(DynaPin::SelectionResult selection) { m_dynapin_selection = std::move(selection); }
-    void update_dynapin_selection();
+    void update_dynapin_selection(const ObjectID* tree_target_instance_id = nullptr,
+                                  std::vector<DynaPin::Pin>* projected_tree_pins = nullptr);
     void finalize_dynapin_tree_selection();
     const PrintObjectConfig&    default_object_config() const { return m_default_object_config; }
     const PrintRegionConfig& default_region_config() const { return m_default_region_config; }

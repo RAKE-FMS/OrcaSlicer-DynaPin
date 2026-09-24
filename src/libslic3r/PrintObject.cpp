@@ -3990,9 +3990,11 @@ void PrintObject::generate_tree_support_with_dynapin_retries()
     }
 }
 
-void PrintObject::generate_support_geometry_only(std::vector<DynaPin::SupportSlab> &slabs)
+void PrintObject::generate_support_geometry_only(std::vector<DynaPin::SupportSlab>& slabs, std::vector<DynaPin::Pin>* generated_tree_pins)
 {
     slabs.clear();
+    if (generated_tree_pins != nullptr)
+        generated_tree_pins->clear();
 
     if (is_tree(m_config.support_type.value)) {
         // Organic support uses the separate TreeSupport3D generator and is not
@@ -4013,6 +4015,8 @@ void PrintObject::generate_support_geometry_only(std::vector<DynaPin::SupportSla
         } restore{*this, dynapin_tree_landing_plan()};
 
         generate_tree_support_with_dynapin_retries();
+        if (generated_tree_pins != nullptr)
+            *generated_tree_pins = dynapin_tree_landing_plan().used_pins;
         for (const SupportLayer* layer : m_support_layers) {
             if (layer == nullptr || layer->height <= EPSILON)
                 continue;

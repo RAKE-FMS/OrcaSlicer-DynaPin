@@ -342,6 +342,37 @@ double support_volume_mm3(const Print &print)
     return support_volume_mm3(slabs);
 }
 
+static const PrintObject* print_object_for_instance(const Print& print, const ObjectID& instance_id)
+{
+    for (const PrintObject* object : print.objects())
+        if (object != nullptr &&
+            std::any_of(object->instances().begin(), object->instances().end(), [&instance_id](const PrintInstance& instance) {
+                return instance.model_instance != nullptr && instance.model_instance->id() == instance_id;
+            }))
+            return object;
+    return nullptr;
+}
+
+static bool tree_candidate_requires_landing(const Print&            print,
+                                            const ObjectID&         target_instance_id,
+                                            const std::vector<Pin>& projected_tree_pins,
+                                            const std::vector<Pin>& generated_tree_pins)
+{
+    const PrintObject* target = print_object_for_instance(print, target_instance_id);
+    if (target == nullptr || !target->has_support() || !is_tree(target->config().support_type.value) ||
+        is_tree_organic(target->config().support_type.value, target->config().support_style.value))
+        return false;
+
+    if (print.dynapin_selection().source != SelectionSource::Automatic)
+        return false;
+
+    // A zero-pin Tree candidate otherwise receives an ordinary Tree support
+    // volume score and can beat candidates that preserve DynaPin support.
+    // Keep such a pose out of the automatic placement search, just like a pose
+    // whose projected pins fail to produce a usable landing.
+    return projected_tree_pins.empty() || generated_tree_pins.empty();
+}
+
 std::optional<double> evaluate_scene_candidate(const PlacementSceneSnapshot &scene,
                                                const PlacementCandidate     &candidate,
                                                const CancelCallback         &cancel)
@@ -398,12 +429,17 @@ std::optional<double> evaluate_scene_candidate(const PlacementSceneSnapshot &sce
     }
 
     std::vector<SupportSlab> slabs;
+    std::vector<Pin>         generated_tree_pins;
+    std::vector<Pin>         projected_tree_pins;
     // This call runs update_dynapin_selection() before support generation.
     // The existing blocker collision scan therefore removes only colliding
     // pins while the candidate pose remains eligible for volume scoring.
-    if (!candidate_print.generate_support_geometry_only(slabs, cancel))
+    if (!candidate_print.generate_support_geometry_only(
+            slabs, cancel, &scene.target_instance_id, &generated_tree_pins, &projected_tree_pins))
         return std::nullopt;
     if (cancel && cancel())
+        return std::nullopt;
+    if (tree_candidate_requires_landing(candidate_print, scene.target_instance_id, projected_tree_pins, generated_tree_pins))
         return std::nullopt;
 
     // Check all model instances in their actual Z intervals.  This catches
@@ -547,13 +583,21 @@ void evaluate_scene_angle_group(const PlacementSceneSnapshot          &scene,
                                        target_print_instance->print_object->center_offset();
 
         std::vector<SupportSlab> slabs;
-        if (!candidate_print.generate_support_geometry_for_current_shift(slabs, cancel)) {
+        std::vector<Pin>         generated_tree_pins;
+        std::vector<Pin>         projected_tree_pins;
+        if (!candidate_print.generate_support_geometry_for_current_shift(
+                slabs, cancel, &scene.target_instance_id, &generated_tree_pins, &projected_tree_pins)) {
             if (!(cancel && cancel()) && completed)
                 completed(i);
             continue;
         }
         if (cancel && cancel())
             return;
+        if (tree_candidate_requires_landing(candidate_print, scene.target_instance_id, projected_tree_pins, generated_tree_pins)) {
+            if (completed)
+                completed(i);
+            continue;
+        }
 
         if (model_layers_overlap(candidate_print) || model_intersects_bed_exclusion(candidate_print)) {
             if (completed)
