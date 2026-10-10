@@ -62,8 +62,17 @@ struct SupportNode
     {}
 
     // when dist_mm_to_top_==0, new node's dist_mm_to_top=parent->dist_mm_to_top + parent->height;
-    SupportNode(const Point position, const int distance_to_top, const int obj_layer_nr, const int support_roof_layers_below, const bool to_buildplate, SupportNode* parent,
-        coordf_t     print_z_, coordf_t height_, coordf_t dist_mm_to_top_ = 0, coordf_t radius_ = 0)
+    SupportNode(const Point  position,
+                const int    distance_to_top,
+                const int    obj_layer_nr,
+                const int    support_roof_layers_below,
+                const bool   to_buildplate,
+                SupportNode* parent,
+                coordf_t     print_z_,
+                coordf_t     height_,
+                double       diameter_angle_scale_factor,
+                coordf_t     dist_mm_to_top_ = 0,
+                coordf_t     radius_         = 0)
         : distance_to_top(distance_to_top)
         , position(position)
         , obj_layer_nr(obj_layer_nr)
@@ -111,9 +120,6 @@ struct SupportNode
      */
     int distance_to_top;
     coordf_t dist_mm_to_top = 0;  // dist to bottom contact in mm
-
-    // all nodes will have same diameter_angle_scale_factor because it's defined by user
-    static double diameter_angle_scale_factor;
 
     /*!
      * \brief The position of this node on the layer.
@@ -301,6 +307,7 @@ private:
      */
     const ExPolygons& calculate_avoidance(const RadiusLayerPair& key) const;
 
+    double           m_diameter_angle_scale_factor = 0.;
     tbb::spin_mutex  m_mutex;
     uint64_t         m_next_branch_id = 1;
 

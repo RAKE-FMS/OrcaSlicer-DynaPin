@@ -9,9 +9,11 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Preset.hpp"
+#include "libslic3r/Support/TreeSupport.hpp"
 
 #include <algorithm>
 #include <cstdlib>
+#include <future>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 
@@ -655,6 +657,7 @@ TEST_CASE("DynaPin Tree bounded placement keeps Simple Bridge support pins", "[P
     });
 
     Print print;
+    print.set_plate_origin(Vec3d::Zero());
     for (ModelObject* object : model.objects)
         print.auto_assign_extruders(object);
     print.apply(model, config);
@@ -666,6 +669,8 @@ TEST_CASE("DynaPin Tree bounded placement keeps Simple Bridge support pins", "[P
         DynaPin::prepare_placement_task(model, print, printable_area, 180., {}, 0);
     REQUIRE(preparation.task);
     DynaPin::PlacementTask task = std::move(*preparation.task);
+    // Keep integration tests independent of host memory pressure.
+    task.search.angle_group_concurrency = 1;
 
     // The reported production winner is 355 degrees relative to the loaded
     // 90-degree model pose. Limit coarse and local candidates to the current
@@ -744,6 +749,7 @@ TEST_CASE("DynaPin Tree placement optimization reslices with selected pins", "[P
 {
     ResourcesDirGuard resources_guard(test_resources_dir());
     Print print;
+    print.set_plate_origin(Vec3d::Zero());
     Model model;
     TriangleMesh bridge = Test::mesh(TestMesh::cube_20x20x20);
     TriangleMesh far_leg = Test::mesh(TestMesh::cube_20x20x20);
@@ -781,6 +787,8 @@ TEST_CASE("DynaPin Tree placement optimization reslices with selected pins", "[P
         {{0., 0.}, {180., 0.}, {180., 180.}, {0., 180.}}, 180., {}, 0);
     REQUIRE(preparation.task);
     DynaPin::PlacementTask task = std::move(*preparation.task);
+    // Keep integration tests independent of host memory pressure.
+    task.search.angle_group_concurrency    = 1;
     task.search.delta_y_range_for_rotation = [](double angle) -> std::optional<DynaPin::DeltaYInterval> {
         return angle == 0. ? std::optional<DynaPin::DeltaYInterval>{{-10., -10.}} : std::nullopt;
     };
@@ -886,6 +894,7 @@ TEST_CASE("DynaPin Tree keeps all three Simple Bridge pins", "[DynaPin][Print]")
 {
     ResourcesDirGuard resources_guard(test_resources_dir());
     Print print;
+    print.set_plate_origin(Vec3d::Zero());
     Model model;
     TriangleMesh bridge = Test::mesh(TestMesh::cube_20x20x20);
     TriangleMesh far_leg = Test::mesh(TestMesh::cube_20x20x20);
@@ -1456,6 +1465,197 @@ SCENARIO("Print: Brim generation", "[Print][.]") {
                 }
                 REQUIRE(total_items == 14);
             }
+        }
+    }
+}
+
+TEST_CASE("Tree support node growth is isolated between concurrent objects", "[Print][DynaPin]")
+{
+    Print              print_a, print_b;
+    Model              model_a, model_b;
+    DynamicPrintConfig config_a = DynamicPrintConfig::full_print_config();
+    DynamicPrintConfig config_b = config_a;
+    config_a.set_deserialize_strict({{"tree_support_branch_diameter_angle", 5.}});
+    config_b.set_deserialize_strict({{"tree_support_branch_diameter_angle", 25.}});
+    init_dynapin_print(print_a, model_a, config_a);
+    init_dynapin_print(print_b, model_b, config_b);
+    TreeSupportData data_a(*print_a.objects().front(), 0., 0.1);
+    TreeSupportData data_b(*print_b.objects().front(), 0., 0.1);
+    auto            grow = [](TreeSupportData& data) {
+        auto* parent = data.create_node(Point(0, 0), 0, 1, 0, true, nullptr, 2., 1., 1., 1.);
+        return data.create_node(Point(0, 0), 1, 0, 0, true, parent, 1., 1., 2.)->radius;
+    };
+    auto first  = std::async(std::launch::async, [&]() { return grow(data_a); });
+    auto second = std::async(std::launch::async, [&]() { return grow(data_b); });
+    CHECK(first.get() == Catch::Approx(1. + 5. * M_PI / 180.));
+    CHECK(second.get() == Catch::Approx(1. + 25. * M_PI / 180.));
+}
+
+TEST_CASE("Concurrent Tree angle evaluations match serial geometry across styles", "[Print][DynaPin][DynaPinPlacement]")
+{
+    ResourcesDirGuard  resources_guard(test_resources_dir());
+    DebugStageEnvGuard env_guard;
+    REQUIRE(::setenv("DYNAPIN_DEBUG_STAGE", "2", 1) == 0);
+    std::vector<DynaPin::PlacementTask> tasks;
+    for (const char* style : {"tree_slim", "tree_strong", "tree_hybrid"}) {
+        for (double angle : {5., 25.}) {
+            Print        print;
+            Model        model;
+            TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
+            mesh.scale(Vec3f(1.f, 1.f, 0.25f));
+            mesh.translate(30.f, 30.f, 0.f);
+            TriangleMesh top = Test::mesh(TestMesh::cube_20x20x20);
+            top.scale(Vec3f(0.1f, 0.1f, 0.1f));
+            top.translate(11.5f, 11.5f, 23.f);
+            mesh.merge(top);
+            ModelObject* object = model.add_object();
+            object->add_volume(std::move(mesh));
+            ModelInstance* instance = object->add_instance();
+            instance->set_offset({100., 0., 0.});
+            object->ensure_on_bed();
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict({
+                {"enable_support", true},
+                {"enable_dynapin_support_optimization", true},
+                {"enable_dynapin_placement_optimization", true},
+                {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+                {"dynapin_selected_pins", ""},
+                {"support_type", "tree(auto)"},
+                {"support_style", style},
+                {"tree_support_branch_diameter_angle", angle},
+                {"support_interface_bottom_layers", 1},
+                {"printable_area", "0x0,180x0,180x180,0x180"},
+                {"printable_height", 180.},
+            });
+            print.auto_assign_extruders(object);
+            print.apply(model, config);
+            print.set_status_silent();
+            auto preparation = DynaPin::prepare_placement_task(model, print, {{0., 0.}, {180., 0.}, {180., 180.}, {0., 180.}}, 180., {}, 0);
+            REQUIRE(preparation.task);
+            tasks.push_back(std::move(*preparation.task));
+        }
+    }
+    const std::vector<DynaPin::PlacementCandidate> candidates{{90., 0.}, {90., 20.}, {90., 0.}};
+    auto                                           evaluate = [&](const DynaPin::PlacementTask& task) {
+        std::vector<std::optional<double>> results;
+        DynaPin::evaluate_scene_angle_group(task.scene, 90., candidates, results);
+        return results;
+    };
+    std::vector<std::vector<std::optional<double>>> serial;
+    for (const auto& task : tasks)
+        serial.push_back(evaluate(task));
+    REQUIRE(serial.front().front());
+    std::vector<std::future<std::vector<std::optional<double>>>> futures;
+    for (size_t i = 0; i < tasks.size(); ++i)
+        futures.push_back(std::async(std::launch::async, [&, i]() { return evaluate(tasks[i]); }));
+    for (size_t i = 0; i < tasks.size(); ++i) {
+        INFO("style/config index=" << i);
+        REQUIRE(serial[i][0]);
+        auto parallel = futures[i].get();
+        REQUIRE(parallel.size() == candidates.size());
+        CHECK(parallel[0] == parallel[2]);
+        CHECK_FALSE(parallel[1]);
+        for (size_t j = 0; j < candidates.size(); ++j) {
+            REQUIRE(bool(parallel[j]) == bool(serial[i][j]));
+            if (parallel[j])
+                CHECK(*parallel[j] == Catch::Approx(*serial[i][j]).margin(std::max(1e-3, std::abs(*serial[i][j]) * 1e-6)));
+        }
+    }
+}
+
+TEST_CASE("DynaPin Tree bounded search preserves final pins across concurrency limits", "[Print][DynaPin][DynaPinPlacement]")
+{
+    ResourcesDirGuard  resources_guard(test_resources_dir());
+    DebugStageEnvGuard env_guard;
+    TemporaryDirGuard  temp_dir_guard;
+    REQUIRE(::setenv("DYNAPIN_DEBUG_STAGE", "2", 1) == 0);
+    Model                     model;
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext substitution{ForwardCompatibilitySubstitutionRule::Disable};
+    PlateDataPtrs             plate_data;
+    std::vector<Preset*>      project_presets;
+    ImportedProjectDataGuard  imported_project_data_guard(plate_data, project_presets);
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const auto                fixture = (boost::filesystem::path(TEST_DATA_DIR) / "dynapin" / "Simple_Bridge.3mf").string();
+    REQUIRE(load_bbs_3mf(fixture.c_str(), &config, &substitution, &model, &plate_data, &project_presets, &is_bbl_3mf, &file_version,
+                         nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
+    config.set_deserialize_strict({
+        {"enable_dynapin_support_optimization", true},
+        {"enable_dynapin_placement_optimization", true},
+        {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+        {"dynapin_debug_stage", 2},
+        {"dynapin_selected_pins", ""},
+        {"support_type", "tree(auto)"},
+        {"printable_area", "0x0,180x0,180x180,0x180"},
+        {"printable_height", 180.},
+    });
+    Print initial_print;
+    initial_print.set_plate_origin(Vec3d::Zero());
+    for (ModelObject* object : model.objects)
+        initial_print.auto_assign_extruders(object);
+    initial_print.apply(model, config);
+    initial_print.set_status_silent();
+    auto preparation = DynaPin::prepare_placement_task(model, initial_print, {{0., 0.}, {180., 0.}, {180., 180.}, {0., 180.}}, 180., {}, 0);
+    REQUIRE(preparation.task);
+    auto       task          = *preparation.task;
+    const auto allowed_angle = [](double angle) {
+        const double normalized = DynaPin::normalized_rotation_deg(angle);
+        return normalized == 0. || normalized == 5. || normalized == 355.;
+    };
+    task.search.delta_y_range_for_rotation = [allowed_angle](double angle) -> std::optional<DynaPin::DeltaYInterval> {
+        return allowed_angle(angle) ? std::optional<DynaPin::DeltaYInterval>{{0., 0.}} : std::nullopt;
+    };
+    const auto scene_evaluator  = DynaPin::make_scene_angle_evaluator(task.scene);
+    task.search.angle_evaluator = [allowed_angle, scene_evaluator](double angle, const std::vector<DynaPin::PlacementCandidate>& candidates,
+                                                                   std::vector<std::optional<double>>&        results,
+                                                                   const DynaPin::CandidateCompletedCallback& completed) {
+        if (allowed_angle(angle))
+            scene_evaluator(angle, candidates, results, completed);
+        else
+            results.assign(candidates.size(), std::nullopt);
+    };
+    // Exercise automatic scheduling without depending on other applications'
+    // memory use. Actual memory admission/failure is tested by scheduler tests.
+    task.search.resource_probe = []() -> std::optional<SystemResourceSample> {
+        return SystemResourceSample{16ull << 30, 12ull << 30, 1ull << 30, 0.};
+    };
+    std::optional<DynaPin::PlacementResult> serial_result;
+    std::vector<DynaPin::Pin>               serial_pins;
+    double                                  serial_volume = 0.;
+    for (size_t concurrency : {size_t(1), size_t(2), size_t(0)}) {
+        INFO("angle concurrency=" << concurrency);
+        task.search.angle_group_concurrency = concurrency;
+        const auto result                   = DynaPin::run_placement_task(task);
+        REQUIRE(result.status == DynaPin::PlacementStatus::Improved);
+        Model placed_model(model);
+        REQUIRE(DynaPin::apply_placement_result(placed_model, task, result).applied);
+        Print placed_print;
+        placed_print.set_plate_index(task.scene.plate_index);
+        placed_print.set_plate_origin(task.scene.plate_origin);
+        for (ModelObject* object : placed_model.objects)
+            placed_print.auto_assign_extruders(object);
+        placed_print.apply(placed_model, config);
+        placed_print.set_status_silent();
+        placed_print.process();
+        const auto& pins = placed_print.dynapin_selection().pins;
+        REQUIRE_FALSE(pins.empty());
+        REQUIRE(placed_print.objects().front()->dynapin_tree_landing_plan().used_pins == pins);
+        REQUIRE_FALSE(placed_print.objects().front()->support_layers().empty());
+        double volume = 0.;
+        for (const auto* layer : placed_print.objects().front()->support_layers())
+            volume += layer->support_fills.total_volume();
+        REQUIRE(volume > 0.);
+        if (concurrency == 1) {
+            serial_result = result;
+            serial_pins   = pins;
+            serial_volume = volume;
+        } else {
+            CHECK(result.candidate == serial_result->candidate);
+            CHECK(result.evaluations == serial_result->evaluations);
+            CHECK(result.volume_mm3 == Catch::Approx(serial_result->volume_mm3).margin(1e-3));
+            CHECK(pins == serial_pins);
+            CHECK(volume == Catch::Approx(serial_volume).margin(1e-3));
         }
     }
 }

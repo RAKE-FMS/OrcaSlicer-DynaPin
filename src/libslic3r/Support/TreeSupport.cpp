@@ -82,80 +82,43 @@ enum TreeSupportStage {
     STAGE_DROP_DOWN_NODES,
     STAGE_DRAW_CIRCLES,
     STAGE_GENERATE_TOOLPATHS,
-    STAGE_MinimumSpanningTree,
-    STAGE_GET_AVOIDANCE,
-    STAGE_projection_onto_ex,
-    STAGE_get_collision,
-    STAGE_intersection_ln,
     STAGE_total,
     NUM_STAGES
 };
 
+// Measure whole stages with a monotonic clock. Per-query timing in the
+// collision/avoidance caches adds contention to their parallel hot paths.
 class TreeSupportProfiler
 {
 public:
-    uint32_t stage_durations[NUM_STAGES] = { 0 };
-    uint32_t stage_index = 0;
-    boost::posix_time::ptime tic_time;
-    boost::posix_time::ptime toc_time;
-
-    TreeSupportProfiler()
-    {
-        for (uint32_t& item : stage_durations) {
-            item = 0;
-        }
-    }
-
-    void stage_start(TreeSupportStage stage)
-    {
-        if (stage > NUM_STAGES)
-            return;
-
-        m_stage_start_times[stage] = boost::posix_time::microsec_clock::local_time();
-    }
+    void stage_start(TreeSupportStage stage) { m_stage_start_times[stage] = Clock::now(); }
 
     void stage_finish(TreeSupportStage stage)
     {
-        if (stage > NUM_STAGES)
-            return;
-
-        boost::posix_time::ptime time = boost::posix_time::microsec_clock::local_time();
-        stage_durations[stage] = (time - m_stage_start_times[stage]).total_milliseconds();
+        const auto elapsed       = Clock::now() - m_stage_start_times[stage];
+        m_stage_durations[stage] = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
     }
 
-    void tic() { tic_time = boost::posix_time::microsec_clock::local_time(); }
-    uint32_t toc() {
-        toc_time = boost::posix_time::microsec_clock::local_time();
-        return (toc_time - tic_time).total_milliseconds();
-    }
-    void stage_add(TreeSupportStage stage)
-    {
-        if (stage > NUM_STAGES)
-            return;
-        stage_durations[stage] += toc();
-    }
-
-    std::string report()
+    std::string report() const
     {
         std::stringstream ss;
-        ss << "total overhange cost: " << stage_durations[STAGE_total]
-            << "; STAGE_DETECT_OVERHANGS: " << stage_durations[STAGE_DETECT_OVERHANGS]
-            << "; STAGE_GENERATE_CONTACT_NODES: " << stage_durations[STAGE_GENERATE_CONTACT_NODES]
-            << "; STAGE_DROP_DOWN_NODES: " << stage_durations[STAGE_DROP_DOWN_NODES]
-            << "; STAGE_DRAW_CIRCLES: " << stage_durations[STAGE_DRAW_CIRCLES]
-            << "; STAGE_GENERATE_TOOLPATHS: " << stage_durations[STAGE_GENERATE_TOOLPATHS]
-            << "; STAGE_MinimumSpanningTree: " << stage_durations[STAGE_MinimumSpanningTree]
-            << "; STAGE_GET_AVOIDANCE: " << stage_durations[STAGE_GET_AVOIDANCE]
-            << "; STAGE_projection_onto_ex: " << stage_durations[STAGE_projection_onto_ex]
-            << "; STAGE_get_collision: " << stage_durations[STAGE_get_collision]
-            << "; STAGE_intersection_ln: " << stage_durations[STAGE_intersection_ln];
-
+        ss << "total overhange cost: " << m_stage_durations[STAGE_total]
+           << "; STAGE_DETECT_OVERHANGS: " << m_stage_durations[STAGE_DETECT_OVERHANGS]
+           << "; STAGE_GENERATE_CONTACT_NODES: " << m_stage_durations[STAGE_GENERATE_CONTACT_NODES]
+           << "; STAGE_DROP_DOWN_NODES: " << m_stage_durations[STAGE_DROP_DOWN_NODES]
+           << "; STAGE_DRAW_CIRCLES: " << m_stage_durations[STAGE_DRAW_CIRCLES]
+           << "; STAGE_GENERATE_TOOLPATHS: " << m_stage_durations[STAGE_GENERATE_TOOLPATHS];
         return ss.str();
     }
+
 private:
-    boost::posix_time::ptime m_stage_start_times[NUM_STAGES];
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point m_stage_start_times[NUM_STAGES];
+    int64_t           m_stage_durations[NUM_STAGES] = {};
 };
-TreeSupportProfiler profiler;
+
+static double branch_diameter_angle_scale_factor(const PrintObjectConfig& config)
+{ return std::clamp<double>(config.tree_support_branch_diameter_angle * M_PI / 180., 0., 0.5 * M_PI - EPSILON); }
 
 Lines spanning_tree_to_lines(const std::vector<MinimumSpanningTree>& spanning_trees)
 {
@@ -626,7 +589,7 @@ TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_p
 
     if(support_pattern == smpLightning)
         m_support_params.base_fill_pattern = ipLightning;
-    diameter_angle_scale_factor              = std::clamp<double>(m_object_config->tree_support_branch_diameter_angle * M_PI / 180., 0., 0.5 * M_PI - EPSILON);
+    diameter_angle_scale_factor              = branch_diameter_angle_scale_factor(*m_object_config);
     is_slim                                  = is_tree_slim(support_type, m_support_params.support_style);
     is_strong = is_tree(support_type) && m_support_params.support_style == smsTreeStrong;
     base_radius                              = std::max(MIN_BRANCH_RADIUS, m_object_config->tree_support_branch_diameter.value / 2);
@@ -1674,6 +1637,7 @@ void TreeSupport::generate()
         return;
     }
 
+    TreeSupportProfiler profiler;
     profiler.stage_start(STAGE_total);
 
     // Generate overhang areas
@@ -2621,8 +2585,6 @@ void TreeSupport::draw_circles()
     }
 }
 
-double SupportNode::diameter_angle_scale_factor;
-
 void TreeSupport::drop_nodes()
 {
     const PrintObjectConfig &config = m_object->config();
@@ -2639,7 +2601,6 @@ void TreeSupport::drop_nodes()
     const bool support_on_buildplate_only = config.support_on_build_plate_only.value;
     const size_t top_interface_layers = config.support_interface_top_layers.value;
     const size_t bottom_interface_layers = config.support_interface_bottom_layers.value < 0 ? top_interface_layers : config.support_interface_bottom_layers.value;
-    SupportNode::diameter_angle_scale_factor = diameter_angle_scale_factor;
     float        DO_NOT_MOVER_UNDER_MM       = is_slim ? 0 : 5;                     // do not move contact points under 5mm
 
     auto get_max_move_dist = [this, &config, tan_angle, wall_count, support_extrusion_width](const SupportNode *node, int power = 1) {
@@ -2806,12 +2767,10 @@ void TreeSupport::drop_nodes()
                     return true;
             }
             else {
-                profiler.tic();
                 Line ln(b, a);
                 Lines pls_intersect = intersection_ln(ln, layer_contours);
                 mst_line_x_layer_contour_cache.insert({ {a, b}, !pls_intersect.empty() });
                 mst_line_x_layer_contour_cache.insert({ ln, !pls_intersect.empty() });
-                profiler.stage_add(STAGE_intersection_ln);
                 if (!pls_intersect.empty())
                     return true;
             }
@@ -2960,7 +2919,6 @@ void TreeSupport::drop_nodes()
         }
 
         //Create a MST for every part.
-        profiler.tic();
         //std::vector<MinimumSpanningTree>& spanning_trees = m_spanning_trees[layer_nr];
         std::vector<MinimumSpanningTree> spanning_trees;
         for (const std::unordered_map<Point, SupportNode*, PointHash>& group : nodes_per_part)
@@ -2972,7 +2930,6 @@ void TreeSupport::drop_nodes()
             }
             spanning_trees.emplace_back(points_to_buildplate);
         }
-        profiler.stage_add(STAGE_MinimumSpanningTree);
 
 #ifdef SUPPORT_TREE_DEBUG_TO_SVG
         coordf_t branch_radius_temp = 0;
@@ -3797,8 +3754,10 @@ void TreeSupport::insert_dropped_node(std::vector<SupportNode*>& nodes_layer, Su
     conflicting_node->support_roof_layers_below = std::max(conflicting_node->support_roof_layers_below, p_node->support_roof_layers_below);
 }
 
-TreeSupportData::TreeSupportData(const PrintObject &object, coordf_t xy_distance, coordf_t radius_sample_resolution)
-    : m_xy_distance(xy_distance), m_radius_sample_resolution(radius_sample_resolution)
+TreeSupportData::TreeSupportData(const PrintObject& object, coordf_t xy_distance, coordf_t radius_sample_resolution)
+    : m_diameter_angle_scale_factor(branch_diameter_angle_scale_factor(object.config()))
+    , m_xy_distance(xy_distance)
+    , m_radius_sample_resolution(radius_sample_resolution)
 {
     branch_scale_factor = tan(object.config().tree_support_branch_angle.value * M_PI / 180.);
     clear_nodes();
@@ -3822,24 +3781,20 @@ TreeSupportData::TreeSupportData(const PrintObject &object, coordf_t xy_distance
 
 const ExPolygons& TreeSupportData::get_collision(coordf_t radius, size_t layer_nr) const
 {
-    profiler.tic();
     radius = ceil_radius(radius);
     RadiusLayerPair key{radius, layer_nr};
     const auto it = m_collision_cache.find(key);
     const ExPolygons& collision = it != m_collision_cache.end() ? it->second : calculate_collision(key);
-    profiler.stage_add(STAGE_get_collision);
     return collision;
 }
 
 const ExPolygons& TreeSupportData::get_avoidance(coordf_t radius, size_t layer_nr, int recursions) const
 {
-    profiler.tic();
     radius = ceil_radius(radius);
     RadiusLayerPair key{radius, layer_nr, recursions };
     const auto it = m_avoidance_cache.find(key);
     const ExPolygons& avoidance = it != m_avoidance_cache.end() ? it->second : calculate_avoidance(key);
 
-    profiler.stage_add(STAGE_GET_AVOIDANCE);
     return avoidance;
 }
 
@@ -3867,7 +3822,9 @@ SupportNode* TreeSupportData::create_node(const Point position, const int distan
 {
     // this function may be called from multiple threads, need to lock
     m_mutex.lock();
-    std::unique_ptr<SupportNode> node = std::make_unique<SupportNode>(position, distance_to_top, obj_layer_nr, support_roof_layers_below, to_buildplate, parent, print_z_, height_, dist_mm_to_top_, radius_);
+    std::unique_ptr<SupportNode> node = std::make_unique<SupportNode>(position, distance_to_top, obj_layer_nr, support_roof_layers_below,
+                                                                      to_buildplate, parent, print_z_, height_,
+                                                                      m_diameter_angle_scale_factor, dist_mm_to_top_, radius_);
     if (parent == nullptr)
         node->branch_id = m_next_branch_id++;
     SupportNode* raw_ptr = node.get();

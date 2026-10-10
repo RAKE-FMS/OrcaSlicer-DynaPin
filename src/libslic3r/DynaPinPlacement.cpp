@@ -762,8 +762,6 @@ PlacementResult run_placement_task(PlacementTask                task,
             result.warning = std::move(eligibility_error);
             return result;
         }
-        if (task.tree_support)
-            task.search.angle_group_concurrency = 1;
         if (!task.search.angle_evaluator)
             task.search.angle_evaluator = make_scene_angle_evaluator(task.scene, cancel);
         return optimize_placement(task.search, make_scene_evaluator(task.scene, cancel), cancel, progress, progress_stage);
