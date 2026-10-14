@@ -765,6 +765,7 @@ void PrintObject::detect_overhangs_for_lift()
 void PrintObject::generate_support_material()
 {
     if (this->set_started(posSupportMaterial)) {
+        this->clear_dynapin_tree_landing_plan();
         if (m_print->get_object(0) == this && !m_print->dynapin_selection().warning.empty())
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
                                           m_print->dynapin_selection().warning);
@@ -807,6 +808,11 @@ void PrintObject::generate_support_material()
 
             this->_generate_support_material();
             m_print->throw_if_canceled();
+            if (is_tree(m_config.support_type.value) &&
+                m_print->dynapin_selection().source == DynaPin::SelectionSource::Manual &&
+                !m_print->dynapin_selection().pins.empty() && dynapin_tree_landing_plan().used_pins.empty())
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                                              L("The selected DynaPin pins cannot provide a valid Tree support landing."));
         }
         this->set_done(posSupportMaterial);
     }
@@ -939,8 +945,10 @@ FillLightning::GeneratorPtr PrintObject::prepare_lightning_infill_data()
 
 void PrintObject::clear_layers()
 {
+    m_dynapin_layer_polygons.reset();
+    m_dynapin_tree_contacts.reset();
     if (!m_shared_object) {
-        for (Layer *l : m_layers)
+        for (Layer* l : m_layers)
             delete l;
         m_layers.clear();
     }
@@ -1358,6 +1366,41 @@ bool PrintObject::invalidate_state_by_config_options(
     return invalidated;
 }
 
+const std::vector<Polygons>& PrintObject::dynapin_layer_polygons() const
+{
+    if (!m_dynapin_layer_polygons) {
+        auto polygons = std::make_shared<std::vector<Polygons>>();
+        polygons->reserve(m_layers.size());
+        for (const Layer* layer : m_layers) {
+            m_print->throw_if_canceled();
+            polygons->push_back(to_polygons(layer->lslices));
+        }
+        m_print->throw_if_canceled();
+        m_dynapin_layer_polygons = std::move(polygons);
+    }
+    return *m_dynapin_layer_polygons;
+}
+
+const std::vector<DynaPin::ProjectionEvent>& PrintObject::dynapin_tree_contacts() const
+{
+    if (!m_dynapin_tree_contacts) {
+        const auto& polygons = dynapin_layer_polygons();
+        auto        contacts = std::make_shared<std::vector<DynaPin::ProjectionEvent>>();
+        for (size_t i = 1; i < m_layers.size(); ++i) {
+            m_print->throw_if_canceled();
+            Polygons overhang = diff(polygons[i], offset(polygons[i - 1], scale_(0.05)));
+            if (!overhang.empty())
+                contacts->push_back({DynaPin::ProjectionEventType::Contact, m_layers[i]->print_z, std::move(overhang), {}, false});
+        }
+        m_print->throw_if_canceled();
+        BOOST_LOG_TRIVIAL(info) << "[DynaPin] Tree contact geometry built: layers=" << m_layers.size() << ", contacts=" << contacts->size()
+                                << ", differences=" << (m_layers.empty() ? 0 : m_layers.size() - 1)
+                                << ", offsets=" << (m_layers.empty() ? 0 : m_layers.size() - 1);
+        m_dynapin_tree_contacts = std::move(contacts);
+    }
+    return *m_dynapin_tree_contacts;
+}
+
 bool PrintObject::invalidate_step(PrintObjectStep step)
 {
 	bool invalidated = Inherited::invalidate_step(step);
@@ -1372,7 +1415,9 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
         invalidated |= this->invalidate_steps({ posIroning, posSimplifyInfill });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
     } else if (step == posSlice) {
-		invalidated |= this->invalidate_steps({ posPerimeters, posPrepareInfill, posInfill, posIroning, posSupportMaterial, posSimplifyPath, posSimplifyInfill });
+        m_dynapin_layer_polygons.reset();
+        m_dynapin_tree_contacts.reset();
+        invalidated |= this->invalidate_steps({ posPerimeters, posPrepareInfill, posInfill, posIroning, posSupportMaterial, posSimplifyPath, posSimplifyInfill });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
         m_slicing_params.valid = false;
     } else if (step == posSupportMaterial) {
@@ -1394,7 +1439,9 @@ bool PrintObject::invalidate_all_steps()
 {
 	// First call the "invalidate" functions, which may cancel background processing.
     bool result = Inherited::invalidate_all_steps() | m_print->invalidate_all_steps();
-	// Then reset some of the depending values.
+    m_dynapin_layer_polygons.reset();
+    m_dynapin_tree_contacts.reset();
+    // Then reset some of the depending values.
 	m_slicing_params.valid = false;
 	return result;
 }
@@ -3957,9 +4004,7 @@ void PrintObject::combine_infill()
 void PrintObject::_generate_support_material()
 {
     if (is_tree(m_config.support_type.value)) {
-        TreeSupport tree_support(*this, m_slicing_params);
-        tree_support.throw_on_cancel = [this]() { this->throw_if_canceled(); };
-        tree_support.generate();
+        generate_tree_support_with_dynapin_retries();
     }
     else {
         PrintObjectSupportMaterial support_material(this, m_slicing_params);
@@ -3967,13 +4012,65 @@ void PrintObject::_generate_support_material()
     }
 }
 
-void PrintObject::generate_support_geometry_only(std::vector<DynaPin::SupportSlab> &slabs)
+void PrintObject::generate_tree_support_with_dynapin_retries()
+{
+    const bool retry = m_print->dynapin_selection().source == DynaPin::SelectionSource::Automatic &&
+                       !is_tree_organic(m_config.support_type.value, m_config.support_style.value);
+    std::vector<DynaPin::Pin> candidates = retry ? m_print->dynapin_selection().pins : std::vector<DynaPin::Pin>{};
+    const size_t max_attempts = retry ? candidates.size() + 1 : 1;
+    for (size_t attempt = 0; attempt < max_attempts; ++attempt) {
+        TreeSupport tree_support(*this, m_slicing_params, retry ? &candidates : nullptr);
+        tree_support.throw_on_cancel = [this]() { this->throw_if_canceled(); };
+        tree_support.generate();
+        if (!retry || dynapin_tree_landing_plan().used_pins == candidates)
+            return;
+        candidates = dynapin_tree_landing_plan().used_pins;
+        clear_support_layers();
+        clear_tree_support_preview_cache();
+        throw_if_canceled();
+    }
+}
+
+void PrintObject::generate_support_geometry_only(std::vector<DynaPin::SupportSlab>& slabs, std::vector<DynaPin::Pin>* generated_tree_pins)
 {
     slabs.clear();
-    // Tree/Organic support has a different generator and is intentionally not
-    // part of DynaPin placement optimization.
-    if (is_tree(m_config.support_type.value))
+    if (generated_tree_pins != nullptr)
+        generated_tree_pins->clear();
+
+    if (is_tree(m_config.support_type.value)) {
+        // Organic support uses the separate TreeSupport3D generator and is not
+        // supported by DynaPin placement optimization.
+        if (is_tree_organic(m_config.support_type.value, m_config.support_style.value))
+            return;
+
+        struct SupportLayerRestore
+        {
+            PrintObject& object;
+            DynaPin::TreePinLandingPlan old_plan;
+            ~SupportLayerRestore()
+            {
+                object.clear_support_layers();
+                object.clear_tree_support_preview_cache();
+                object.set_dynapin_tree_landing_plan(std::move(old_plan));
+            }
+        } restore{*this, dynapin_tree_landing_plan()};
+
+        generate_tree_support_with_dynapin_retries();
+        if (generated_tree_pins != nullptr)
+            *generated_tree_pins = dynapin_tree_landing_plan().used_pins;
+        for (const SupportLayer* layer : m_support_layers) {
+            if (layer == nullptr || layer->height <= EPSILON)
+                continue;
+            Polygons polygons;
+            polygons_append(polygons, to_polygons(layer->base_areas));
+            polygons_append(polygons, to_polygons(layer->roof_areas));
+            polygons_append(polygons, to_polygons(layer->roof_1st_layer));
+            polygons_append(polygons, to_polygons(layer->floor_areas));
+            if (!polygons.empty())
+                slabs.push_back({layer->bottom_z(), layer->print_z, union_(std::move(polygons))});
+        }
         return;
+    }
 
     PrintObjectSupportMaterial support_material(this, m_slicing_params);
     support_material.generate_geometry_only(*this, slabs);

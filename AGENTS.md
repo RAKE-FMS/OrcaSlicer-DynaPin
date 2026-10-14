@@ -3,6 +3,9 @@
 ## Project Structure & Module Organization
 OrcaSlicer’s C++17 sources live in `src/`, split by feature modules and platform adapters. User assets, icons, and printer presets are in `resources/`; translations stay in `localization/`. Tests sit in `tests/`, grouped by domain (`libslic3r/`, `sla_print/`, etc.) with fixtures under `tests/data/`. CMake helpers reside in `cmake/`, and longer references in `doc/` and `SoftFever_doc/`. Automation scripts belong in `scripts/` and `tools/`. Treat everything in `deps/` and `deps_src/` as vendored snapshots—do not modify without mirroring upstream tags.
 
+## Implementation Reference
+For non-trivial implementation work, consult [docs/ORCASLICER_IMPLEMENTATION_GUIDE.md](docs/ORCASLICER_IMPLEMENTATION_GUIDE.md) when identifying the owning subsystem or tracing slicing, configuration invalidation, support generation, G-code, GUI, or test flows. Use it as architectural orientation, then verify the current execution path and conventions in the source before making changes.
+
 ## Build, Test, and Development Commands
 Use out-of-source builds:
 - `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release` configures dependencies and generates build files.

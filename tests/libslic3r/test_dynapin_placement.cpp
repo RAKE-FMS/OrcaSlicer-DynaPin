@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/DynaPinPlacement.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
 #include <algorithm>
@@ -315,7 +316,7 @@ TEST_CASE("DynaPin placement eligibility is a complete snapshot gate", "[DynaPin
 
     eligibility.placement_enabled        = true;
     eligibility.automatic_pin_selection  = true;
-    eligibility.normal_support           = true;
+    eligibility.support_configuration_eligible = true;
     eligibility.selected_instance_count  = 1;
     CHECK(eligibility.valid(&error));
 }
@@ -728,4 +729,68 @@ TEST_CASE("DynaPin placement auto scheduling respects memory admission", "[DynaP
     CHECK(result.status == DynaPin::PlacementStatus::Improved);
     CHECK(waiting_groups == 2);
     CHECK(peak.load() == 2);
+}
+
+TEST_CASE("DynaPin Tree placement task honors angle group concurrency", "[DynaPinPlacement]")
+{
+    // Only the current pose uses a real scene. The synthetic angle evaluator
+    // isolates task scheduling from the cost and resource needs of Tree geometry.
+    auto  model  = std::make_shared<Model>();
+    auto* object = model->add_object();
+    object->add_volume(make_cube(5., 5., 5.));
+    auto* instance = object->add_instance();
+    instance->set_offset({50., 50., 0.});
+    DynaPin::PlacementSceneSnapshot scene;
+    scene.model  = model;
+    scene.config = DynamicPrintConfig::full_print_config();
+    scene.config.set_deserialize_strict({{"printable_area", "0x0,180x0,180x180,0x180"}, {"printable_height", 180.}});
+    scene.target_object_id   = object->id();
+    scene.target_instance_id = instance->id();
+    scene.initial_transform  = instance->get_matrix();
+    scene.world_center       = object->instance_bounding_box(*instance, false).center();
+    scene.printable_area     = {{0., 0.}, {180., 0.}, {180., 180.}, {0., 180.}};
+    scene.printable_height   = 180.;
+    std::optional<DynaPin::PlacementResult> serial_result;
+    for (size_t concurrency : {size_t(1), size_t(2), size_t(0)}) {
+        DynaPin::PlacementTask task;
+        task.tree_support                      = true;
+        task.scene                             = scene;
+        task.eligibility                       = {true, true, true, true, 1};
+        task.search.pitch_y                    = 16.;
+        task.search.current_volume_mm3         = 1000.;
+        task.search.angle_group_concurrency    = concurrency;
+        task.search.delta_y_range_for_rotation = [](double) -> std::optional<DynaPin::DeltaYInterval> {
+            return DynaPin::DeltaYInterval{0., 0.};
+        };
+        task.search.resource_probe = []() -> std::optional<SystemResourceSample> {
+            return SystemResourceSample{16ull << 30, 12ull << 30, 1ull << 30, 0.};
+        };
+        std::atomic<size_t> active{0};
+        std::atomic<size_t> peak{0};
+        task.search.angle_evaluator = [&](double, const std::vector<DynaPin::PlacementCandidate>& candidates,
+                                          std::vector<std::optional<double>>&        results,
+                                          const DynaPin::CandidateCompletedCallback& completed) {
+            const size_t count    = active.fetch_add(1) + 1;
+            size_t       previous = peak.load();
+            while (previous < count && !peak.compare_exchange_weak(previous, count)) {}
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            results.assign(candidates.size(), 800.);
+            for (size_t i = 0; i < candidates.size(); ++i)
+                completed(i);
+            active.fetch_sub(1);
+        };
+        const auto result = DynaPin::run_placement_task(task);
+        REQUIRE(result.status == DynaPin::PlacementStatus::Improved);
+        if (concurrency == 1) {
+            CHECK(peak.load() == 1);
+            serial_result = result;
+        } else {
+            CHECK(peak.load() > 1);
+            if (concurrency == 2)
+                CHECK(peak.load() <= 2);
+            CHECK(result.candidate == serial_result->candidate);
+            CHECK(result.volume_mm3 == serial_result->volume_mm3);
+            CHECK(result.evaluations == serial_result->evaluations);
+        }
+    }
 }

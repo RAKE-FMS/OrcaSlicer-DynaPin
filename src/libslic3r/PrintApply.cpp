@@ -1806,6 +1806,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // helpers even before process(). Automatic selections require sliced layers
     // and are resolved later by Print::update_dynapin_selection().
     m_dynapin_selection = {};
+    m_dynapin_candidate_selection = {};
     if (m_config.enable_dynapin_support_optimization.value && DynaPin::effective_debug_stage(*this) >= 1 &&
         DynaPin::has_manual_selection(*this)) {
         DynaPin::Config dynapin_config;

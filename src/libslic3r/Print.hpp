@@ -337,6 +337,9 @@ public:
     // Whoever will get a non-const pointer to PrintObject will be able to modify its layers.
     LayerPtrs&                   layers()               { return m_layers; }
     SupportLayerPtrs&            support_layers()       { return m_support_layers; }
+    const DynaPin::TreePinLandingPlan& dynapin_tree_landing_plan() const { return m_dynapin_tree_landing_plan; }
+    void set_dynapin_tree_landing_plan(DynaPin::TreePinLandingPlan plan) { m_dynapin_tree_landing_plan = std::move(plan); }
+    void clear_dynapin_tree_landing_plan() { m_dynapin_tree_landing_plan = {}; }
 
     template<typename PolysType>
     static void remove_bridges_from_contacts(
@@ -359,9 +362,9 @@ public:
 
     // BBS
     void generate_support_preview();
-    // Generate only Normal support polygons for placement scoring.  The
+    // Generate temporary support geometry for placement scoring.  The
     // temporary generator clears any support layers before returning.
-    void generate_support_geometry_only(std::vector<DynaPin::SupportSlab> &slabs);
+    void generate_support_geometry_only(std::vector<DynaPin::SupportSlab>& slabs, std::vector<DynaPin::Pin>* generated_tree_pins = nullptr);
     const std::vector<VolumeSlices>& firstLayerObjSlice() const { return firstLayerObjSliceByVolume; }
     std::vector<VolumeSlices>& firstLayerObjSliceMod() { return firstLayerObjSliceByVolume; }
     const std::vector<groupedVolumeSlices>& firstLayerObjGroups() const { return firstLayerObjSliceByGroups; }
@@ -406,6 +409,9 @@ public:
     // BBS
     SupportLayer* add_tree_support_layer(int id, coordf_t height, coordf_t print_z, coordf_t slice_z);
     std::shared_ptr<TreeSupportData> alloc_tree_support_preview_cache();
+    // Immutable object-local geometry, shared only across this object's Y candidates.
+    const std::vector<Polygons>& dynapin_layer_polygons() const;
+    const std::vector<DynaPin::ProjectionEvent>& dynapin_tree_contacts() const;
     void clear_tree_support_preview_cache() { m_tree_support_preview_cache.reset(); }
 
     size_t          support_layer_count() const { return m_support_layers.size(); }
@@ -505,6 +511,7 @@ private:
     void infill();
     void ironing();
     void generate_support_material();
+    void generate_tree_support_with_dynapin_retries();
     void estimate_curled_extrusions();
     void simplify_extrusion_path();
 
@@ -563,6 +570,9 @@ private:
     SlicingParameters                       m_slicing_params;
     LayerPtrs                               m_layers;
     SupportLayerPtrs                        m_support_layers;
+    DynaPin::TreePinLandingPlan             m_dynapin_tree_landing_plan;
+    mutable std::shared_ptr<const std::vector<Polygons>> m_dynapin_layer_polygons;
+    mutable std::shared_ptr<const std::vector<DynaPin::ProjectionEvent>> m_dynapin_tree_contacts;
     // BBS
     std::shared_ptr<TreeSupportData>        m_tree_support_preview_cache;
 
@@ -914,15 +924,20 @@ public:
     ApplyStatus         apply(const Model &model, DynamicPrintConfig config) override;
 
     void                process(long long *time_cost_with_cache = nullptr, bool use_cache = false) override;
-    // Run the slice/infill/support stages needed for placement scoring.  The
-    // Normal support generator is stopped before support toolpaths are built;
-    // callers receive owned support slabs in plate coordinates only after
-    // collecting each PrintObject's geometry.
-    bool                generate_normal_support_geometry_only(std::vector<DynaPin::SupportSlab> &slabs,
-                                                              const std::function<bool()> &cancel = {});
-    bool                prepare_slices_for_support_geometry(const std::function<bool()> &cancel = {});
-    bool                generate_normal_support_geometry_for_current_shift(std::vector<DynaPin::SupportSlab> &slabs,
-                                                                          const std::function<bool()> &cancel = {});
+    // Run slice, infill, and support generation for placement scoring. Return
+    // owned support slabs in plate coordinates; optional Tree pin outputs
+    // capture target-instance projection selections and usable landings.
+    bool generate_support_geometry_only(std::vector<DynaPin::SupportSlab>& slabs,
+                                        const std::function<bool()>&       cancel                  = {},
+                                        const ObjectID*                    tree_target_instance_id = nullptr,
+                                        std::vector<DynaPin::Pin>*         generated_tree_pins     = nullptr,
+                                        std::vector<DynaPin::Pin>*         projected_tree_pins     = nullptr);
+    bool prepare_slices_for_support_geometry(const std::function<bool()>& cancel = {});
+    bool generate_support_geometry_for_current_shift(std::vector<DynaPin::SupportSlab>& slabs,
+                                                     const std::function<bool()>&       cancel                  = {},
+                                                     const ObjectID*                    tree_target_instance_id = nullptr,
+                                                     std::vector<DynaPin::Pin>*         generated_tree_pins     = nullptr,
+                                                     std::vector<DynaPin::Pin>*         projected_tree_pins     = nullptr);
     // Exports G-code into a file name based on the path_template, returns the file path of the generated G-code file.
     // If preview_data is not null, the preview_data is filled in for the G-code visualization (not used by the command line Slic3r).
     std::string         export_gcode(const std::string& path_template, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
@@ -962,7 +977,9 @@ public:
     const PrintConfig&          config() const { return m_config; }
     const DynaPin::SelectionResult& dynapin_selection() const { return m_dynapin_selection; }
     void set_dynapin_selection(DynaPin::SelectionResult selection) { m_dynapin_selection = std::move(selection); }
-    void update_dynapin_selection();
+    void update_dynapin_selection(const ObjectID* tree_target_instance_id = nullptr,
+                                  std::vector<DynaPin::Pin>* projected_tree_pins = nullptr);
+    void finalize_dynapin_tree_selection();
     const PrintObjectConfig&    default_object_config() const { return m_default_object_config; }
     const PrintRegionConfig& default_region_config() const { return m_default_region_config; }
     ConstPrintObjectPtrsAdaptor objects() const { return ConstPrintObjectPtrsAdaptor(&m_objects); }
@@ -1148,6 +1165,7 @@ private:
 
     PrintConfig                             m_config;
     DynaPin::SelectionResult                m_dynapin_selection;
+    DynaPin::SelectionResult                m_dynapin_candidate_selection;
     PrintObjectConfig                       m_default_object_config;
     PrintRegionConfig                       m_default_region_config;
     PrintObjectPtrs                         m_objects;

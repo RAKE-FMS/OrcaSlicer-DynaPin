@@ -222,8 +222,8 @@ bool PlacementEligibility::valid(std::string *error) const
         return fail("DynaPin position/rotation optimization is disabled");
     if (!automatic_pin_selection)
         return fail("DynaPin placement optimization requires automatic pin selection");
-    if (!normal_support)
-        return fail("DynaPin placement optimization requires Normal support");
+    if (!support_configuration_eligible)
+        return fail("DynaPin placement optimization requires Normal or non-Organic Tree support");
     if (selected_instance_count != 1)
         return fail("DynaPin placement optimization requires exactly one selected instance");
     return true;
@@ -342,6 +342,37 @@ double support_volume_mm3(const Print &print)
     return support_volume_mm3(slabs);
 }
 
+static const PrintObject* print_object_for_instance(const Print& print, const ObjectID& instance_id)
+{
+    for (const PrintObject* object : print.objects())
+        if (object != nullptr &&
+            std::any_of(object->instances().begin(), object->instances().end(), [&instance_id](const PrintInstance& instance) {
+                return instance.model_instance != nullptr && instance.model_instance->id() == instance_id;
+            }))
+            return object;
+    return nullptr;
+}
+
+static bool tree_candidate_requires_landing(const Print&            print,
+                                            const ObjectID&         target_instance_id,
+                                            const std::vector<Pin>& projected_tree_pins,
+                                            const std::vector<Pin>& generated_tree_pins)
+{
+    const PrintObject* target = print_object_for_instance(print, target_instance_id);
+    if (target == nullptr || !target->has_support() || !is_tree(target->config().support_type.value) ||
+        is_tree_organic(target->config().support_type.value, target->config().support_style.value))
+        return false;
+
+    if (print.dynapin_selection().source != SelectionSource::Automatic)
+        return false;
+
+    // A zero-pin Tree candidate otherwise receives an ordinary Tree support
+    // volume score and can beat candidates that preserve DynaPin support.
+    // Keep such a pose out of the automatic placement search, just like a pose
+    // whose projected pins fail to produce a usable landing.
+    return projected_tree_pins.empty() || generated_tree_pins.empty();
+}
+
 std::optional<double> evaluate_scene_candidate(const PlacementSceneSnapshot &scene,
                                                const PlacementCandidate     &candidate,
                                                const CancelCallback         &cancel)
@@ -398,12 +429,17 @@ std::optional<double> evaluate_scene_candidate(const PlacementSceneSnapshot &sce
     }
 
     std::vector<SupportSlab> slabs;
+    std::vector<Pin>         generated_tree_pins;
+    std::vector<Pin>         projected_tree_pins;
     // This call runs update_dynapin_selection() before support generation.
     // The existing blocker collision scan therefore removes only colliding
     // pins while the candidate pose remains eligible for volume scoring.
-    if (!candidate_print.generate_normal_support_geometry_only(slabs, cancel))
+    if (!candidate_print.generate_support_geometry_only(
+            slabs, cancel, &scene.target_instance_id, &generated_tree_pins, &projected_tree_pins))
         return std::nullopt;
     if (cancel && cancel())
+        return std::nullopt;
+    if (tree_candidate_requires_landing(candidate_print, scene.target_instance_id, projected_tree_pins, generated_tree_pins))
         return std::nullopt;
 
     // Check all model instances in their actual Z intervals.  This catches
@@ -547,13 +583,21 @@ void evaluate_scene_angle_group(const PlacementSceneSnapshot          &scene,
                                        target_print_instance->print_object->center_offset();
 
         std::vector<SupportSlab> slabs;
-        if (!candidate_print.generate_normal_support_geometry_for_current_shift(slabs, cancel)) {
+        std::vector<Pin>         generated_tree_pins;
+        std::vector<Pin>         projected_tree_pins;
+        if (!candidate_print.generate_support_geometry_for_current_shift(
+                slabs, cancel, &scene.target_instance_id, &generated_tree_pins, &projected_tree_pins)) {
             if (!(cancel && cancel()) && completed)
                 completed(i);
             continue;
         }
         if (cancel && cancel())
             return;
+        if (tree_candidate_requires_landing(candidate_print, scene.target_instance_id, projected_tree_pins, generated_tree_pins)) {
+            if (completed)
+                completed(i);
+            continue;
+        }
 
         if (model_layers_overlap(candidate_print) || model_intersects_bed_exclusion(candidate_print)) {
             if (completed)
@@ -628,8 +672,9 @@ static PlacementPreparationResult prepare_placement_task_impl(const Model&      
     eligibility.dynapin_enabled   = print.config().enable_dynapin_support_optimization.value && DynaPin::effective_debug_stage(print) >= 1;
     eligibility.placement_enabled = print.config().enable_dynapin_placement_optimization.value;
     eligibility.automatic_pin_selection = !DynaPin::has_manual_selection(print);
-    eligibility.normal_support          = target_print_object != nullptr && target_print_object->has_support() &&
-                                          !is_tree(target_print_object->config().support_type.value);
+    eligibility.support_configuration_eligible = target_print_object != nullptr && target_print_object->has_support() &&
+                                                 !is_tree_organic(target_print_object->config().support_type.value,
+                                                                  target_print_object->config().support_style.value);
     eligibility.selected_instance_count = target_instance == nullptr ? 0 : 1;
     if (!eligibility.valid(&preparation.warning))
         return preparation;
@@ -679,7 +724,9 @@ static PlacementPreparationResult prepare_placement_task_impl(const Model&      
     search.angle_group_concurrency    = 0;
     search.delta_y_range_for_rotation = [scene](double rotation_deg) { return placement_delta_y_range_for_scene(scene, rotation_deg); };
 
-    preparation.task = PlacementTask{eligibility, std::move(search), std::move(scene)};
+    const bool tree_support = is_tree(target_print_object->config().support_type.value);
+
+    preparation.task = PlacementTask{eligibility, std::move(search), std::move(scene), tree_support};
     return preparation;
 }
 
@@ -717,7 +764,12 @@ PlacementResult run_placement_task(PlacementTask                task,
         }
         if (!task.search.angle_evaluator)
             task.search.angle_evaluator = make_scene_angle_evaluator(task.scene, cancel);
-        return optimize_placement(task.search, make_scene_evaluator(task.scene, cancel), cancel, progress, progress_stage);
+        const auto begin  = std::chrono::steady_clock::now();
+        auto       result = optimize_placement(task.search, make_scene_evaluator(task.scene, cancel), cancel, progress, progress_stage);
+        BOOST_LOG_TRIVIAL(info) << "[DynaPin] placement task completed: elapsed_ms="
+                                << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count()
+                                << ", evaluations=" << result.evaluations << ", status=" << int(result.status);
+        return result;
     } catch (const std::bad_alloc&) {
         PlacementResult result;
         result.status  = PlacementStatus::ResourceExhausted;
@@ -779,7 +831,7 @@ PlacementApplyResult apply_placement_result(Model&                       model,
     return applied;
 }
 
-std::vector<SupportSlab> generate_normal_support_geometry(PrintObject &object)
+std::vector<SupportSlab> generate_support_geometry(PrintObject &object)
 {
     std::vector<SupportSlab> slabs;
     object.generate_support_geometry_only(slabs);
@@ -1248,6 +1300,10 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
                 std::atomic<size_t> active_groups{0};
                 bool calibrated = false;
                 bool waiting_for_memory = false;
+                auto                    memory_wait_begin  = std::chrono::steady_clock::time_point{};
+                double                  memory_wait_ms     = 0.;
+                std::atomic<size_t>     observed_peak_groups{0};
+                std::atomic<size_t>     running_groups{0};
                 std::mutex completion_mutex;
                 std::condition_variable completion_cv;
                 tbb::task_group tasks;
@@ -1263,11 +1319,16 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
                     active_groups.fetch_add(1, std::memory_order_relaxed);
                     try {
                         tasks.run([&, group_index]() {
+                            const size_t running = running_groups.fetch_add(1, std::memory_order_relaxed) + 1;
+                            size_t       peak    = observed_peak_groups.load(std::memory_order_relaxed);
+                            while (running > peak &&
+                                   !observed_peak_groups.compare_exchange_weak(peak, running, std::memory_order_relaxed)) {}
                             try {
                                 process_group(group_index);
                             } catch (const std::bad_alloc &) {
                                 resource_exhausted.store(true, std::memory_order_relaxed);
                             }
+                            running_groups.fetch_sub(1, std::memory_order_relaxed);
                             active_groups.fetch_sub(1, std::memory_order_relaxed);
                             completion_cv.notify_one();
                         });
@@ -1334,6 +1395,8 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
                         if (check_canceled())
                             break;
                         if (waiting_for_memory) {
+                            memory_wait_ms +=
+                                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - memory_wait_begin).count();
                             set_stage(phase_start == 5 ? PlacementProgressStage::CoarseSearch : PlacementProgressStage::LocalSearch);
                             waiting_for_memory = false;
                         }
@@ -1346,6 +1409,7 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
                         !can_admit_angle_group(*sample, group_estimate, 0) && !waiting_for_memory) {
                         set_stage(PlacementProgressStage::WaitingForMemory);
                         waiting_for_memory = true;
+                        memory_wait_begin  = std::chrono::steady_clock::now();
                         BOOST_LOG_TRIVIAL(info) << "[DynaPin] waiting for memory: available=" << sample->available_memory_bytes
                                                 << " bytes, rss=" << sample->process_resident_bytes
                                                 << " bytes, estimate=" << group_estimate << " bytes";
@@ -1354,6 +1418,10 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
                     completion_cv.wait_for(lock, std::chrono::milliseconds(100));
                 }
                 tasks.wait();
+                if (waiting_for_memory)
+                    memory_wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - memory_wait_begin).count();
+                BOOST_LOG_TRIVIAL(info) << "[DynaPin] angle scheduling completed: groups=" << angle_groups.size()
+                                        << ", peak_active=" << observed_peak_groups.load() << ", memory_wait_ms=" << memory_wait_ms;
             }
         } else {
             auto process_candidate_range = [&](size_t begin, size_t end) {

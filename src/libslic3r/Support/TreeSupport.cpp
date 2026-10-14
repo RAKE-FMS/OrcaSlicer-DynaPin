@@ -1,8 +1,10 @@
 #include <chrono>
 #include <math.h>
+#include <unordered_map>
 
 #include "format.hpp"
 #include "ClipperUtils.hpp"
+#include "DynaPin.hpp"
 #include "Fill/FillBase.hpp"
 #include "I18N.hpp"
 #include "Layer.hpp"
@@ -80,80 +82,43 @@ enum TreeSupportStage {
     STAGE_DROP_DOWN_NODES,
     STAGE_DRAW_CIRCLES,
     STAGE_GENERATE_TOOLPATHS,
-    STAGE_MinimumSpanningTree,
-    STAGE_GET_AVOIDANCE,
-    STAGE_projection_onto_ex,
-    STAGE_get_collision,
-    STAGE_intersection_ln,
     STAGE_total,
     NUM_STAGES
 };
 
+// Measure whole stages with a monotonic clock. Per-query timing in the
+// collision/avoidance caches adds contention to their parallel hot paths.
 class TreeSupportProfiler
 {
 public:
-    uint32_t stage_durations[NUM_STAGES] = { 0 };
-    uint32_t stage_index = 0;
-    boost::posix_time::ptime tic_time;
-    boost::posix_time::ptime toc_time;
-
-    TreeSupportProfiler()
-    {
-        for (uint32_t& item : stage_durations) {
-            item = 0;
-        }
-    }
-
-    void stage_start(TreeSupportStage stage)
-    {
-        if (stage > NUM_STAGES)
-            return;
-
-        m_stage_start_times[stage] = boost::posix_time::microsec_clock::local_time();
-    }
+    void stage_start(TreeSupportStage stage) { m_stage_start_times[stage] = Clock::now(); }
 
     void stage_finish(TreeSupportStage stage)
     {
-        if (stage > NUM_STAGES)
-            return;
-
-        boost::posix_time::ptime time = boost::posix_time::microsec_clock::local_time();
-        stage_durations[stage] = (time - m_stage_start_times[stage]).total_milliseconds();
+        const auto elapsed       = Clock::now() - m_stage_start_times[stage];
+        m_stage_durations[stage] = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
     }
 
-    void tic() { tic_time = boost::posix_time::microsec_clock::local_time(); }
-    uint32_t toc() {
-        toc_time = boost::posix_time::microsec_clock::local_time();
-        return (toc_time - tic_time).total_milliseconds();
-    }
-    void stage_add(TreeSupportStage stage)
-    {
-        if (stage > NUM_STAGES)
-            return;
-        stage_durations[stage] += toc();
-    }
-
-    std::string report()
+    std::string report() const
     {
         std::stringstream ss;
-        ss << "total overhange cost: " << stage_durations[STAGE_total]
-            << "; STAGE_DETECT_OVERHANGS: " << stage_durations[STAGE_DETECT_OVERHANGS]
-            << "; STAGE_GENERATE_CONTACT_NODES: " << stage_durations[STAGE_GENERATE_CONTACT_NODES]
-            << "; STAGE_DROP_DOWN_NODES: " << stage_durations[STAGE_DROP_DOWN_NODES]
-            << "; STAGE_DRAW_CIRCLES: " << stage_durations[STAGE_DRAW_CIRCLES]
-            << "; STAGE_GENERATE_TOOLPATHS: " << stage_durations[STAGE_GENERATE_TOOLPATHS]
-            << "; STAGE_MinimumSpanningTree: " << stage_durations[STAGE_MinimumSpanningTree]
-            << "; STAGE_GET_AVOIDANCE: " << stage_durations[STAGE_GET_AVOIDANCE]
-            << "; STAGE_projection_onto_ex: " << stage_durations[STAGE_projection_onto_ex]
-            << "; STAGE_get_collision: " << stage_durations[STAGE_get_collision]
-            << "; STAGE_intersection_ln: " << stage_durations[STAGE_intersection_ln];
-
+        ss << "total overhange cost: " << m_stage_durations[STAGE_total]
+           << "; STAGE_DETECT_OVERHANGS: " << m_stage_durations[STAGE_DETECT_OVERHANGS]
+           << "; STAGE_GENERATE_CONTACT_NODES: " << m_stage_durations[STAGE_GENERATE_CONTACT_NODES]
+           << "; STAGE_DROP_DOWN_NODES: " << m_stage_durations[STAGE_DROP_DOWN_NODES]
+           << "; STAGE_DRAW_CIRCLES: " << m_stage_durations[STAGE_DRAW_CIRCLES]
+           << "; STAGE_GENERATE_TOOLPATHS: " << m_stage_durations[STAGE_GENERATE_TOOLPATHS];
         return ss.str();
     }
+
 private:
-    boost::posix_time::ptime m_stage_start_times[NUM_STAGES];
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point m_stage_start_times[NUM_STAGES];
+    int64_t           m_stage_durations[NUM_STAGES] = {};
 };
-TreeSupportProfiler profiler;
+
+static double branch_diameter_angle_scale_factor(const PrintObjectConfig& config)
+{ return std::clamp<double>(config.tree_support_branch_diameter_angle * M_PI / 180., 0., 0.5 * M_PI - EPSILON); }
 
 Lines spanning_tree_to_lines(const std::vector<MinimumSpanningTree>& spanning_trees)
 {
@@ -605,10 +570,16 @@ static Point bounding_box_middle(const BoundingBox &bbox)
     return (bbox.max + bbox.min) / 2;
 }
 
-TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_params)
+TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_params, const std::vector<DynaPin::Pin>* allowed_pins)
     : m_object(&object), m_slicing_params(slicing_params), m_support_params(object), m_object_config(&object.config())
 {
+    if (allowed_pins != nullptr)
+        m_dynapin_allowed_pins = *allowed_pins;
     m_print_config = &m_object->print()->config();
+    if (m_support_params.support_extrusion_width <= 0. &&
+        m_print_config->enable_dynapin_support_optimization.value && !m_object->print()->dynapin_selection().pins.empty())
+        m_support_params.support_extrusion_width = Flow::auto_extrusion_width(FlowRole::frSupportMaterial,
+                                                                            float(m_print_config->nozzle_diameter.get_at(0)));
     m_raft_layers = slicing_params.base_raft_layers + slicing_params.interface_raft_layers;
     support_type = m_object_config->support_type;
 
@@ -618,7 +589,7 @@ TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_p
 
     if(support_pattern == smpLightning)
         m_support_params.base_fill_pattern = ipLightning;
-    diameter_angle_scale_factor              = std::clamp<double>(m_object_config->tree_support_branch_diameter_angle * M_PI / 180., 0., 0.5 * M_PI - EPSILON);
+    diameter_angle_scale_factor              = branch_diameter_angle_scale_factor(*m_object_config);
     is_slim                                  = is_tree_slim(support_type, m_support_params.support_style);
     is_strong = is_tree(support_type) && m_support_params.support_style == smsTreeStrong;
     base_radius                              = std::max(MIN_BRANCH_RADIUS, m_object_config->tree_support_branch_diameter.value / 2);
@@ -1657,6 +1628,8 @@ void TreeSupport::move_bounds_to_contact_nodes(std::vector<TreeSupport3D::Suppor
 
 void TreeSupport::generate()
 {
+    m_object->clear_dynapin_tree_landing_plan();
+    m_dynapin_polygon_landings.clear();
     if (!is_tree(m_object_config->support_type.value)) return;
 
     if (m_support_params.support_style == smsTreeOrganic) {
@@ -1664,6 +1637,7 @@ void TreeSupport::generate()
         return;
     }
 
+    TreeSupportProfiler profiler;
     profiler.stage_start(STAGE_total);
 
     // Generate overhang areas
@@ -1695,6 +1669,89 @@ void TreeSupport::generate()
 
     smooth_nodes();// , tree_support_3d_config);
 
+    std::vector<DynaPin::Pin> invalid_pins;
+    const std::vector<DynaPin::LocalBlocker> landing_blockers = DynaPin::support_blocker_regions_local(*m_object);
+    for (const DynaPin::LocalBlocker& blocker : landing_blockers) {
+        if (m_dynapin_allowed_pins &&
+            std::find(m_dynapin_allowed_pins->begin(), m_dynapin_allowed_pins->end(), blocker.pin) == m_dynapin_allowed_pins->end())
+            continue;
+        const BoundingBox bounds = get_extents(blocker.poly);
+        for (const auto& layer_nodes : contact_nodes) {
+            for (const SupportNode* node : layer_nodes) {
+                if (!node->valid || node->print_z - node->height >= blocker.z_max - EPSILON ||
+                    node->print_z <= blocker.z_min + EPSILON)
+                    continue;
+                bool intersects = false;
+                if (node->type == ePolygon)
+                    intersects = !intersection_ex({node->overhang}, {blocker.poly}).empty();
+                else {
+                    const coord_t margin = scale_(node->radius + 0.5 * m_support_params.support_extrusion_width);
+                    if (node->position.x() >= bounds.min.x() - margin && node->position.x() <= bounds.max.x() + margin &&
+                        node->position.y() >= bounds.min.y() - margin && node->position.y() <= bounds.max.y() + margin) {
+                        Polygon footprint;
+                        for (size_t i = 0; i < 32; ++i) {
+                            const double angle = double(i) / 32. * 2. * M_PI;
+                            footprint.points.emplace_back(node->position + Point(coord_t(std::cos(angle) * margin), coord_t(std::sin(angle) * margin)));
+                        }
+                        intersects = !intersection_ex({footprint}, {blocker.poly}).empty();
+                    }
+                }
+                if (intersects) {
+                    invalid_pins.push_back(blocker.pin);
+                    break;
+                }
+            }
+            if (std::find(invalid_pins.begin(), invalid_pins.end(), blocker.pin) != invalid_pins.end())
+                break;
+        }
+    }
+    if (!invalid_pins.empty()) {
+        for (auto& layer_nodes : contact_nodes)
+            for (SupportNode* node : layer_nodes)
+                if (node->dynapin_landed && std::find(invalid_pins.begin(), invalid_pins.end(), DynaPin::Pin{node->dynapin_pin_row, node->dynapin_pin_col}) != invalid_pins.end())
+                    node->dynapin_landed = false;
+        m_dynapin_polygon_landings.erase(std::remove_if(m_dynapin_polygon_landings.begin(), m_dynapin_polygon_landings.end(), [&](const DynaPin::TreePinLanding& landing) {
+            return std::find(invalid_pins.begin(), invalid_pins.end(), landing.pin) != invalid_pins.end();
+        }), m_dynapin_polygon_landings.end());
+    }
+
+    DynaPin::TreePinLandingPlan landing_plan;
+    landing_plan.landings = m_dynapin_polygon_landings;
+    for (const DynaPin::TreePinLanding& landing : landing_plan.landings)
+        landing_plan.used_pins.push_back(landing.pin);
+    const std::vector<DynaPin::VirtualSupportSurface> landing_surfaces = DynaPin::pin_top_surfaces_for_object(*m_object);
+    for (size_t layer_id = 0; layer_id < contact_nodes.size(); ++layer_id) {
+        for (SupportNode* node : contact_nodes[layer_id]) {
+            if (!node->dynapin_landed)
+                continue;
+            const auto surface_it = std::find_if(landing_surfaces.begin(), landing_surfaces.end(), [node](const DynaPin::VirtualSupportSurface& surface) {
+                return surface.pin.row == node->dynapin_pin_row && surface.pin.col == node->dynapin_pin_col;
+            });
+            if (surface_it == landing_surfaces.end())
+                continue;
+            const coord_t footprint_radius = scale_(node->radius + m_support_params.support_extrusion_width * 0.5);
+            Polygon footprint;
+            for (size_t i = 0; i < 32; ++i) {
+                const double angle = double(i) / 32. * 2. * M_PI;
+                footprint.points.emplace_back(node->position + Point(coord_t(std::cos(angle) * footprint_radius), coord_t(std::sin(angle) * footprint_radius)));
+            }
+            const Polygons outside = diff({footprint}, {surface_it->poly});
+            if (!outside.empty()) {
+                node->dynapin_landed = false;
+                node->dynapin_pin_row = -1;
+                node->dynapin_pin_col = -1;
+                continue;
+            }
+            landing_plan.landings.push_back({surface_it->pin, node->branch_id, layer_id, node->position, footprint, surface_it->print_z, node->print_z});
+            landing_plan.used_pins.push_back(surface_it->pin);
+        }
+    }
+    std::sort(landing_plan.used_pins.begin(), landing_plan.used_pins.end(), [](const DynaPin::Pin& lhs, const DynaPin::Pin& rhs) {
+        return std::tie(lhs.row, lhs.col) < std::tie(rhs.row, rhs.col);
+    });
+    landing_plan.used_pins.erase(std::unique(landing_plan.used_pins.begin(), landing_plan.used_pins.end()), landing_plan.used_pins.end());
+    m_object->set_dynapin_tree_landing_plan(std::move(landing_plan));
+
     //Generate support areas.
     profiler.stage_start(STAGE_DRAW_CIRCLES);
     m_object->print()->set_status(65, _u8L("Generating support"));
@@ -1707,9 +1764,87 @@ void TreeSupport::generate()
     m_object->print()->set_status(70, _u8L("Generating support"));
     generate_toolpaths();
     profiler.stage_finish(STAGE_GENERATE_TOOLPATHS);
+    validate_dynapin_landings();
 
     profiler.stage_finish(STAGE_total);
     BOOST_LOG_TRIVIAL(info) << "tree support time " << profiler.report();
+}
+
+void TreeSupport::validate_dynapin_landings()
+{
+    DynaPin::TreePinLandingPlan plan = m_object->dynapin_tree_landing_plan();
+    if (plan.landings.empty())
+        return;
+
+    std::vector<DynaPin::Pin> colliding_pins;
+    for (const DynaPin::LocalBlocker& blocker : DynaPin::support_blocker_regions_local(*m_object)) {
+        if (std::find(plan.used_pins.begin(), plan.used_pins.end(), blocker.pin) == plan.used_pins.end())
+            continue;
+        bool intersects = false;
+        for (const SupportLayer* layer : m_object->support_layers()) {
+            if (layer == nullptr || layer->bottom_z() >= blocker.z_max - EPSILON || layer->print_z <= blocker.z_min + EPSILON)
+                continue;
+            for (const ExtrusionEntity* entity : layer->support_fills.flatten().entities) {
+                if (!intersection(entity->polygons_covered_by_width(), Polygons{blocker.poly}).empty()) {
+                    intersects = true;
+                    break;
+                }
+            }
+            if (intersects)
+                break;
+        }
+        if (intersects)
+            colliding_pins.push_back(blocker.pin);
+    }
+
+    const auto has_extrusion = [this](double print_z, const Polygon& footprint) {
+        const SupportLayer* layer = m_object->get_support_layer_at_printz(print_z, EPSILON);
+        if (layer == nullptr)
+            return false;
+        for (const ExtrusionEntity* entity : layer->support_fills.flatten().entities)
+            if (!intersection(entity->polygons_covered_by_width(), Polygons{footprint}).empty())
+                return true;
+        return false;
+    };
+
+    plan.landings.erase(std::remove_if(plan.landings.begin(), plan.landings.end(), [&](const DynaPin::TreePinLanding& landing) {
+        if (std::find(colliding_pins.begin(), colliding_pins.end(), landing.pin) != colliding_pins.end())
+            return true;
+        if (!has_extrusion(landing.support_print_z, landing.footprint))
+            return true;
+        if (landing.layer_id >= contact_nodes.size())
+            return true;
+        const auto& nodes = contact_nodes[landing.layer_id];
+        const auto node_it = std::find_if(nodes.begin(), nodes.end(), [&](const SupportNode* node) {
+            return node->dynapin_landed && node->branch_id == landing.branch_id && node->position == landing.position;
+        });
+        const SupportNode* node = node_it == nodes.end() ? nullptr : *node_it;
+        if (node == nullptr) {
+            const auto polygon_it = std::find_if(nodes.begin(), nodes.end(), [&](const SupportNode* candidate) {
+                return candidate->type == ePolygon && candidate->branch_id == landing.branch_id && candidate->valid;
+            });
+            if (polygon_it == nodes.end())
+                return true;
+            node = *polygon_it;
+        }
+        if (node->dynapin_landed && node->child != nullptr)
+            return true;
+        if (node->parent != nullptr && node->parent->distance_to_top >= 0) {
+            const Polygons parent_region = offset(landing.footprint, scale_(2. * m_support_params.support_extrusion_width));
+            if (parent_region.empty() || !has_extrusion(node->parent->print_z, parent_region.front()))
+                return true;
+        }
+        return false;
+    }), plan.landings.end());
+
+    plan.used_pins.clear();
+    for (const DynaPin::TreePinLanding& landing : plan.landings)
+        plan.used_pins.push_back(landing.pin);
+    std::sort(plan.used_pins.begin(), plan.used_pins.end(), [](const DynaPin::Pin& lhs, const DynaPin::Pin& rhs) {
+        return std::tie(lhs.row, lhs.col) < std::tie(rhs.row, rhs.col);
+    });
+    plan.used_pins.erase(std::unique(plan.used_pins.begin(), plan.used_pins.end()), plan.used_pins.end());
+    m_object->set_dynapin_tree_landing_plan(std::move(plan));
 }
 
 coordf_t TreeSupport::calc_branch_radius(coordf_t base_radius, size_t layers_to_top, size_t tip_layers, double diameter_angle_scale_factor)
@@ -1939,6 +2074,14 @@ void TreeSupport::draw_circles()
     // Performance optimization. Only generate lslices for brim and skirt.
     size_t brim_skirt_layers = has_brim ? 1 : 0;
     const PrintConfig& print_config = print->config();
+    std::vector<DynaPin::LocalBlocker>          dynapin_blockers  = DynaPin::support_blocker_regions_local(*m_object);
+    const std::vector<DynaPin::Pin>& used_pins = m_object->dynapin_tree_landing_plan().used_pins;
+    const auto pin_is_used = [&used_pins](const DynaPin::Pin& pin) {
+        return std::find(used_pins.begin(), used_pins.end(), pin) != used_pins.end();
+    };
+    dynapin_blockers.erase(std::remove_if(dynapin_blockers.begin(), dynapin_blockers.end(), [&](const DynaPin::LocalBlocker& blocker) {
+        return !pin_is_used(blocker.pin);
+    }), dynapin_blockers.end());
     for (const PrintObject* object : print->objects())
     {
         size_t skirt_layers = print->has_infinite_skirt() ? object->layer_count() : std::min(size_t(print_config.skirt_height.value), object->layer_count());
@@ -1991,6 +2134,7 @@ void TreeSupport::draw_circles()
                 ExPolygons& roof_1st_layer = ts_layer->roof_1st_layer;
                 ExPolygons& floor_areas = ts_layer->floor_areas;
                 ExPolygons& roof_gap_areas = ts_layer->roof_gap_areas;
+                ExPolygons dynapin_landing_areas;
                 coordf_t         max_layers_above_base = 0;
                 coordf_t         max_layers_above_roof = 0;
                 coordf_t         max_layers_above_roof1 = 0;
@@ -2089,7 +2233,19 @@ void TreeSupport::draw_circles()
                         }
                     }
 
-                    if (obj_layer_nr>0 && node.distance_to_top < 0)
+                    if (node.type == ePolygon && bottom_interface_layers > 0) {
+                        for (const DynaPin::TreePinLanding& landing : m_dynapin_polygon_landings) {
+                            if (landing.layer_id != layer_nr || landing.branch_id != node.branch_id)
+                                continue;
+                            ExPolygons supported = intersection_ex(area, {landing.footprint});
+                            append(dynapin_landing_areas, supported);
+                            area = diff_ex(area, supported);
+                        }
+                    }
+
+                    if (node.dynapin_landed && bottom_interface_layers > 0) {
+                        append(dynapin_landing_areas, area);
+                    } else if (obj_layer_nr>0 && node.distance_to_top < 0)
                         append(roof_gap_areas, area);
                     else if (obj_layer_nr > 0 && node.support_roof_layers_below == 1 && node.is_sharp_tail==false)
                     {
@@ -2109,6 +2265,23 @@ void TreeSupport::draw_circles()
                     }
 
                 }
+
+                const double layer_bottom_z = ts_layer->bottom_z();
+                Polygons active_dynapin_blockers;
+                for (const DynaPin::LocalBlocker& blocker : dynapin_blockers) {
+                    if (layer_bottom_z < blocker.z_max - EPSILON && ts_layer->print_z > blocker.z_min + EPSILON)
+                        active_dynapin_blockers.push_back(blocker.poly);
+                }
+                if (!active_dynapin_blockers.empty()) {
+                    const float clip_margin = float(0.5 * scale_(m_support_params.support_extrusion_width));
+                    active_dynapin_blockers = union_(offset(active_dynapin_blockers, clip_margin));
+                    base_areas              = diff_ex(base_areas, active_dynapin_blockers);
+                    roof_areas              = diff_ex(roof_areas, active_dynapin_blockers);
+                    roof_1st_layer          = diff_ex(roof_1st_layer, active_dynapin_blockers);
+                    floor_areas             = diff_ex(floor_areas, active_dynapin_blockers);
+                    roof_gap_areas          = diff_ex(roof_gap_areas, active_dynapin_blockers);
+                }
+                append(floor_areas, std::move(dynapin_landing_areas));
 
                 //m_object->print()->set_status(65, (boost::format( _u8L("Support: generate polygons at layer %d")) % layer_nr).str());
 
@@ -2412,8 +2585,6 @@ void TreeSupport::draw_circles()
     }
 }
 
-double SupportNode::diameter_angle_scale_factor;
-
 void TreeSupport::drop_nodes()
 {
     const PrintObjectConfig &config = m_object->config();
@@ -2430,7 +2601,6 @@ void TreeSupport::drop_nodes()
     const bool support_on_buildplate_only = config.support_on_build_plate_only.value;
     const size_t top_interface_layers = config.support_interface_top_layers.value;
     const size_t bottom_interface_layers = config.support_interface_bottom_layers.value < 0 ? top_interface_layers : config.support_interface_bottom_layers.value;
-    SupportNode::diameter_angle_scale_factor = diameter_angle_scale_factor;
     float        DO_NOT_MOVER_UNDER_MM       = is_slim ? 0 : 5;                     // do not move contact points under 5mm
 
     auto get_max_move_dist = [this, &config, tan_angle, wall_count, support_extrusion_width](const SupportNode *node, int power = 1) {
@@ -2445,6 +2615,81 @@ void TreeSupport::drop_nodes()
 
     std::vector<LayerHeightData> &layer_heights = m_ts_data->layer_heights;
     if (layer_heights.empty()) return;
+    std::vector<DynaPin::VirtualSupportSurface> dynapin_surfaces = DynaPin::pin_top_surfaces_for_object(*m_object);
+    std::vector<DynaPin::LocalBlocker>          dynapin_blockers = DynaPin::support_blocker_regions_local(*m_object);
+    std::unordered_map<const SupportNode*, DynaPin::Pin> dynapin_route_targets;
+    if (m_dynapin_allowed_pins) {
+        const auto allowed = [this](const DynaPin::Pin& pin) {
+            return std::find(m_dynapin_allowed_pins->begin(), m_dynapin_allowed_pins->end(), pin) != m_dynapin_allowed_pins->end();
+        };
+        dynapin_surfaces.erase(std::remove_if(dynapin_surfaces.begin(), dynapin_surfaces.end(), [&](const DynaPin::VirtualSupportSurface& surface) {
+            return !allowed(surface.pin);
+        }), dynapin_surfaces.end());
+        dynapin_blockers.erase(std::remove_if(dynapin_blockers.begin(), dynapin_blockers.end(), [&](const DynaPin::LocalBlocker& blocker) {
+            return !allowed(blocker.pin);
+        }), dynapin_blockers.end());
+    }
+
+    struct DynaPinTarget {
+        const DynaPin::VirtualSupportSurface* surface = nullptr;
+        Point                                 point;
+        double                                distance2 = 0.;
+    };
+    struct DynaPinTargetSearch {
+        size_t surfaces_above = 0;
+        size_t safe_regions = 0;
+        size_t reachable_regions = 0;
+    };
+    auto dynapin_target = [&](const SupportNode& node, coordf_t max_step, const DynaPin::Pin* route_pin = nullptr,
+                              DynaPinTargetSearch* search = nullptr) -> std::optional<DynaPinTarget> {
+        if (dynapin_surfaces.empty() || node.type == ePolygon)
+            return {};
+        const DynaPin::VirtualSupportSurface* best_surface = nullptr;
+        Point                                 best_target;
+        double                                best_distance2 = std::numeric_limits<double>::max();
+        for (const DynaPin::VirtualSupportSurface& surface : dynapin_surfaces) {
+            if (route_pin != nullptr && !(surface.pin == *route_pin))
+                continue;
+            if (surface.print_z + EPSILON >= node.print_z)
+                continue;
+            if (search != nullptr)
+                ++search->surfaces_above;
+            const double landing_radius = std::max(node.radius, calc_radius(node.dist_mm_to_top + node.print_z - surface.print_z));
+            const double remaining_z = node.print_z - surface.print_z;
+            const double guide_margin = remaining_z > 2. * node.height ? 2. * max_step : 0.;
+            const coord_t inset = scale_(landing_radius + m_support_params.support_extrusion_width * 0.5 + guide_margin);
+            const Polygons safe_regions = offset(surface.poly, -inset);
+            if (safe_regions.empty())
+                continue;
+            if (search != nullptr)
+                search->safe_regions += safe_regions.size();
+            const double reachable   = max_step * std::max(1., std::ceil(remaining_z / std::max(node.height, coordf_t(EPSILON))));
+            for (const Polygon& region : safe_regions) {
+                Point target = node.position;
+                if (!region.contains(node.position)) {
+                    const std::optional<Point> nearest = DynaPin::nearest_pin_landing_point(region, node.position);
+                    if (!nearest)
+                        continue;
+                    target = *nearest;
+                }
+                const double distance2 = vsize2_with_unscale(target - node.position);
+                if (distance2 > reachable * reachable + EPSILON)
+                    continue;
+                if (search != nullptr)
+                    ++search->reachable_regions;
+                if (best_surface == nullptr || surface.print_z > best_surface->print_z + EPSILON ||
+                    (std::abs(surface.print_z - best_surface->print_z) <= EPSILON &&
+                     (distance2 < best_distance2 - EPSILON ||
+                      (std::abs(distance2 - best_distance2) <= EPSILON &&
+                       std::tie(surface.pin.row, surface.pin.col) < std::tie(best_surface->pin.row, best_surface->pin.col))))) {
+                    best_surface   = &surface;
+                    best_target    = target;
+                    best_distance2 = distance2;
+                }
+            }
+        }
+        return best_surface == nullptr ? std::optional<DynaPinTarget>{} : std::optional<DynaPinTarget>{{best_surface, best_target, best_distance2}};
+    };
 
     // precalculate avoidance of all possible radii.
     // This will cause computing more (radius, layer_nr) pairs, but it's worth to do so since we are doning this in parallel.
@@ -2522,12 +2767,10 @@ void TreeSupport::drop_nodes()
                     return true;
             }
             else {
-                profiler.tic();
                 Line ln(b, a);
                 Lines pls_intersect = intersection_ln(ln, layer_contours);
                 mst_line_x_layer_contour_cache.insert({ {a, b}, !pls_intersect.empty() });
                 mst_line_x_layer_contour_cache.insert({ ln, !pls_intersect.empty() });
-                profiler.stage_add(STAGE_intersection_ln);
                 if (!pls_intersect.empty())
                     return true;
             }
@@ -2539,7 +2782,97 @@ void TreeSupport::drop_nodes()
         std::vector<std::unordered_map<Point, SupportNode*, PointHash>> nodes_per_part(1 + parts.size()); //All nodes that aren't inside a part get grouped together in the 0th part.
         for (SupportNode* p_node : layer_contact_nodes)
         {
-            const SupportNode& node = *p_node;
+            SupportNode& node = *p_node;
+
+            if (!dynapin_surfaces.empty() && node.type != ePolygon && node.parent != nullptr && !node.dynapin_landed) {
+                const coordf_t max_step = get_max_move_dist(&node);
+                const auto parent_route = dynapin_route_targets.find(node.parent);
+                const DynaPin::Pin* route_pin = parent_route == dynapin_route_targets.end() ? nullptr : &parent_route->second;
+                DynaPinTargetSearch search;
+                std::optional<DynaPinTarget> target = dynapin_target(node, max_step, route_pin, &search);
+                if (!target && route_pin != nullptr) {
+                    BOOST_LOG_TRIVIAL(debug) << "[DynaPin] Tree branch " << node.branch_id << " lost landing target "
+                                             << route_pin->row << "," << route_pin->col
+                                             << " at z=" << node.print_z;
+                    search = {};
+                    target = dynapin_target(node, max_step, nullptr, &search);
+                }
+                if (!target && node.to_buildplate) {
+                    const coord_t margin = scale_(node.radius + 0.5 * m_support_params.support_extrusion_width);
+                    const bool crosses_pin_corridor = std::any_of(dynapin_blockers.begin(), dynapin_blockers.end(), [&](const DynaPin::LocalBlocker& blocker) {
+                        if (blocker.z_max >= node.print_z - EPSILON)
+                            return false;
+                        const BoundingBox bounds = get_extents(blocker.poly);
+                        return node.position.x() >= bounds.min.x() - margin && node.position.x() <= bounds.max.x() + margin &&
+                               node.position.y() >= bounds.min.y() - margin && node.position.y() <= bounds.max.y() + margin;
+                    });
+                    if (crosses_pin_corridor)
+                        BOOST_LOG_TRIVIAL(debug) << "[DynaPin] Tree branch " << node.branch_id << " has no reachable pin landing at z="
+                                                 << node.print_z << " (surfaces=" << search.surfaces_above
+                                                 << ", safe_regions=" << search.safe_regions
+                                                 << ", reachable_regions=" << search.reachable_regions
+                                                 << "); continuing toward build plate";
+                }
+                if (target && node.print_z > target->surface->print_z + EPSILON) {
+                    const double parent_height = node.parent->print_z - node.print_z;
+                    const double step = std::min({double(max_step), tan_angle * parent_height, double(support_extrusion_width)});
+                    const Point toward_target = target->point - node.parent->position;
+                    const double distance = unscale_(toward_target.cast<double>().norm());
+                    if (step > EPSILON) {
+                        const Point guided = distance > EPSILON ?
+                            node.parent->position + normal(toward_target, scale_(std::min(distance, step))) : node.parent->position;
+                        bool blocked = is_inside_ex(get_collision(node.radius, obj_layer_nr), guided) ||
+                                       is_line_cut_by_contour(node.parent->position, guided);
+                        if (!blocked) {
+                            const coord_t margin = scale_(node.radius + 0.5 * m_support_params.support_extrusion_width);
+                            Polygon footprint;
+                            for (size_t i = 0; i < 32; ++i) {
+                                const double angle = double(i) / 32. * 2. * M_PI;
+                                footprint.points.emplace_back(guided + Point(coord_t(std::cos(angle) * margin), coord_t(std::sin(angle) * margin)));
+                            }
+                            for (const DynaPin::LocalBlocker& blocker : dynapin_blockers) {
+                                if (node.print_z - node.height < blocker.z_max - EPSILON && node.print_z > blocker.z_min + EPSILON &&
+                                    !intersection_ex({footprint}, {blocker.poly}).empty()) {
+                                    blocked = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!blocked) {
+                            node.position = guided;
+                            node.movement = guided - node.parent->position;
+                            dynapin_route_targets[&node] = target->surface->pin;
+                        } else {
+                            BOOST_LOG_TRIVIAL(debug) << "[DynaPin] Tree branch " << node.branch_id << " cannot reach pin "
+                                                     << target->surface->pin.row << "," << target->surface->pin.col
+                                                     << " at z=" << node.print_z << ": collision";
+                        }
+                    }
+                }
+            }
+
+            if (!dynapin_surfaces.empty() && node.type != ePolygon) {
+                const auto route = dynapin_route_targets.find(&node);
+                const DynaPin::Pin* route_pin = route == dynapin_route_targets.end() ? nullptr : &route->second;
+                const std::optional<DynaPinTarget> target = dynapin_target(node, get_max_move_dist(&node), route_pin);
+                const double parent_move = target && node.parent != nullptr && node.parent->distance_to_top >= 0 ?
+                    unscale_((target->point - node.parent->position).cast<double>().norm()) : 0.;
+                const double parent_height = node.parent != nullptr ? node.parent->print_z - node.print_z : node.height;
+                const double parent_limit = std::min(tan_angle * parent_height, support_extrusion_width);
+                if (target && target->surface->print_z <= print_z - node.height + EPSILON &&
+                    target->surface->print_z > print_z_next - height_next - EPSILON &&
+                    target->distance2 <= SQ(get_max_move_dist(&node)) + EPSILON &&
+                    parent_move <= parent_limit + EPSILON &&
+                    !is_line_cut_by_contour(node.position, target->point)) {
+                    node.position        = target->point;
+                    node.movement        = Point(0, 0);
+                    node.dynapin_landed  = true;
+                    node.dynapin_pin_row = target->surface->pin.row;
+                    node.dynapin_pin_col = target->surface->pin.col;
+                }
+            }
+            if (node.dynapin_landed)
+                continue;
 
             if (support_on_buildplate_only && !node.to_buildplate) //Can't rest on model and unable to reach the build plate. Then we must drop the node and leave parts unsupported.
             {
@@ -2586,7 +2919,6 @@ void TreeSupport::drop_nodes()
         }
 
         //Create a MST for every part.
-        profiler.tic();
         //std::vector<MinimumSpanningTree>& spanning_trees = m_spanning_trees[layer_nr];
         std::vector<MinimumSpanningTree> spanning_trees;
         for (const std::unordered_map<Point, SupportNode*, PointHash>& group : nodes_per_part)
@@ -2598,7 +2930,6 @@ void TreeSupport::drop_nodes()
             }
             spanning_trees.emplace_back(points_to_buildplate);
         }
-        profiler.stage_add(STAGE_MinimumSpanningTree);
 
 #ifdef SUPPORT_TREE_DEBUG_TO_SVG
         coordf_t branch_radius_temp = 0;
@@ -2709,8 +3040,21 @@ void TreeSupport::drop_nodes()
                 if (node.type == ePolygon) {
                     // polygon node do not merge or move
                     const bool to_buildplate = true;
+                    ExPolygons overhangs_to_descend{node.overhang};
+                    for (const DynaPin::VirtualSupportSurface& surface : dynapin_surfaces) {
+                        if (surface.print_z > node.print_z - node.height + EPSILON ||
+                            surface.print_z <= print_z_next - height_next - EPSILON)
+                            continue;
+                        const ExPolygons supported = intersection_ex(overhangs_to_descend, {surface.poly});
+                        if (supported.empty())
+                            continue;
+                        std::scoped_lock lock(m_ts_data->m_mutex);
+                        for (const ExPolygon& footprint : supported)
+                            m_dynapin_polygon_landings.push_back({surface.pin, node.branch_id, layer_nr, footprint.contour.centroid(), footprint.contour, surface.print_z, node.print_z});
+                        overhangs_to_descend = diff_ex(overhangs_to_descend, {surface.poly});
+                    }
                     // keep only the part that won't be removed by the next layer
-                    ExPolygons overhangs_next = diff_clipped({ node.overhang }, get_collision(0, obj_layer_nr_next));
+                    ExPolygons overhangs_next = diff_clipped(overhangs_to_descend, get_collision(0, obj_layer_nr_next));
                     for(auto& overhang:overhangs_next) {
                         Point        next_pt     = overhang.contour.centroid();
                         SupportNode *next_node   = m_ts_data->create_node(next_pt, p_node->distance_to_top + 1, obj_layer_nr_next, p_node->support_roof_layers_below - 1,
@@ -2804,6 +3148,14 @@ void TreeSupport::drop_nodes()
 #endif
                 coordf_t next_radius = calc_radius(node.dist_mm_to_top + height_next);
                 auto avoidance_next = get_avoidance(next_radius, obj_layer_nr_next);
+                for (const DynaPin::LocalBlocker& blocker : dynapin_blockers) {
+                    const double next_bottom_z = print_z_next - height_next;
+                    if (next_bottom_z < blocker.z_max - EPSILON && print_z_next > blocker.z_min + EPSILON)
+                        append(avoidance_next,
+                               offset_ex(blocker.poly, scale_(next_radius + 0.5 * m_support_params.support_extrusion_width)));
+                }
+                if (!dynapin_blockers.empty())
+                    avoidance_next = union_ex(std::move(avoidance_next));
 
                 Point  to_outside         = projection_onto(avoidance_next, node.position);
                 Point  direction_to_outer = to_outside - node.position;
@@ -2846,6 +3198,20 @@ void TreeSupport::drop_nodes()
                     movement = normal(move_to_neighbor_center, scale_(get_max_move_dist(&node)));
 
                 next_layer_vertex += movement;
+
+                const auto route = dynapin_route_targets.find(&node);
+                const DynaPin::Pin* route_pin = route == dynapin_route_targets.end() ? nullptr : &route->second;
+                if (const std::optional<DynaPinTarget> target = dynapin_target(node, get_max_move_dist(&node), route_pin)) {
+                    const Point  to_target       = target->point - next_layer_vertex;
+                    const double target_distance = unscale_(to_target.cast<double>().norm());
+                    if (target_distance > EPSILON)
+                        next_layer_vertex += normal(to_target, scale_(std::min(target_distance, get_max_move_dist(&node))));
+                }
+
+                const Point total_movement = next_layer_vertex - node.position;
+                const double total_distance = unscale_(total_movement.cast<double>().norm());
+                if (total_distance > get_max_move_dist(&node) + EPSILON)
+                    next_layer_vertex = node.position + normal(total_movement, scale_(get_max_move_dist(&node)));
 
                 if (group_index == 0 && 0) {
                     // Avoid collisions.
@@ -2991,7 +3357,8 @@ void TreeSupport::smooth_nodes()
                             if (branch[i]->parents.size() > 1 || (branch[i]->movement.x() > max_move || branch[i]->movement.y() > max_move) ||
                                 (total_height > thresh_tall_branch && branch[i]->dist_mm_to_top < thresh_dist_to_top))
                                 branch[i]->need_extra_wall = true;
-                            BOOST_LOG_TRIVIAL(info) << "smooth_nodes: layer_nr=" << layer_nr << ", i=" << i << ", pt=" << pt << ", movement=" << branch[i]->movement << ", radius=" << branch[i]->radius;
+                            BOOST_LOG_TRIVIAL(trace) << "smooth_nodes: layer_nr=" << layer_nr << ", i=" << i << ", pt=" << pt
+                                                     << ", movement=" << branch[i]->movement << ", radius=" << branch[i]->radius;
                         }
                     }
                     if (k < iterations - 1) {
@@ -3388,8 +3755,10 @@ void TreeSupport::insert_dropped_node(std::vector<SupportNode*>& nodes_layer, Su
     conflicting_node->support_roof_layers_below = std::max(conflicting_node->support_roof_layers_below, p_node->support_roof_layers_below);
 }
 
-TreeSupportData::TreeSupportData(const PrintObject &object, coordf_t xy_distance, coordf_t radius_sample_resolution)
-    : m_xy_distance(xy_distance), m_radius_sample_resolution(radius_sample_resolution)
+TreeSupportData::TreeSupportData(const PrintObject& object, coordf_t xy_distance, coordf_t radius_sample_resolution)
+    : m_diameter_angle_scale_factor(branch_diameter_angle_scale_factor(object.config()))
+    , m_xy_distance(xy_distance)
+    , m_radius_sample_resolution(radius_sample_resolution)
 {
     branch_scale_factor = tan(object.config().tree_support_branch_angle.value * M_PI / 180.);
     clear_nodes();
@@ -3413,24 +3782,20 @@ TreeSupportData::TreeSupportData(const PrintObject &object, coordf_t xy_distance
 
 const ExPolygons& TreeSupportData::get_collision(coordf_t radius, size_t layer_nr) const
 {
-    profiler.tic();
     radius = ceil_radius(radius);
     RadiusLayerPair key{radius, layer_nr};
     const auto it = m_collision_cache.find(key);
     const ExPolygons& collision = it != m_collision_cache.end() ? it->second : calculate_collision(key);
-    profiler.stage_add(STAGE_get_collision);
     return collision;
 }
 
 const ExPolygons& TreeSupportData::get_avoidance(coordf_t radius, size_t layer_nr, int recursions) const
 {
-    profiler.tic();
     radius = ceil_radius(radius);
     RadiusLayerPair key{radius, layer_nr, recursions };
     const auto it = m_avoidance_cache.find(key);
     const ExPolygons& avoidance = it != m_avoidance_cache.end() ? it->second : calculate_avoidance(key);
 
-    profiler.stage_add(STAGE_GET_AVOIDANCE);
     return avoidance;
 }
 
@@ -3458,7 +3823,11 @@ SupportNode* TreeSupportData::create_node(const Point position, const int distan
 {
     // this function may be called from multiple threads, need to lock
     m_mutex.lock();
-    std::unique_ptr<SupportNode> node = std::make_unique<SupportNode>(position, distance_to_top, obj_layer_nr, support_roof_layers_below, to_buildplate, parent, print_z_, height_, dist_mm_to_top_, radius_);
+    std::unique_ptr<SupportNode> node = std::make_unique<SupportNode>(position, distance_to_top, obj_layer_nr, support_roof_layers_below,
+                                                                      to_buildplate, parent, print_z_, height_,
+                                                                      m_diameter_angle_scale_factor, dist_mm_to_top_, radius_);
+    if (parent == nullptr)
+        node->branch_id = m_next_branch_id++;
     SupportNode* raw_ptr = node.get();
     contact_nodes.emplace_back(std::move(node));
     m_mutex.unlock();

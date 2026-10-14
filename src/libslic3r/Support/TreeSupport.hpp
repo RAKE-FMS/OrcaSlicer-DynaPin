@@ -62,8 +62,17 @@ struct SupportNode
     {}
 
     // when dist_mm_to_top_==0, new node's dist_mm_to_top=parent->dist_mm_to_top + parent->height;
-    SupportNode(const Point position, const int distance_to_top, const int obj_layer_nr, const int support_roof_layers_below, const bool to_buildplate, SupportNode* parent,
-        coordf_t     print_z_, coordf_t height_, coordf_t dist_mm_to_top_ = 0, coordf_t radius_ = 0)
+    SupportNode(const Point  position,
+                const int    distance_to_top,
+                const int    obj_layer_nr,
+                const int    support_roof_layers_below,
+                const bool   to_buildplate,
+                SupportNode* parent,
+                coordf_t     print_z_,
+                coordf_t     height_,
+                double       diameter_angle_scale_factor,
+                coordf_t     dist_mm_to_top_ = 0,
+                coordf_t     radius_         = 0)
         : distance_to_top(distance_to_top)
         , position(position)
         , obj_layer_nr(obj_layer_nr)
@@ -90,6 +99,10 @@ struct SupportNode
             }
             is_sharp_tail = parent->is_sharp_tail;
             skin_direction = parent->skin_direction;
+            dynapin_landed  = parent->dynapin_landed;
+            dynapin_pin_row = parent->dynapin_pin_row;
+            dynapin_pin_col = parent->dynapin_pin_col;
+            branch_id       = parent->branch_id;
         }
     }
 
@@ -108,9 +121,6 @@ struct SupportNode
     int distance_to_top;
     coordf_t dist_mm_to_top = 0;  // dist to bottom contact in mm
 
-    // all nodes will have same diameter_angle_scale_factor because it's defined by user
-    static double diameter_angle_scale_factor;
-
     /*!
      * \brief The position of this node on the layer.
      */
@@ -123,6 +133,10 @@ struct SupportNode
     bool           is_processed    = false;
     bool           need_extra_wall = false;
     bool           is_sharp_tail   = false;
+    bool           dynapin_landed  = false;
+    int            dynapin_pin_row = -1;
+    int            dynapin_pin_col = -1;
+    uint64_t       branch_id       = 0;
     bool           valid = true;
     ExPolygon      overhang; // when type==ePolygon, set this value to get original overhang area
 
@@ -293,7 +307,9 @@ private:
      */
     const ExPolygons& calculate_avoidance(const RadiusLayerPair& key) const;
 
+    double           m_diameter_angle_scale_factor = 0.;
     tbb::spin_mutex  m_mutex;
+    uint64_t         m_next_branch_id = 1;
 
 public:
     bool is_slim = false;
@@ -359,7 +375,7 @@ public:
      *
      * \param storage The data storage to get global settings from.
      */
-    TreeSupport(PrintObject& object, const SlicingParameters &slicing_params);
+    TreeSupport(PrintObject& object, const SlicingParameters &slicing_params, const std::vector<DynaPin::Pin>* allowed_pins = nullptr);
 
     void move_bounds_to_contact_nodes(std::vector<TreeSupport3D::SupportElements> &move_bounds,
                                       PrintObject                                 &print_object,
@@ -431,6 +447,8 @@ private:
     size_t          m_highest_overhang_layer = 0;
     std::vector<std::vector<MinimumSpanningTree>> m_spanning_trees;
     std::vector< std::unordered_map<Line, bool, LineHash>> m_mst_line_x_layer_contour_caches;
+    std::vector<DynaPin::TreePinLanding> m_dynapin_polygon_landings;
+    std::optional<std::vector<DynaPin::Pin>> m_dynapin_allowed_pins;
     float    DO_NOT_MOVER_UNDER_MM = 0.0;
     coordf_t base_radius                        = 0.0;
     const coordf_t MAX_BRANCH_RADIUS = 10.0;
@@ -459,6 +477,7 @@ private:
      * \param contact_nodes The nodes to draw as support.
      */
     void draw_circles();
+    void validate_dynapin_landings();
 
     /*!
      * \brief Drops down the nodes of the tree support towards the build plate.
