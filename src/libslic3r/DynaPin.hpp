@@ -3,6 +3,7 @@
 
 #include "ExPolygon.hpp"
 
+#include <cstddef>
 #include <string>
 #include <optional>
 #include <vector>
@@ -148,7 +149,8 @@ bool                    load_config_for_print(const Print& print, Config& config
 LocalBlocker            blocker_for_pin(const PrintObject& object, const Config& config, const Pin& pin);
 VirtualSupportSurface   surface_for_pin(const PrintObject& object, const Config& config, const Pin& pin);
 std::optional<Point>    nearest_pin_landing_point(const Polygon& safe_region, const Point& from);
-bool                    pin_collides_with_model(const Print& print, const Config& config, const Pin& pin);
+bool                    pin_collides_with_model(const Print& print, const Config& config, const Pin& pin,
+                                               std::size_t* intersection_count = nullptr);
 std::vector<Polygons>   support_blockers_for_object(const PrintObject& object);
 // Blocker prisms in object-local coordinates, used to clip already-generated
 // support layers (e.g. support columns descending through the blocked region

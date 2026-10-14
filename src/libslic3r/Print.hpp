@@ -409,6 +409,9 @@ public:
     // BBS
     SupportLayer* add_tree_support_layer(int id, coordf_t height, coordf_t print_z, coordf_t slice_z);
     std::shared_ptr<TreeSupportData> alloc_tree_support_preview_cache();
+    // Immutable object-local geometry, shared only across this object's Y candidates.
+    const std::vector<Polygons>& dynapin_layer_polygons() const;
+    const std::vector<DynaPin::ProjectionEvent>& dynapin_tree_contacts() const;
     void clear_tree_support_preview_cache() { m_tree_support_preview_cache.reset(); }
 
     size_t          support_layer_count() const { return m_support_layers.size(); }
@@ -568,6 +571,8 @@ private:
     LayerPtrs                               m_layers;
     SupportLayerPtrs                        m_support_layers;
     DynaPin::TreePinLandingPlan             m_dynapin_tree_landing_plan;
+    mutable std::shared_ptr<const std::vector<Polygons>> m_dynapin_layer_polygons;
+    mutable std::shared_ptr<const std::vector<DynaPin::ProjectionEvent>> m_dynapin_tree_contacts;
     // BBS
     std::shared_ptr<TreeSupportData>        m_tree_support_preview_cache;
 

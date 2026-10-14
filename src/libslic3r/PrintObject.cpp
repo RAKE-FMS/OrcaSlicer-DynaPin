@@ -945,8 +945,10 @@ FillLightning::GeneratorPtr PrintObject::prepare_lightning_infill_data()
 
 void PrintObject::clear_layers()
 {
+    m_dynapin_layer_polygons.reset();
+    m_dynapin_tree_contacts.reset();
     if (!m_shared_object) {
-        for (Layer *l : m_layers)
+        for (Layer* l : m_layers)
             delete l;
         m_layers.clear();
     }
@@ -1364,6 +1366,41 @@ bool PrintObject::invalidate_state_by_config_options(
     return invalidated;
 }
 
+const std::vector<Polygons>& PrintObject::dynapin_layer_polygons() const
+{
+    if (!m_dynapin_layer_polygons) {
+        auto polygons = std::make_shared<std::vector<Polygons>>();
+        polygons->reserve(m_layers.size());
+        for (const Layer* layer : m_layers) {
+            m_print->throw_if_canceled();
+            polygons->push_back(to_polygons(layer->lslices));
+        }
+        m_print->throw_if_canceled();
+        m_dynapin_layer_polygons = std::move(polygons);
+    }
+    return *m_dynapin_layer_polygons;
+}
+
+const std::vector<DynaPin::ProjectionEvent>& PrintObject::dynapin_tree_contacts() const
+{
+    if (!m_dynapin_tree_contacts) {
+        const auto& polygons = dynapin_layer_polygons();
+        auto        contacts = std::make_shared<std::vector<DynaPin::ProjectionEvent>>();
+        for (size_t i = 1; i < m_layers.size(); ++i) {
+            m_print->throw_if_canceled();
+            Polygons overhang = diff(polygons[i], offset(polygons[i - 1], scale_(0.05)));
+            if (!overhang.empty())
+                contacts->push_back({DynaPin::ProjectionEventType::Contact, m_layers[i]->print_z, std::move(overhang), {}, false});
+        }
+        m_print->throw_if_canceled();
+        BOOST_LOG_TRIVIAL(info) << "[DynaPin] Tree contact geometry built: layers=" << m_layers.size() << ", contacts=" << contacts->size()
+                                << ", differences=" << (m_layers.empty() ? 0 : m_layers.size() - 1)
+                                << ", offsets=" << (m_layers.empty() ? 0 : m_layers.size() - 1);
+        m_dynapin_tree_contacts = std::move(contacts);
+    }
+    return *m_dynapin_tree_contacts;
+}
+
 bool PrintObject::invalidate_step(PrintObjectStep step)
 {
 	bool invalidated = Inherited::invalidate_step(step);
@@ -1378,7 +1415,9 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
         invalidated |= this->invalidate_steps({ posIroning, posSimplifyInfill });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
     } else if (step == posSlice) {
-		invalidated |= this->invalidate_steps({ posPerimeters, posPrepareInfill, posInfill, posIroning, posSupportMaterial, posSimplifyPath, posSimplifyInfill });
+        m_dynapin_layer_polygons.reset();
+        m_dynapin_tree_contacts.reset();
+        invalidated |= this->invalidate_steps({ posPerimeters, posPrepareInfill, posInfill, posIroning, posSupportMaterial, posSimplifyPath, posSimplifyInfill });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
         m_slicing_params.valid = false;
     } else if (step == posSupportMaterial) {
@@ -1400,7 +1439,9 @@ bool PrintObject::invalidate_all_steps()
 {
 	// First call the "invalidate" functions, which may cancel background processing.
     bool result = Inherited::invalidate_all_steps() | m_print->invalidate_all_steps();
-	// Then reset some of the depending values.
+    m_dynapin_layer_polygons.reset();
+    m_dynapin_tree_contacts.reset();
+    // Then reset some of the depending values.
 	m_slicing_params.valid = false;
 	return result;
 }

@@ -764,7 +764,12 @@ PlacementResult run_placement_task(PlacementTask                task,
         }
         if (!task.search.angle_evaluator)
             task.search.angle_evaluator = make_scene_angle_evaluator(task.scene, cancel);
-        return optimize_placement(task.search, make_scene_evaluator(task.scene, cancel), cancel, progress, progress_stage);
+        const auto begin  = std::chrono::steady_clock::now();
+        auto       result = optimize_placement(task.search, make_scene_evaluator(task.scene, cancel), cancel, progress, progress_stage);
+        BOOST_LOG_TRIVIAL(info) << "[DynaPin] placement task completed: elapsed_ms="
+                                << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count()
+                                << ", evaluations=" << result.evaluations << ", status=" << int(result.status);
+        return result;
     } catch (const std::bad_alloc&) {
         PlacementResult result;
         result.status  = PlacementStatus::ResourceExhausted;
@@ -1295,6 +1300,10 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
                 std::atomic<size_t> active_groups{0};
                 bool calibrated = false;
                 bool waiting_for_memory = false;
+                auto                    memory_wait_begin  = std::chrono::steady_clock::time_point{};
+                double                  memory_wait_ms     = 0.;
+                std::atomic<size_t>     observed_peak_groups{0};
+                std::atomic<size_t>     running_groups{0};
                 std::mutex completion_mutex;
                 std::condition_variable completion_cv;
                 tbb::task_group tasks;
@@ -1310,11 +1319,16 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
                     active_groups.fetch_add(1, std::memory_order_relaxed);
                     try {
                         tasks.run([&, group_index]() {
+                            const size_t running = running_groups.fetch_add(1, std::memory_order_relaxed) + 1;
+                            size_t       peak    = observed_peak_groups.load(std::memory_order_relaxed);
+                            while (running > peak &&
+                                   !observed_peak_groups.compare_exchange_weak(peak, running, std::memory_order_relaxed)) {}
                             try {
                                 process_group(group_index);
                             } catch (const std::bad_alloc &) {
                                 resource_exhausted.store(true, std::memory_order_relaxed);
                             }
+                            running_groups.fetch_sub(1, std::memory_order_relaxed);
                             active_groups.fetch_sub(1, std::memory_order_relaxed);
                             completion_cv.notify_one();
                         });
@@ -1381,6 +1395,8 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
                         if (check_canceled())
                             break;
                         if (waiting_for_memory) {
+                            memory_wait_ms +=
+                                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - memory_wait_begin).count();
                             set_stage(phase_start == 5 ? PlacementProgressStage::CoarseSearch : PlacementProgressStage::LocalSearch);
                             waiting_for_memory = false;
                         }
@@ -1393,6 +1409,7 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
                         !can_admit_angle_group(*sample, group_estimate, 0) && !waiting_for_memory) {
                         set_stage(PlacementProgressStage::WaitingForMemory);
                         waiting_for_memory = true;
+                        memory_wait_begin  = std::chrono::steady_clock::now();
                         BOOST_LOG_TRIVIAL(info) << "[DynaPin] waiting for memory: available=" << sample->available_memory_bytes
                                                 << " bytes, rss=" << sample->process_resident_bytes
                                                 << " bytes, estimate=" << group_estimate << " bytes";
@@ -1401,6 +1418,10 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
                     completion_cv.wait_for(lock, std::chrono::milliseconds(100));
                 }
                 tasks.wait();
+                if (waiting_for_memory)
+                    memory_wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - memory_wait_begin).count();
+                BOOST_LOG_TRIVIAL(info) << "[DynaPin] angle scheduling completed: groups=" << angle_groups.size()
+                                        << ", peak_active=" << observed_peak_groups.load() << ", memory_wait_ms=" << memory_wait_ms;
             }
         } else {
             auto process_candidate_range = [&](size_t begin, size_t end) {

@@ -18,6 +18,7 @@
 #include <boost/filesystem/path.hpp>
 
 #include "test_data.hpp"
+#include "dynapin_selection_reference.hpp"
 
 using namespace Slic3r;
 using namespace Slic3r::Test;
@@ -1656,6 +1657,225 @@ TEST_CASE("DynaPin Tree bounded search preserves final pins across concurrency l
             CHECK(result.volume_mm3 == Catch::Approx(serial_result->volume_mm3).margin(1e-3));
             CHECK(pins == serial_pins);
             CHECK(volume == Catch::Approx(serial_volume).margin(1e-3));
+        }
+    }
+}
+
+TEST_CASE("Tree pin selection matches the frozen selector", "[Print][DynaPin][TreePinSelection]")
+{
+    struct LogGuard
+    {
+        unsigned previous = get_logging_level();
+        LogGuard() { set_logging_level(3); }
+        ~LogGuard() { set_logging_level(previous); }
+    } log_guard;
+    ResourcesDirGuard  resources_guard(test_resources_dir());
+    DebugStageEnvGuard env_guard;
+    TemporaryDirGuard  temp_guard;
+    REQUIRE(::setenv("DYNAPIN_DEBUG_STAGE", "2", 1) == 0);
+    for (const char* fixture : {"Simple_Bridge", "RemoveGymnastBase", "Arch_Bridge"}) {
+        INFO(fixture);
+        Model                     model;
+        DynamicPrintConfig        config;
+        ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Disable};
+        PlateDataPtrs             plates;
+        std::vector<Preset*>      presets;
+        ImportedProjectDataGuard  import_guard(plates, presets);
+        bool                      bbl = false;
+        Semver                    version;
+        auto path = (boost::filesystem::path(TEST_DATA_DIR) / "dynapin" / (std::string(fixture) + ".3mf")).string();
+        REQUIRE(load_bbs_3mf(path.c_str(), &config, &substitutions, &model, &plates, &presets, &bbl, &version, nullptr,
+                             LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
+        config.set_deserialize_strict({{"support_type", "tree(auto)"},
+                                       {"support_style", "tree_slim"},
+                                       {"enable_support", true},
+                                       {"enable_dynapin_support_optimization", true},
+                                       {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"}});
+        Print print;
+        print.set_plate_origin(Vec3d::Zero());
+        for (auto* object : model.objects)
+            print.auto_assign_extruders(object);
+        print.apply(model, config);
+        print.set_status_silent();
+        REQUIRE(print.prepare_slices_for_support_geometry());
+        DynaPin::Config pins_config;
+        REQUIRE(DynaPin::load_config_for_print(print, pins_config));
+        const auto candidates = DynaPin::candidate_pins(pins_config);
+        REQUIRE_FALSE(candidates.empty());
+        for (const auto& pin : candidates)
+            CHECK(DynaPin::pin_collides_with_model(print, pins_config, pin) ==
+                  Test::reference_pin_collides_with_model(print, pins_config, pin));
+        for (auto* object : print.objects()) {
+            const auto* layer_cache   = &object->dynapin_layer_polygons();
+            const auto* contact_cache = &object->dynapin_tree_contacts();
+            for (int variant = 0; variant < 3; ++variant) {
+                INFO("variant=" << variant);
+                CHECK(&object->dynapin_layer_polygons() == layer_cache);
+                CHECK(&object->dynapin_tree_contacts() == contact_cache);
+                std::vector<DynaPin::Pin> colliding;
+                for (size_t i = 0; i < candidates.size(); ++i)
+                    if (variant == 2 || (variant == 1 && i % 3 == 0))
+                        colliding.push_back(candidates[i]);
+                auto         start        = std::chrono::steady_clock::now();
+                const auto   expected     = Test::reference_select_tree_pins(*object, pins_config, candidates, colliding);
+                const double reference_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+                start                     = std::chrono::steady_clock::now();
+                const auto   actual       = DynaPin::select_tree_pins(*object, pins_config, candidates, colliding);
+                const double optimized_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+                CHECK(actual.selected == expected.selected);
+                CHECK(actual.rejected_collisions == expected.rejected_collisions);
+                std::cout << "PIN_SELECTION fixture=" << fixture << " variant=" << variant << " reference_ms=" << reference_ms
+                          << " optimized_ms=" << optimized_ms << " selected=" << actual.selected.size() << std::endl;
+                for (auto& instance : object->instances())
+                    instance.shift += Point::new_scale(0., 0.125);
+            }
+        }
+    }
+}
+
+TEST_CASE("Tree pin geometry cache follows slicing and cancellation", "[Print][DynaPin][TreePinSelection]")
+{
+    Print print;
+    print.set_plate_origin(Vec3d::Zero());
+    Model model;
+    auto  config = DynamicPrintConfig::full_print_config();
+    init_dynapin_print(print, model, config);
+    REQUIRE(print.prepare_slices_for_support_geometry());
+    const auto* object = print.objects().front();
+    print.cancel();
+    CHECK_THROWS(object->dynapin_layer_polygons());
+    print.restart();
+    const auto* cache     = &object->dynapin_layer_polygons();
+    const auto  old_count = cache->size();
+    print.cancel();
+    CHECK_THROWS(object->dynapin_tree_contacts());
+    print.restart();
+    CHECK(object->dynapin_tree_contacts().empty());
+    config.set_deserialize_strict({{"support_top_z_distance", 0.35}});
+    print.apply(model, config);
+    REQUIRE(print.objects().front() == object);
+    // Support distance also invalidates slicing in the existing pipeline.
+    CHECK(object->dynapin_layer_polygons().size() == old_count);
+    config.set_deserialize_strict({{"layer_height", 0.25}});
+    print.apply(model, config);
+    REQUIRE(print.prepare_slices_for_support_geometry());
+    object              = print.objects().front();
+    const auto& rebuilt = object->dynapin_layer_polygons();
+    CHECK(rebuilt.size() != old_count);
+    REQUIRE(rebuilt.size() == object->layers().size());
+    for (size_t i = 0; i < rebuilt.size(); ++i)
+        CHECK(rebuilt[i] == to_polygons(object->layers()[i]->lslices));
+    CHECK(object->dynapin_tree_contacts().empty());
+    const size_t rebuilt_count   = rebuilt.size();
+    const auto   before_rotation = rebuilt;
+    model.objects.front()->instances.front()->set_rotation(Vec3d(0., 0., 0.1));
+    print.apply(model, config);
+    REQUIRE(print.prepare_slices_for_support_geometry());
+    CHECK(print.objects().front()->dynapin_layer_polygons() != before_rotation);
+    const auto before_shape_change = print.objects().front()->dynapin_layer_polygons();
+    model.objects.front()->scale(1.1, 1., 1.);
+    print.apply(model, config);
+    REQUIRE(print.prepare_slices_for_support_geometry());
+    CHECK(print.objects().front()->dynapin_layer_polygons() != before_shape_change);
+    print.clear();
+    print.apply(model, config);
+    REQUIRE(print.prepare_slices_for_support_geometry());
+    CHECK(print.objects().front()->dynapin_layer_polygons().size() == rebuilt_count);
+    print.get_object(0)->clear_layers();
+    CHECK(print.objects().front()->dynapin_layer_polygons().empty());
+    CHECK(print.objects().front()->dynapin_tree_contacts().empty());
+    Print shared_print;
+    shared_print.set_plate_origin(Vec3d::Zero());
+    Model shared_model;
+    init_dynapin_print(shared_print, shared_model, config);
+    REQUIRE(shared_print.prepare_slices_for_support_geometry());
+    auto* shared_source = shared_print.get_object(0);
+    auto* destination   = print.get_object(0);
+    destination->set_shared_object(shared_source);
+    destination->copy_layers_from_shared_object();
+    CHECK(destination->dynapin_layer_polygons() == shared_source->dynapin_layer_polygons());
+    destination->clear_shared_object();
+    CHECK(destination->dynapin_layer_polygons().empty());
+    CHECK(destination->dynapin_tree_contacts().empty());
+}
+
+TEST_CASE("Tree pin projection preserves boundary and height ordering", "[Print][DynaPin][TreePinSelection]")
+{
+    const Polygon contact{{0, 0}, {10000, 0}, {10000, 10000}, {0, 10000}};
+    for (coord_t x : {coord_t(-1), coord_t(0), coord_t(9999), coord_t(10000), coord_t(10001)}) {
+        Polygon surface{{x, 0}, {x + 10000, 0}, {x + 10000, 10000}, {x, 10000}};
+        for (bool colliding : {false, true}) {
+            for (double z : {10., 20., 30.}) {
+                std::vector<DynaPin::ProjectionEvent> events{
+                    {DynaPin::ProjectionEventType::Contact, 30., {contact}, {}, false},
+                    {DynaPin::ProjectionEventType::PinSurface, z, {surface}, {1, 0}, colliding},
+                    {DynaPin::ProjectionEventType::PinSurface, z, {contact}, {1, 1}, false},
+                    {DynaPin::ProjectionEventType::Model, 15., {surface}, {}, false},
+                    {DynaPin::ProjectionEventType::Contact, 5., {contact}, {}, false},
+                    {DynaPin::ProjectionEventType::PinSurface, 2., {contact}, {0, 0}, false},
+                };
+                const auto expected = Test::reference_select_from_projection(events);
+                const auto actual   = DynaPin::select_from_projection(events);
+                CHECK(actual.selected == expected.selected);
+                CHECK(actual.rejected_collisions == expected.rejected_collisions);
+            }
+        }
+    }
+    CHECK(DynaPin::select_from_projection({}).selected.empty());
+}
+
+TEST_CASE("Tree pin selection preserves multi-stage overhang choices", "[Print][DynaPin][TreePinSelection]")
+{
+    ResourcesDirGuard resources_guard(test_resources_dir());
+    for (const char* style : {"tree_slim", "tree_strong", "tree_hybrid"}) {
+        for (double angle : {5., 25.}) {
+            Model        model;
+            TriangleMesh mesh = make_cube(5., 5., 10.);
+            auto         deck = make_cube(70., 15., 3.);
+            deck.translate(0., 0., 10.);
+            mesh.merge(deck);
+            auto stem = make_cube(5., 5., 10.);
+            stem.translate(0., 0., 13.);
+            mesh.merge(stem);
+            auto upper = make_cube(70., 15., 3.);
+            upper.translate(0., 10., 23.);
+            mesh.merge(upper);
+            auto* object = model.add_object();
+            object->add_volume(std::move(mesh));
+            object->add_instance()->set_offset({90., 70., 0.});
+            object->ensure_on_bed();
+            auto config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict({{"enable_support", true},
+                                           {"support_type", "tree(auto)"},
+                                           {"support_style", style},
+                                           {"tree_support_branch_diameter_angle", angle},
+                                           {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+                                           {"printable_area", "0x0,180x0,180x180,0x180"}});
+            Print print;
+            print.set_plate_origin(Vec3d::Zero());
+            print.auto_assign_extruders(object);
+            print.apply(model, config);
+            print.set_status_silent();
+            REQUIRE(print.prepare_slices_for_support_geometry());
+            DynaPin::Config pins_config;
+            REQUIRE(DynaPin::load_config_for_print(print, pins_config));
+            const auto candidates = DynaPin::candidate_pins(pins_config);
+            for (double branch_angle : {0., 45., 89.}) {
+                config.set_deserialize_strict({{"tree_support_branch_angle", branch_angle}});
+                print.apply(model, config);
+                REQUIRE(print.prepare_slices_for_support_geometry());
+                const auto*                     printed = print.objects().front();
+                const std::vector<DynaPin::Pin> colliding{{0, 0}, {1, 1}, {2, 2}};
+                REQUIRE(printed->dynapin_tree_contacts().size() >= 2);
+                for (double row_pitch : {pins_config.row_pitch_z, 0., EPSILON / 2.}) {
+                    auto heights        = pins_config;
+                    heights.row_pitch_z = row_pitch;
+                    const auto expected = Test::reference_select_tree_pins(*printed, heights, candidates, colliding);
+                    const auto actual   = DynaPin::select_tree_pins(*printed, heights, candidates, colliding);
+                    CHECK(actual.selected == expected.selected);
+                    CHECK(actual.rejected_collisions == expected.rejected_collisions);
+                }
+            }
         }
     }
 }

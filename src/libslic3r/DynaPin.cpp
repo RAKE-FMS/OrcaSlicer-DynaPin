@@ -16,6 +16,8 @@
 #include <cctype>
 #include <cmath>
 #include <iomanip>
+#include <map>
+#include <chrono>
 #include <cstdlib>
 #include <set>
 #include <sstream>
@@ -143,7 +145,15 @@ void sort_unique_pins(std::vector<Pin>& pins, const Config& config)
     pins.erase(std::unique(pins.begin(), pins.end()), pins.end());
 }
 
-ProjectionSelection select_from_projection(std::vector<ProjectionEvent> events)
+struct SelectionWork
+{
+    size_t intersections = 0;
+    size_t differences   = 0;
+    size_t offsets       = 0;
+    size_t unions        = 0;
+};
+
+static ProjectionSelection select_from_projection_impl(std::vector<ProjectionEvent> events, SelectionWork* work)
 {
     auto type_order = [](ProjectionEventType type) {
         switch (type) {
@@ -161,20 +171,34 @@ ProjectionSelection select_from_projection(std::vector<ProjectionEvent> events)
 
     ProjectionSelection result;
     Polygons            projection;
+    auto                intersects = [&](const Polygons& a, const Polygons& b) {
+        if (work)
+            ++work->intersections;
+        return !intersection(a, b).empty();
+    };
     for (const ProjectionEvent& event : events) {
         if (event.type == ProjectionEventType::Contact) {
             polygons_append(projection, event.polygons);
+            if (work)
+                ++work->unions;
             projection = union_(projection);
         } else if (event.type == ProjectionEventType::Model) {
-            if (!projection.empty())
+            if (!projection.empty()) {
+                if (work) {
+                    ++work->differences;
+                    ++work->offsets;
+                }
                 projection = diff(projection, offset(event.polygons, float(SCALED_EPSILON)));
-        } else if (!projection.empty() && !intersection(projection, event.polygons).empty()) {
+            }
+        } else if (!projection.empty() && intersects(projection, event.polygons)) {
             if (event.colliding)
                 result.rejected_collisions.push_back(event.pin);
             else {
                 result.selected.push_back(event.pin);
                 // This is the downward-propagation termination point. A safe
                 // upper pin consumes only the projection landing on its top.
+                if (work)
+                    ++work->differences;
                 projection = diff(projection, event.polygons);
             }
         }
@@ -182,75 +206,131 @@ ProjectionSelection select_from_projection(std::vector<ProjectionEvent> events)
     return result;
 }
 
+ProjectionSelection select_from_projection(std::vector<ProjectionEvent> events)
+{ return select_from_projection_impl(std::move(events), nullptr); }
+
 ProjectionSelection select_tree_pins(const PrintObject&      object,
                                      const Config&           config,
                                      const std::vector<Pin>& candidates,
                                      const std::vector<Pin>& colliding)
 {
-    std::vector<ProjectionEvent> events;
-    std::vector<ProjectionEvent> contacts;
-    events.reserve(object.layers().size() + candidates.size());
-    for (size_t layer_id = 0; layer_id < object.layers().size(); ++layer_id) {
-        const Layer& layer = *object.layers()[layer_id];
-        if (layer_id == 0)
-            continue;
-        const Layer& lower    = *object.layers()[layer_id - 1];
-        Polygons     overhang = diff(to_polygons(layer.lslices), offset(to_polygons(lower.lslices), scale_(0.05)));
-        if (!overhang.empty()) {
-            events.push_back({ProjectionEventType::Contact, layer.print_z, std::move(overhang), {}, false});
-            contacts.push_back(events.back());
-        }
-    }
+    using Clock                = std::chrono::steady_clock;
+    const auto    begin        = Clock::now();
+    const auto&   contacts     = object.dynapin_tree_contacts();
+    const auto    geometry_end = Clock::now();
+    SelectionWork work;
+    auto          intersect = [&](const Polygons& a, const Polygons& b) {
+        ++work.intersections;
+        return intersection(a, b);
+    };
+    std::vector<ProjectionEvent> events = contacts;
+    events.reserve(contacts.size() + candidates.size());
+    std::vector<VirtualSupportSurface>    surfaces;
+    std::vector<BoundingBox>              surface_bounds;
+    std::map<std::pair<int, int>, size_t> indices;
+    std::vector<unsigned char>            is_colliding(candidates.size(), 0), is_selected(candidates.size(), 0);
+    surfaces.reserve(candidates.size());
+    surface_bounds.reserve(candidates.size());
     for (const Pin& pin : candidates) {
-        const VirtualSupportSurface surface = surface_for_pin(object, config, pin);
-        events.push_back({ProjectionEventType::PinSurface,
-                          surface.print_z,
-                          {surface.poly},
-                          pin,
-                          std::find(colliding.begin(), colliding.end(), pin) != colliding.end()});
+        const size_t index = surfaces.size();
+        indices.emplace(std::make_pair(pin.row, pin.col), index);
+        surfaces.push_back(surface_for_pin(object, config, pin));
+        surface_bounds.push_back(get_extents(surfaces.back().poly));
+        is_colliding[index]                  = std::find(colliding.begin(), colliding.end(), pin) != colliding.end();
+        const VirtualSupportSurface& surface = surfaces.back();
+        events.push_back({ProjectionEventType::PinSurface, surface.print_z, {surface.poly}, pin, bool(is_colliding[index])});
     }
-    ProjectionSelection selection = select_from_projection(std::move(events));
+    const auto          surfaces_end   = Clock::now();
+    ProjectionSelection selection      = select_from_projection_impl(std::move(events), &work);
+    const auto          projection_end = Clock::now();
+    std::vector<size_t> selected_indices;
+    selected_indices.reserve(candidates.size());
+    for (const Pin& pin : selection.selected) {
+        const size_t index = indices.at({pin.row, pin.col});
+        is_selected[index] = 1;
+        selected_indices.push_back(index);
+    }
+    // Strict separation only: touching bounds still take the exact polygon path.
+    const auto separated = [](const BoundingBox& a, const BoundingBox& b) {
+        return a.max.x() < b.min.x() || b.max.x() < a.min.x() || a.max.y() < b.min.y() || b.max.y() < a.min.y();
+    };
     const PrintObjectConfig& object_config = object.config();
-    const double layer_height = std::max(object_config.layer_height.value, EPSILON);
-    const double angle = object_config.tree_support_branch_angle.value * M_PI / 180.;
+    const double             layer_height  = std::max(object_config.layer_height.value, EPSILON);
+    const double             angle         = object_config.tree_support_branch_angle.value * M_PI / 180.;
     double line_width = object_config.get_abs_value("support_line_width", object.print()->config().nozzle_diameter.get_at(0));
     if (line_width <= 0.)
-        line_width = Flow::auto_extrusion_width(FlowRole::frSupportMaterial,
-                                               float(object.print()->config().nozzle_diameter.get_at(0)));
-    const double move_per_layer = std::min(std::tan(angle) * layer_height, line_width);
+        line_width = Flow::auto_extrusion_width(FlowRole::frSupportMaterial, float(object.print()->config().nozzle_diameter.get_at(0)));
+    const double     move_per_layer    = std::min(std::tan(angle) * layer_height, line_width);
     std::vector<Pin> nearby_candidates = candidates;
-    std::sort(nearby_candidates.begin(), nearby_candidates.end(), [](const Pin& lhs, const Pin& rhs) {
-        return std::tie(lhs.row, lhs.col) > std::tie(rhs.row, rhs.col);
-    });
+    std::sort(nearby_candidates.begin(), nearby_candidates.end(),
+              [](const Pin& lhs, const Pin& rhs) { return std::tie(lhs.row, lhs.col) > std::tie(rhs.row, rhs.col); });
+    std::vector<BoundingBox> contact_bounds;
+    contact_bounds.reserve(contacts.size());
+    for (const auto& contact : contacts)
+        contact_bounds.push_back(get_extents(contact.polygons));
+    std::optional<double>                reach_height;
+    std::vector<std::optional<Polygons>> contact_reach(contacts.size());
     for (const Pin& pin : nearby_candidates) {
-        if (std::find(colliding.begin(), colliding.end(), pin) != colliding.end() ||
-            std::find(selection.selected.begin(), selection.selected.end(), pin) != selection.selected.end())
+        const size_t pin_index = indices.at({pin.row, pin.col});
+        if (is_colliding[pin_index] || is_selected[pin_index])
             continue;
-        const VirtualSupportSurface surface = surface_for_pin(object, config, pin);
-        for (const ProjectionEvent& contact : contacts) {
+        const VirtualSupportSurface& surface = surfaces[pin_index];
+        // At an identical top height, newly added pins cannot enter the strict
+        // upper-pin condition below. Remaining contact geometry and its exact
+        // offset therefore stay unchanged throughout this height group.
+        if (!reach_height || *reach_height != surface.print_z) {
+            reach_height = surface.print_z;
+            for (auto& reach : contact_reach)
+                reach.reset();
+        }
+        for (size_t contact_index = 0; contact_index < contacts.size(); ++contact_index) {
+            const ProjectionEvent& contact = contacts[contact_index];
             if (contact.print_z <= surface.print_z + EPSILON)
                 continue;
-            Polygons remaining = contact.polygons;
-            bool shadowed = false;
-            for (const Pin& selected_pin : selection.selected) {
-                const VirtualSupportSurface selected_surface = surface_for_pin(object, config, selected_pin);
+            const bool have_reach = contact_reach[contact_index].has_value();
+            Polygons   remaining  = have_reach ? Polygons{} : contact.polygons;
+            bool       shadowed   = false;
+            for (const size_t selected_index : selected_indices) {
+                const VirtualSupportSurface& selected_surface = surfaces[selected_index];
                 if (selected_surface.print_z > surface.print_z + EPSILON && selected_surface.print_z < contact.print_z - EPSILON) {
-                    if (!intersection({selected_surface.poly}, {surface.poly}).empty() &&
-                        !intersection(contact.polygons, {selected_surface.poly}).empty())
+                    if (!separated(surface_bounds[selected_index], surface_bounds[pin_index]) &&
+                        !separated(contact_bounds[contact_index], surface_bounds[selected_index]) &&
+                        !intersect({selected_surface.poly}, {surface.poly}).empty() &&
+                        !intersect(contact.polygons, {selected_surface.poly}).empty()) {
                         shadowed = true;
-                    remaining = diff(remaining, {selected_surface.poly});
+                        break;
+                    }
+                    if (!have_reach && !separated(get_extents(remaining), surface_bounds[selected_index])) {
+                        ++work.differences;
+                        remaining = diff(remaining, {selected_surface.poly});
+                    }
+                    if (!have_reach && remaining.empty())
+                        break;
                 }
             }
-            if (shadowed || remaining.empty())
+            if (shadowed || (!have_reach && remaining.empty()))
                 continue;
-            const double travel = move_per_layer * std::ceil((contact.print_z - surface.print_z) / layer_height);
-            if (!intersection(offset(remaining, float(scale_(travel))), {surface.poly}).empty()) {
+            if (!have_reach) {
+                const double travel = move_per_layer * std::ceil((contact.print_z - surface.print_z) / layer_height);
+                ++work.offsets;
+                contact_reach[contact_index] = offset(remaining, float(scale_(travel)));
+            }
+            if (!intersect(*contact_reach[contact_index], {surface.poly}).empty()) {
                 selection.selected.push_back(pin);
+                selected_indices.push_back(pin_index);
+                is_selected[pin_index] = 1;
                 break;
             }
         }
     }
     sort_unique_pins(selection.selected, config);
+    const auto end = Clock::now();
+    auto       ms  = [](auto duration) { return std::chrono::duration<double, std::milli>(duration).count(); };
+    BOOST_LOG_TRIVIAL(info) << "[DynaPin] Tree pin selection: geometry_ms=" << ms(geometry_end - begin)
+                            << ", surfaces_ms=" << ms(surfaces_end - geometry_end)
+                            << ", projection_ms=" << ms(projection_end - surfaces_end) << ", nearby_ms=" << ms(end - projection_end)
+                            << ", surfaces=" << surfaces.size() << ", intersections=" << work.intersections
+                            << ", differences=" << work.differences << ", offsets=" << work.offsets << ", unions=" << work.unions;
     return selection;
 }
 
@@ -489,7 +569,7 @@ std::optional<Point> nearest_pin_landing_point(const Polygon& safe_region, const
     return closest;
 }
 
-bool pin_collides_with_model(const Print& print, const Config& config, const Pin& pin)
+bool pin_collides_with_model(const Print& print, const Config& config, const Pin& pin, std::size_t* intersection_count)
 {
     const std::optional<double> max_x_bed = bed_max_x(print);
     if (!max_x_bed) {
@@ -498,13 +578,26 @@ bool pin_collides_with_model(const Print& print, const Config& config, const Pin
     }
     for (const PrintObject* object : print.objects()) {
         const auto check_instance = [&](const Point& shift) {
-            const LocalBlocker blocker = blocker_for_pin_shift(config, pin, shift, *max_x_bed);
-            for (const Layer* layer : object->layers()) {
-                if (layer->print_z + EPSILON < blocker.z_min || layer->print_z - EPSILON > blocker.z_max)
+            const LocalBlocker blocker        = blocker_for_pin_shift(config, pin, shift, *max_x_bed);
+            const auto&        layers         = object->layers();
+            const auto&        polygons       = object->dynapin_layer_polygons();
+            const auto         first          = std::lower_bound(layers.begin(), layers.end(), blocker.z_min,
+                                                                 [](const Layer* layer, double z) { return layer->print_z + EPSILON < z; });
+            const auto         last           = std::upper_bound(first, layers.end(), blocker.z_max,
+                                                                 [](double z, const Layer* layer) { return z < layer->print_z - EPSILON; });
+            const BoundingBox  blocker_bounds = get_extents(blocker.poly);
+            for (auto it = first; it != last; ++it) {
+                const Layer*      layer          = *it;
+                const auto&       layer_polygons = polygons[size_t(it - layers.begin())];
+                const BoundingBox bounds         = get_extents(layer_polygons);
+                if (bounds.max.x() < blocker_bounds.min.x() || blocker_bounds.max.x() < bounds.min.x() ||
+                    bounds.max.y() < blocker_bounds.min.y() || blocker_bounds.max.y() < bounds.min.y())
                     continue;
-                const Polygons overlap = intersection(to_polygons(layer->lslices), {blocker.poly});
+                if (intersection_count)
+                    ++*intersection_count;
+                const Polygons overlap = intersection(layer_polygons, {blocker.poly});
                 if (!overlap.empty()) {
-                    BOOST_LOG_TRIVIAL(debug) << "[DynaPin] model collision: pin=(" << pin.row << "," << pin.col << ")"
+                    BOOST_LOG_TRIVIAL(trace) << "[DynaPin] model collision: pin=(" << pin.row << "," << pin.col << ")"
                                              << ", layer_id=" << layer->id() << ", layer_z=" << layer->print_z << ", instance_shift_mm=("
                                              << unscale<double>(shift.x()) << "," << unscale<double>(shift.y()) << ")"
                                              << ", blocker_x_mm=[" << unscale<double>(blocker.poly.points.front().x() + shift.x()) << ","

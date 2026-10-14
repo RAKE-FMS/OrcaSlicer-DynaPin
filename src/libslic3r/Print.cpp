@@ -23,6 +23,7 @@
 #include <float.h>
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <unordered_set>
 #include <boost/filesystem/path.hpp>
@@ -110,13 +111,20 @@ void Print::update_dynapin_selection(const ObjectID* tree_target_instance_id, st
         BOOST_LOG_TRIVIAL(debug) << "[DynaPin] automatic candidates: count=" << candidate_count;
         if (candidates.empty()) {
             next.source  = DynaPin::SelectionSource::Unavailable;
-            next.warning = L("DynaPin automatic pin selection requires positive row_count and col_count values in the printer configuration.");
+            next.warning = L(
+                "DynaPin automatic pin selection requires positive row_count and col_count values in the printer configuration.");
         } else {
             std::vector<DynaPin::Pin> colliding;
-            for (const DynaPin::Pin &pin : candidates)
-                if (DynaPin::pin_collides_with_model(*this, dynapin_config, pin))
+            size_t                    collision_intersections = 0;
+            const auto                collision_begin         = std::chrono::steady_clock::now();
+            for (const DynaPin::Pin& pin : candidates)
+                if (DynaPin::pin_collides_with_model(*this, dynapin_config, pin, &collision_intersections))
                     colliding.push_back(pin);
-            colliding_count = colliding.size();
+            BOOST_LOG_TRIVIAL(info) << "[DynaPin] model collision scan: elapsed_ms="
+                                    << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - collision_begin).count()
+                                    << ", candidates=" << candidates.size() << ", colliding=" << colliding.size()
+                                    << ", intersections=" << collision_intersections;
+            colliding_count    = colliding.size();
             colliding_pin_list = dynapin_pin_list_text(colliding);
             BOOST_LOG_TRIVIAL(debug) << "[DynaPin] automatic model collision scan: colliding=" << colliding_count
                                      << ", pins=" << colliding_pin_list;
@@ -2243,6 +2251,8 @@ void  PrintObject::set_shared_object(PrintObject *object)
 void  PrintObject::clear_shared_object()
 {
     if (m_shared_object) {
+        m_dynapin_layer_polygons.reset();
+        m_dynapin_tree_contacts.reset();
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": this=%1%, clear previous shared object data %2%")%this %m_shared_object;
         m_layers.clear();
         m_support_layers.clear();
@@ -2256,6 +2266,8 @@ void  PrintObject::clear_shared_object()
 void  PrintObject::copy_layers_from_shared_object()
 {
     if (m_shared_object) {
+        m_dynapin_layer_polygons.reset();
+        m_dynapin_tree_contacts.reset();
         m_layers.clear();
         m_support_layers.clear();
 
