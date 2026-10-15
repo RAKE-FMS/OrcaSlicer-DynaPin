@@ -1,7 +1,37 @@
 # DynaPin 設定ファイル仕様
 
 DynaPinはプリンタのY軸側面に取り付けたピンアレイを使って、印刷途中にピンを引き出す機能です。  
-本ドキュメントではプリンタごとに用意するJSON設定ファイルのスキーマと、各設定値がスライサ上でどう使われるかを説明します。
+本ドキュメントではプリンタごとに用意するJSON設定ファイルのスキーマと、各設定値がどう使われるかを説明します。
+
+現在の `kp3s.json` はPython検証用の `pull_gcode.normal` / `pull_gcode.reverted` 構造です。C++の設定読み込みはまだ旧構造を要求するため、このJSONを現行スライサに指定すると設定読み込みが失敗します。以下のサポート形状・スライサ連携の説明はC++側の既存の仕組みを示しています。今回サポート座標やC++は変更していません。
+
+## Pythonで引き出し動作を検証する
+
+リポジトリのルートで実行します。Python標準ライブラリだけを使用します。
+
+```bash
+# JSONのtypeに従う（現在はalternating）
+python3 scripts/generate_dynapin_pull_gcode.py --pins "0,0; 1,0" --output /tmp/alternating.gcode
+
+# 現行C++のピン単体動作を比較用に再現する
+python3 scripts/generate_dynapin_pull_gcode.py --pins "0,0; 1,0" --current --output /tmp/current.gcode
+
+# typeを一時的に上書きし、接近Yと係合Yを入れ替える
+python3 scripts/generate_dynapin_pull_gcode.py --pins "0,0; 1,0" --type revertedonly --output /tmp/revertedonly.gcode
+```
+
+`--config` でJSONパスを指定できます。省略時は、このREADMEと同じディレクトリの `kp3s.json` を読みます。
+まずリポジトリ内の `old-models/min/min.gcode` を読み込み、内容を変更せず出力の先頭にコピーして、その後に引き出しG-codeを追記します。`--base-file /path/to/min.gcode` で別の読み込み元を指定できます。元ファイルは上書きしません。
+元の改行・バイト列を保持し、末尾に改行がない場合だけ追記との境界に改行を1つ加えます。読み込み元が存在しない場合はエラーにして、出力ファイルを変更しません。
+`--output` 省略時は標準出力へ出力します。ピンは0始まりで、指定したピンだけを高さ・列順に並べ、重複を取り除きます。
+`--type normalonly` は全段にnormalのYオフセットを適用します。`--current` はnormalの動作値を使い、向き別オフセットを適用せず、旧 `z_offset` に相当する値として `normal.retreat_z_lift` を使います。
+
+出力は `min.gcode` の内容に続いて `G21`（mm）・`G90`（絶対座標）と引き出し動作を含みます。ホーミング・加熱・押出などの初期化は、読み込んだ `min.gcode` の内容に従います。Pythonはプリンタへの送信やスライサのレイヤー判定・Z-hopは行いません。
+`--return-position X Y Z` を指定した場合だけ、全ピン処理後に一度、XY→Zの順で指定座標へ戻ります。復帰速度は最後に引き出したピンの向きの設定を使います。
+
+```bash
+python3 -m unittest discover -s tests/scripts -p test_generate_dynapin_pull_gcode.py -v
+```
 
 ---
 
@@ -22,7 +52,7 @@ Z軸 (印刷高さ)
 
 指定したレイヤー（ピンのZ高さ）に達したとき、ノズルがX軸を移動してピンを引き出す。
 
-### ピン引き出しのGコード動作
+### 現行比較モードのピン引き出し動作（`--current`）
 
 ```
 x_hook  x_latch             x_front
@@ -38,8 +68,25 @@ x_hook  x_latch             x_front
 5. G1 X(x_front)                                    ← 前面まで引き出す（高速）
 6. G1 X(x_front + disengage_x_offset) Y(pull_y + approach_y_offset)
                                                     ← XY同時移動でピンを外す（低速）
-7. G1 Z(pull_z + z_offset)                           ← Z退避（低速）
+7. G1 Z(pull_z + retreat_z_lift)                     ← Z退避（低速）
 ```
+
+`revertedonly` は上記の `pull_y + approach_y_offset` と `pull_y` を入れ替えます。Y位置を反転して新しい位置を作るのではなく、接近位置と係合位置を交換します。Z動作は現行比較モードと同じです。
+
+`alternating` は `row % 2 == reverted.row_parity` の段をreverted、それ以外をnormalにします。両者とも次の6動作で、normalはY基準が7mm大きくなります。
+
+```text
+1. Y = pull_y + approach_y_offset
+2. X = x_hook, Z = pull_z + approach_z_offset       （XZ同時移動）
+3. X = x_latch
+4. Z = 2のZ - engage_z_drop                        （Zで係合）
+5. X = x_front                                    （引き出し）
+6. X = x_front + disengage_x_offset,
+   Z = 4のZ + disengage_z_lift                     （XZ同時移動で離脱）
+```
+
+alternatingでは手順1のYを最後まで維持し、離脱後に `retreat_z_lift` を追加しません。
+現在のrow=0,col=0（reverted）はY=5.5、Z=11→6→11。row=1,col=0（normal）はY=12.5、Z=18.4→13.4→18.4です。
 
 ### サポート材の除外領域
 
@@ -116,9 +163,11 @@ Z
 
 引き抜きG-codeの座標：
 ```
-pull_y = pull_origin.y + col × pitch.col_y + pull_gcode.y_offset
+pull_y = pull_origin.y + col × pitch.col_y + 選ばれた向きのy_offset
 pull_z = pull_origin.z + row × pitch.row_z
 ```
+
+`--current` 以外では `pull_y` に、選ばれた向きの `y_origin_offset` を加えます。`alternating` の場合だけ、さらに選ばれた向きの `alternating_y_offset`（現在は両方-1mm）を加えます。単一向きモードと現行比較には適用しません。`support_origin` はこれらの動作オフセットとは独立です。
 
 サポートブロッカー上端の座標：
 ```
@@ -147,44 +196,75 @@ blocker_z_min = blocker_z_max - blocker_height_z
 | `blocker_width_y` | number | ○ | サポートブロッカーのY方向幅 [mm] |
 | `blocker_height_z` | number | – | サポートブロッカーの上端から下方向への高さ [mm]（省略時 0） |
 
-X範囲は `pull_gcode.x_front` とプリンタの `printable_area` から自動計算されるため、X位置やX幅をここへ記述しません。
+既存C++でのX範囲は旧構造の `pull_gcode.x_front` とプリンタの `printable_area` から自動計算されます。新構造へのC++対応時には `選ばれた向きのx_front` を参照する必要があります。
 
 ---
 
 ### `pull_gcode` セクション（必須）
 
-ピン引き出し動作のGコードパラメータを定義します。
+Python検証用のピン引き出し動作を定義します。以下は現在のKP3S設定です。
 
 ```json
 "pull_gcode": {
-  "x_hook": 160,
-  "x_latch": 168,
-  "x_front": 30,
-  "y_offset": 4,
-  "z_offset": 4,
-  "approach_y_offset": -4,
-  "pull_feedrate_fast": 3000,
-  "disengage_x_offset": 1.5,
-  "disengage_z_offset": 4,
-  "feed_rate": 1500,
-  "fast_feed_rate": 5000
+  "type": "alternating",
+  "normal": {
+    "y_origin_offset": 7,
+    "alternating_y_offset": -1,
+    "x_hook": 169,
+    "x_latch": 174,
+    "x_front": 20,
+    "y_offset": -3.5,
+    "approach_y_offset": -4,
+    "approach_z_offset": 5,
+    "engage_z_drop": 5,
+    "disengage_x_offset": 1.5,
+    "disengage_z_lift": 5,
+    "retreat_z_lift": 4,
+    "pull_feedrate_fast": 3000,
+    "feed_rate": 1500,
+    "fast_feed_rate": 5000
+  },
+  "reverted": {
+    "row_parity": 0,
+    "y_origin_offset": 0,
+    "alternating_y_offset": -1,
+    "x_hook": 169,
+    "x_latch": 174,
+    "x_front": 20,
+    "y_offset": -3.5,
+    "approach_y_offset": -4,
+    "approach_z_offset": 5,
+    "engage_z_drop": 5,
+    "disengage_x_offset": 1.5,
+    "disengage_z_lift": 5,
+    "retreat_z_lift": 4,
+    "pull_feedrate_fast": 3000,
+    "feed_rate": 1500,
+    "fast_feed_rate": 5000
+  }
 }
 ```
 
-| フィールド | 型 | 必須 | 説明 |
-|---|---|---|---|
-| `x_hook` | number | ○ | フック位置のX座標 [mm]（ピンに引っかかる位置） |
-| `x_latch` | number | ○ | ラッチ位置のX座標 [mm]（ピンを捕捉する位置） |
-| `x_front` | number | ○ | 最終引き出し位置のX座標 [mm] |
-| `y_offset` | number | – | ピンY座標へのオフセット [mm]（省略時 0） |
-| `z_offset` | number | – | 引き出し完了後の退避Z量 [mm]（省略時 0）。`pull_z + z_offset` の高さまでZを上げる |
-| `approach_y_offset` | number | – | 接近時にY座標をさらにずらす量 [mm]（省略時 -4）。フック進入時にピンと干渉しないよう手前にずれる |
-| `pull_feedrate_fast` | number | – | 引き出し（`x_front`への移動）時の送り速度 [mm/min]（省略時 3000） |
-| `disengage_x_offset` | number | – | 外し動作でXを `x_front` から追加移動する量 [mm]（省略時 1.5） |
-| `feed_rate` | number | – | ラッチ・係合・外し動作の送り速度 [mm/min]（省略時 1200） |
-| `fast_feed_rate` | number | – | 接近・フック移動の送り速度 [mm/min]（省略時 6000） |
+全項目を明示します。座標・移動量はmm、送り速度はmm/minです。
 
-> `feed_rate` は `pull_feedrate`、`fast_feed_rate` は `travel_feedrate` としても記述できます。
+| フィールド | 説明 |
+|---|---|
+| `type` | `normalonly` / `revertedonly` / `alternating` |
+| `normal.y_origin_offset` | normalのY基準への加算量 |
+| `reverted.y_origin_offset` | revertedのY基準への加算量 |
+| `normal.alternating_y_offset` / `reverted.alternating_y_offset` | alternatingだけに加えるY補正（現在は-1mm） |
+| `reverted.row_parity` | alternatingでrevertedにする段。0は偶数、1は奇数 |
+| `normal` / `reverted` の `x_hook` / `x_latch` / `x_front` | フック進入・ラッチ・引き出し先の絶対X座標 |
+| `normal` / `reverted` の `y_offset` | gridのY基準への加算量 |
+| `normal` / `reverted` の `approach_y_offset` | 接近Yと係合Yの差。revertedonlyでは両者を交換 |
+| `normal` / `reverted` の `approach_z_offset` | alternatingの進入Zへの加算量 |
+| `normal` / `reverted` の `engage_z_drop` | alternatingで進入Zから下げる量 |
+| `normal` / `reverted` の `disengage_x_offset` | 離脱時にx_frontへ加算する量 |
+| `normal` / `reverted` の `disengage_z_lift` | alternatingで係合Zから上げる量 |
+| `normal` / `reverted` の `retreat_z_lift` | 単一向きモード・現行比較でpull_zから上げる量。alternatingでは使わない |
+| `normal` / `reverted` の `pull_feedrate_fast` | 引き出し時の送り速度 |
+| `normal` / `reverted` の `feed_rate` | ラッチ・係合・離脱・退避時の送り速度 |
+| `normal` / `reverted` の `fast_feed_rate` | 接近・フック進入・復帰XYの送り速度 |
 
 ---
 
