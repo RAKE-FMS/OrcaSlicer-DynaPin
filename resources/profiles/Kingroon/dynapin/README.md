@@ -3,7 +3,7 @@
 DynaPinはプリンタのY軸側面に取り付けたピンアレイを使って、印刷途中にピンを引き出す機能です。  
 本ドキュメントではプリンタごとに用意するJSON設定ファイルのスキーマと、各設定値がどう使われるかを説明します。
 
-現在の `kp3s.json` はPython検証用の `pull_gcode.normal` / `pull_gcode.reverted` 構造です。C++の設定読み込みはまだ旧構造を要求するため、このJSONを現行スライサに指定すると設定読み込みが失敗します。以下のサポート形状・スライサ連携の説明はC++側の既存の仕組みを示しています。今回サポート座標やC++は変更していません。
+`kp3s.json` はOrcaSlicerとPython検証コードで共用します。`pull_gcode.common` にX座標3つと速度を置き、`normal` / `reverted` に向き別の動作値を置きます。旧形式のJSONは読み込みエラーになります。
 
 ## Pythonで引き出し動作を検証する
 
@@ -13,7 +13,7 @@ DynaPinはプリンタのY軸側面に取り付けたピンアレイを使って
 # JSONのtypeに従う（現在はalternating）
 python3 scripts/generate_dynapin_pull_gcode.py --pins "0,0; 1,0" --output /tmp/alternating.gcode
 
-# 現行C++のピン単体動作を比較用に再現する
+# 移植前C++のピン単体動作を比較用に再現する
 python3 scripts/generate_dynapin_pull_gcode.py --pins "0,0; 1,0" --current --output /tmp/current.gcode
 
 # typeを一時的に上書きし、接近Yと係合Yを入れ替える
@@ -24,10 +24,10 @@ python3 scripts/generate_dynapin_pull_gcode.py --pins "0,0; 1,0" --type reverted
 まずリポジトリ内の `old-models/min/min.gcode` を読み込み、内容を変更せず出力の先頭にコピーして、その後に引き出しG-codeを追記します。`--base-file /path/to/min.gcode` で別の読み込み元を指定できます。元ファイルは上書きしません。
 元の改行・バイト列を保持し、末尾に改行がない場合だけ追記との境界に改行を1つ加えます。読み込み元が存在しない場合はエラーにして、出力ファイルを変更しません。
 `--output` 省略時は標準出力へ出力します。ピンは0始まりで、指定したピンだけを高さ・列順に並べ、重複を取り除きます。
-`--type normalonly` は全段にnormalのYオフセットを適用します。`--current` はnormalの動作値を使い、向き別オフセットを適用せず、旧 `z_offset` に相当する値として `normal.retreat_z_lift` を使います。
+`--type normalonly` は全段にnormalのYオフセットを適用します。`--current` は共通値とnormalの動作値を使い、向き別オフセットを適用せず、旧 `z_offset` に相当する値として `normal.retreat_z_lift` を使います。
 
 出力は `min.gcode` の内容に続いて `G21`（mm）・`G90`（絶対座標）と引き出し動作を含みます。ホーミング・加熱・押出などの初期化は、読み込んだ `min.gcode` の内容に従います。Pythonはプリンタへの送信やスライサのレイヤー判定・Z-hopは行いません。
-`--return-position X Y Z` を指定した場合だけ、全ピン処理後に一度、XY→Zの順で指定座標へ戻ります。復帰速度は最後に引き出したピンの向きの設定を使います。
+`--return-position X Y Z` を指定した場合だけ、全ピン処理後に一度、XY→Zの順で指定座標へ戻ります。復帰速度は `common.fast_feed_rate` と `common.feed_rate` を使います。
 
 ```bash
 python3 -m unittest discover -s tests/scripts -p test_generate_dynapin_pull_gcode.py -v
@@ -196,51 +196,47 @@ blocker_z_min = blocker_z_max - blocker_height_z
 | `blocker_width_y` | number | ○ | サポートブロッカーのY方向幅 [mm] |
 | `blocker_height_z` | number | – | サポートブロッカーの上端から下方向への高さ [mm]（省略時 0） |
 
-既存C++でのX範囲は旧構造の `pull_gcode.x_front` とプリンタの `printable_area` から自動計算されます。新構造へのC++対応時には `選ばれた向きのx_front` を参照する必要があります。
+サポート除外領域・仮想支持面・プレビューのX範囲は、`pull_gcode.common.x_front` とプリンタの `printable_area` から自動計算されます。引き出し用のY・Z補正はサポート座標に適用しません。
 
 ---
 
 ### `pull_gcode` セクション（必須）
 
-Python検証用のピン引き出し動作を定義します。以下は現在のKP3S設定です。
+OrcaSlicerとPythonで共通のピン引き出し動作を定義します。以下は現在のKP3S設定です。
 
 ```json
 "pull_gcode": {
   "type": "alternating",
-  "normal": {
-    "y_origin_offset": 7,
-    "alternating_y_offset": -1,
+  "common": {
     "x_hook": 169,
     "x_latch": 174,
     "x_front": 20,
+    "fast_feed_rate": 5000,
+    "feed_rate": 1500,
+    "pull_feedrate_fast": 3000
+  },
+  "normal": {
+    "y_origin_offset": 7,
+    "alternating_y_offset": -1,
     "y_offset": -3.5,
     "approach_y_offset": -4,
     "approach_z_offset": 5,
     "engage_z_drop": 5,
     "disengage_x_offset": 1.5,
     "disengage_z_lift": 5,
-    "retreat_z_lift": 4,
-    "pull_feedrate_fast": 3000,
-    "feed_rate": 1500,
-    "fast_feed_rate": 5000
+    "retreat_z_lift": 4
   },
   "reverted": {
     "row_parity": 0,
     "y_origin_offset": 0,
     "alternating_y_offset": -1,
-    "x_hook": 169,
-    "x_latch": 174,
-    "x_front": 20,
     "y_offset": -3.5,
     "approach_y_offset": -4,
     "approach_z_offset": 5,
     "engage_z_drop": 5,
     "disengage_x_offset": 1.5,
     "disengage_z_lift": 5,
-    "retreat_z_lift": 4,
-    "pull_feedrate_fast": 3000,
-    "feed_rate": 1500,
-    "fast_feed_rate": 5000
+    "retreat_z_lift": 4
   }
 }
 ```
@@ -254,7 +250,7 @@ Python検証用のピン引き出し動作を定義します。以下は現在�
 | `reverted.y_origin_offset` | revertedのY基準への加算量 |
 | `normal.alternating_y_offset` / `reverted.alternating_y_offset` | alternatingだけに加えるY補正（現在は-1mm） |
 | `reverted.row_parity` | alternatingでrevertedにする段。0は偶数、1は奇数 |
-| `normal` / `reverted` の `x_hook` / `x_latch` / `x_front` | フック進入・ラッチ・引き出し先の絶対X座標 |
+| `common` の `x_hook` / `x_latch` / `x_front` | フック進入・ラッチ・引き出し先の絶対X座標 |
 | `normal` / `reverted` の `y_offset` | gridのY基準への加算量 |
 | `normal` / `reverted` の `approach_y_offset` | 接近Yと係合Yの差。revertedonlyでは両者を交換 |
 | `normal` / `reverted` の `approach_z_offset` | alternatingの進入Zへの加算量 |
@@ -262,9 +258,9 @@ Python検証用のピン引き出し動作を定義します。以下は現在�
 | `normal` / `reverted` の `disengage_x_offset` | 離脱時にx_frontへ加算する量 |
 | `normal` / `reverted` の `disengage_z_lift` | alternatingで係合Zから上げる量 |
 | `normal` / `reverted` の `retreat_z_lift` | 単一向きモード・現行比較でpull_zから上げる量。alternatingでは使わない |
-| `normal` / `reverted` の `pull_feedrate_fast` | 引き出し時の送り速度 |
-| `normal` / `reverted` の `feed_rate` | ラッチ・係合・離脱・退避時の送り速度 |
-| `normal` / `reverted` の `fast_feed_rate` | 接近・フック進入・復帰XYの送り速度 |
+| `common` の `pull_feedrate_fast` | 引き出し時の送り速度 |
+| `common` の `feed_rate` | ラッチ・係合・離脱・退避時の送り速度 |
+| `common` の `fast_feed_rate` | 接近・フック進入・復帰XYの送り速度 |
 
 ---
 
@@ -291,24 +287,13 @@ Python検証用のピン引き出し動作を定義します。以下は現在�
 
 ## 旧設定からの変更点
 
-`center_x`、`width_x`、`x_min`、`x_max` は使用しません。X範囲は必ず `pull_gcode.x_front..bed_max_x` になります。
+旧形式の `pull_gcode` は読み込みエラーになります。現在の `kp3s.json` を元に移行してください。
 
-`grid.origin`、`grid.physical_origin`、`origin_row`、`origin_col`、`origin_y`、`origin_z` は読み込まれません。新しい設定では必ず `pull_origin` と `support_origin` を使用してください。
-
-旧 `pitch.row_y` と `pitch.col_z` も読み込まれません。新しい設定では `pitch.row_z` と `pitch.col_y` を使用してください。
-
-| 旧フィールド | 現在の解釈 |
-|---|---|
-| `pull_gcode.pull_feedrate` | `feed_rate` の代替名 |
-| `pull_gcode.travel_feedrate` | `fast_feed_rate` の代替名 |
-
-旧形式のJSONを使う場合は、`support_exclusion` からX関連フィールドを削除し、プリンタの `printable_area` が正しく設定されていることを確認してください。
-
-| フィールド | 省略時のデフォルト |
-|---|---|
-| `pull_gcode.approach_y_offset` | `-4.0` mm |
-| `pull_gcode.pull_feedrate_fast` | `3000` mm/min |
-| `pull_gcode.disengage_x_offset` | `1.5` mm |
+- `type`、`common`、`normal`、`reverted` を明示し、上記スキーマの全項目を設定します。
+- X座標3つと速度3つを `common` に移します。`pull_feedrate` / `travel_feedrate` の別名は使用せず、`feed_rate` / `fast_feed_rate` を指定します。
+- 向き別の移動量を `normal` / `reverted` に置き、旧 `z_offset` は `retreat_z_lift` に置き換えます。
+- サポートのX範囲は `pull_gcode.common.x_front..bed_max_x` です。`support_exclusion` にX関連フィールドは追加しません。
+- `grid` は `pull_origin` / `support_origin`、`pitch.row_z` / `pitch.col_y` を使います。行・列番号は0始まりです。
 
 ---
 
