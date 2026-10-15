@@ -20,15 +20,41 @@
     "blocker_height_z": 5
   },
   "pull_gcode": {
-    "x_hook": "169",
-    "x_latch": "174",
-    "x_front": "20",
-    "y_offset": "-3.5",
-    "z_offset": "4",
-    "approach_y_offset": -4,
-    "pull_feedrate_fast": 3000,
-    "disengage_x_offset": 1.5,
-    "feed_rate": 1500,
-    "fast_feed_rate": 5000
+    "type": "alternating",
+    "normal": {
+      "y_origin_offset": 7,
+      "alternating_y_offset": -1,
+      "x_hook": 169,
+      "x_latch": 174,
+      "x_front": 20,
+      "y_offset": -3.5,
+      "approach_y_offset": -4,
+      "approach_z_offset": 5,
+      "engage_z_drop": 5,
+      "disengage_x_offset": 1.5,
+      "disengage_z_lift": 5,
+      "retreat_z_lift": 4,
+      "pull_feedrate_fast": 3000,
+      "feed_rate": 1500,
+      "fast_feed_rate": 5000
+    },
+    "reverted": {
+      "row_parity": 0,
+      "y_origin_offset": 0,
+      "alternating_y_offset": -1,
+      "x_hook": 169,
+      "x_latch": 174,
+      "x_front": 20,
+      "y_offset": -3.5,
+      "approach_y_offset": -4,
+      "approach_z_offset": 5,
+      "engage_z_drop": 5,
+      "disengage_x_offset": 1.5,
+      "disengage_z_lift": 5,
+      "retreat_z_lift": 4,
+      "pull_feedrate_fast": 3000,
+      "feed_rate": 1500,
+      "fast_feed_rate": 5000
+    }
   }
 }
