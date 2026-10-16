@@ -1,0 +1,522 @@
+[
+  {
+    "config": {
+      "grid": {
+        "pull_origin": {
+          "y": 14.0,
+          "z": 6.0
+        },
+        "row_count": 10,
+        "col_count": 14,
+        "support_origin": {
+          "y": "18.0",
+          "z": "7.3"
+        },
+        "pitch": {
+          "row_z": 7.4,
+          "col_y": 12.4
+        }
+      },
+      "support_exclusion": {
+        "blocker_width_y": 12.4,
+        "blocker_height_z": 5
+      },
+      "pull_gcode": {
+        "type": "alternating",
+        "normal": {
+          "x_hook": 169.0,
+          "x_latch": 174.0,
+          "x_front": 20.0,
+          "fast_feed_rate": 5000.0,
+          "feed_rate": 1500.0,
+          "pull_feedrate_fast": 3000.0,
+          "y_origin_offset": 7.0,
+          "y_offset": -3.5,
+          "approach_y_offset": -4.0,
+          "approach_z_offset": 5.0,
+          "engage_z_drop": 5.0,
+          "disengage_x_offset": 1.5,
+          "disengage_z_lift": 5.0,
+          "retreat_z_lift": 4.0
+        },
+        "alternating": {
+          "row_parity": 0,
+          "normal": {
+            "x_hook": 169.0,
+            "x_latch": 174.0,
+            "x_front": 20.0,
+            "fast_feed_rate": 5000.0,
+            "feed_rate": 1500.0,
+            "pull_feedrate_fast": 3000.0,
+            "y_origin_offset": 7.0,
+            "alternating_y_offset": -1.0,
+            "y_offset": -3.5,
+            "approach_y_offset": -4.0,
+            "approach_z_offset": 5.0,
+            "engage_z_drop": 5.0,
+            "disengage_x_offset": 1.5,
+            "disengage_z_lift": 5.0,
+            "retreat_z_lift": 4.0
+          },
+          "reverted": {
+            "x_hook": 169.0,
+            "x_latch": 174.0,
+            "x_front": 20.0,
+            "fast_feed_rate": 5000.0,
+            "feed_rate": 1500.0,
+            "pull_feedrate_fast": 3000.0,
+            "y_origin_offset": 0.0,
+            "alternating_y_offset": -1.0,
+            "y_offset": -3.5,
+            "approach_y_offset": -4.0,
+            "approach_z_offset": 5.0,
+            "engage_z_drop": 5.0,
+            "disengage_x_offset": 1.5,
+            "disengage_z_lift": 5.0,
+            "retreat_z_lift": 4.0
+          }
+        },
+        "reverted": {
+          "x_hook": 169.0,
+          "x_latch": 174.0,
+          "x_front": 20.0,
+          "fast_feed_rate": 5000.0,
+          "feed_rate": 1500.0,
+          "pull_feedrate_fast": 3000.0,
+          "y_origin_offset": 0.0,
+          "y_offset": -3.5,
+          "approach_y_offset": -4.0,
+          "approach_z_offset": 5.0,
+          "engage_z_drop": 5.0,
+          "disengage_x_offset": 1.5,
+          "disengage_z_lift": 5.0,
+          "retreat_z_lift": 4.0
+        }
+      }
+    },
+    "cases": [
+      {
+        "type": "normal",
+        "row_parity": 0,
+        "pin": [
+          0,
+          0
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=0 COL=0\nG1 Y13.5000 F5000.0000\nG1 X169.0000 Z6.0000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Y17.5000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Y13.5000 F1500.0000\nG1 Z10.0000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "normal",
+        "row_parity": 0,
+        "pin": [
+          1,
+          2
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=1 COL=2\nG1 Y38.3000 F5000.0000\nG1 X169.0000 Z13.4000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Y42.3000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Y38.3000 F1500.0000\nG1 Z17.4000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "normal",
+        "row_parity": 0,
+        "pin": [
+          9,
+          13
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=9 COL=13\nG1 Y174.7000 F5000.0000\nG1 X169.0000 Z72.6000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Y178.7000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Y174.7000 F1500.0000\nG1 Z76.6000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "normal",
+        "row_parity": 1,
+        "pin": [
+          0,
+          0
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=0 COL=0\nG1 Y13.5000 F5000.0000\nG1 X169.0000 Z6.0000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Y17.5000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Y13.5000 F1500.0000\nG1 Z10.0000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "normal",
+        "row_parity": 1,
+        "pin": [
+          1,
+          2
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=1 COL=2\nG1 Y38.3000 F5000.0000\nG1 X169.0000 Z13.4000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Y42.3000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Y38.3000 F1500.0000\nG1 Z17.4000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "normal",
+        "row_parity": 1,
+        "pin": [
+          9,
+          13
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=9 COL=13\nG1 Y174.7000 F5000.0000\nG1 X169.0000 Z72.6000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Y178.7000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Y174.7000 F1500.0000\nG1 Z76.6000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "reverted",
+        "row_parity": 0,
+        "pin": [
+          0,
+          0
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=0 COL=0\nG1 Y10.5000 F5000.0000\nG1 X169.0000 Z6.0000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Y6.5000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Y10.5000 F1500.0000\nG1 Z10.0000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "reverted",
+        "row_parity": 0,
+        "pin": [
+          1,
+          2
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=1 COL=2\nG1 Y35.3000 F5000.0000\nG1 X169.0000 Z13.4000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Y31.3000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Y35.3000 F1500.0000\nG1 Z17.4000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "reverted",
+        "row_parity": 0,
+        "pin": [
+          9,
+          13
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=9 COL=13\nG1 Y171.7000 F5000.0000\nG1 X169.0000 Z72.6000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Y167.7000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Y171.7000 F1500.0000\nG1 Z76.6000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "reverted",
+        "row_parity": 1,
+        "pin": [
+          0,
+          0
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=0 COL=0\nG1 Y10.5000 F5000.0000\nG1 X169.0000 Z6.0000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Y6.5000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Y10.5000 F1500.0000\nG1 Z10.0000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "reverted",
+        "row_parity": 1,
+        "pin": [
+          1,
+          2
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=1 COL=2\nG1 Y35.3000 F5000.0000\nG1 X169.0000 Z13.4000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Y31.3000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Y35.3000 F1500.0000\nG1 Z17.4000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "reverted",
+        "row_parity": 1,
+        "pin": [
+          9,
+          13
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=9 COL=13\nG1 Y171.7000 F5000.0000\nG1 X169.0000 Z72.6000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Y167.7000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Y171.7000 F1500.0000\nG1 Z76.6000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "alternating",
+        "row_parity": 0,
+        "pin": [
+          0,
+          0
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=0 COL=0\nG1 Y5.5000 F5000.0000\nG1 X169.0000 Z11.0000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Z6.0000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Z11.0000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "alternating",
+        "row_parity": 0,
+        "pin": [
+          1,
+          2
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=1 COL=2\nG1 Y37.3000 F5000.0000\nG1 X169.0000 Z18.4000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Z13.4000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Z18.4000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "alternating",
+        "row_parity": 0,
+        "pin": [
+          9,
+          13
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=9 COL=13\nG1 Y173.7000 F5000.0000\nG1 X169.0000 Z77.6000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Z72.6000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Z77.6000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "alternating",
+        "row_parity": 1,
+        "pin": [
+          0,
+          0
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=0 COL=0\nG1 Y12.5000 F5000.0000\nG1 X169.0000 Z11.0000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Z6.0000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Z11.0000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "alternating",
+        "row_parity": 1,
+        "pin": [
+          1,
+          2
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=1 COL=2\nG1 Y30.3000 F5000.0000\nG1 X169.0000 Z18.4000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Z13.4000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Z18.4000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "alternating",
+        "row_parity": 1,
+        "pin": [
+          9,
+          13
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=9 COL=13\nG1 Y166.7000 F5000.0000\nG1 X169.0000 Z77.6000 F5000.0000\nG1 X174.0000 F1500.0000\nG1 Z72.6000 F1500.0000\n; DYNAPIN_PULL_MOVE\nG1 X20.0000 F3000.0000\nG1 X21.5000 Z77.6000 F1500.0000\n; END_DYNAPIN_PULL\n"
+      }
+    ]
+  },
+  {
+    "config": {
+      "grid": {
+        "pull_origin": {
+          "y": 14.0,
+          "z": 6.0
+        },
+        "row_count": 10,
+        "col_count": 14,
+        "support_origin": {
+          "y": "18.0",
+          "z": "7.3"
+        },
+        "pitch": {
+          "row_z": 7.4,
+          "col_y": 12.4
+        }
+      },
+      "support_exclusion": {
+        "blocker_width_y": 12.4,
+        "blocker_height_z": 5
+      },
+      "pull_gcode": {
+        "type": "alternating",
+        "normal": {
+          "x_hook": 160.0,
+          "x_latch": 166.0,
+          "x_front": 30.0,
+          "fast_feed_rate": 4000.0,
+          "feed_rate": 1000.0,
+          "pull_feedrate_fast": 2000.0,
+          "y_origin_offset": 9.0,
+          "y_offset": -3.5,
+          "approach_y_offset": -4.0,
+          "approach_z_offset": 6.0,
+          "engage_z_drop": 4.0,
+          "disengage_x_offset": 2.0,
+          "disengage_z_lift": 3.0,
+          "retreat_z_lift": 4.0
+        },
+        "alternating": {
+          "row_parity": 0,
+          "normal": {
+            "x_hook": 160.0,
+            "x_latch": 166.0,
+            "x_front": 30.0,
+            "fast_feed_rate": 4000.0,
+            "feed_rate": 1000.0,
+            "pull_feedrate_fast": 2000.0,
+            "y_origin_offset": 9.0,
+            "alternating_y_offset": -2.0,
+            "y_offset": -3.5,
+            "approach_y_offset": -4.0,
+            "approach_z_offset": 6.0,
+            "engage_z_drop": 4.0,
+            "disengage_x_offset": 2.0,
+            "disengage_z_lift": 3.0,
+            "retreat_z_lift": 4.0
+          },
+          "reverted": {
+            "x_hook": 160.0,
+            "x_latch": 166.0,
+            "x_front": 30.0,
+            "fast_feed_rate": 4000.0,
+            "feed_rate": 1000.0,
+            "pull_feedrate_fast": 2000.0,
+            "y_origin_offset": 2.0,
+            "alternating_y_offset": -3.0,
+            "y_offset": -3.5,
+            "approach_y_offset": -4.0,
+            "approach_z_offset": 8.0,
+            "engage_z_drop": 6.0,
+            "disengage_x_offset": 3.0,
+            "disengage_z_lift": 4.0,
+            "retreat_z_lift": 4.0
+          }
+        },
+        "reverted": {
+          "x_hook": 160.0,
+          "x_latch": 166.0,
+          "x_front": 30.0,
+          "fast_feed_rate": 4000.0,
+          "feed_rate": 1000.0,
+          "pull_feedrate_fast": 2000.0,
+          "y_origin_offset": 2.0,
+          "y_offset": -3.5,
+          "approach_y_offset": -4.0,
+          "approach_z_offset": 8.0,
+          "engage_z_drop": 6.0,
+          "disengage_x_offset": 3.0,
+          "disengage_z_lift": 4.0,
+          "retreat_z_lift": 4.0
+        }
+      }
+    },
+    "cases": [
+      {
+        "type": "normal",
+        "row_parity": 0,
+        "pin": [
+          0,
+          0
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=0 COL=0\nG1 Y15.5000 F4000.0000\nG1 X160.0000 Z6.0000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Y19.5000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X32.0000 Y15.5000 F1000.0000\nG1 Z10.0000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "normal",
+        "row_parity": 0,
+        "pin": [
+          1,
+          2
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=1 COL=2\nG1 Y40.3000 F4000.0000\nG1 X160.0000 Z13.4000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Y44.3000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X32.0000 Y40.3000 F1000.0000\nG1 Z17.4000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "normal",
+        "row_parity": 0,
+        "pin": [
+          9,
+          13
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=9 COL=13\nG1 Y176.7000 F4000.0000\nG1 X160.0000 Z72.6000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Y180.7000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X32.0000 Y176.7000 F1000.0000\nG1 Z76.6000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "normal",
+        "row_parity": 1,
+        "pin": [
+          0,
+          0
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=0 COL=0\nG1 Y15.5000 F4000.0000\nG1 X160.0000 Z6.0000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Y19.5000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X32.0000 Y15.5000 F1000.0000\nG1 Z10.0000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "normal",
+        "row_parity": 1,
+        "pin": [
+          1,
+          2
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=1 COL=2\nG1 Y40.3000 F4000.0000\nG1 X160.0000 Z13.4000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Y44.3000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X32.0000 Y40.3000 F1000.0000\nG1 Z17.4000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "normal",
+        "row_parity": 1,
+        "pin": [
+          9,
+          13
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=9 COL=13\nG1 Y176.7000 F4000.0000\nG1 X160.0000 Z72.6000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Y180.7000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X32.0000 Y176.7000 F1000.0000\nG1 Z76.6000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "reverted",
+        "row_parity": 0,
+        "pin": [
+          0,
+          0
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=0 COL=0\nG1 Y12.5000 F4000.0000\nG1 X160.0000 Z6.0000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Y8.5000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X33.0000 Y12.5000 F1000.0000\nG1 Z10.0000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "reverted",
+        "row_parity": 0,
+        "pin": [
+          1,
+          2
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=1 COL=2\nG1 Y37.3000 F4000.0000\nG1 X160.0000 Z13.4000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Y33.3000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X33.0000 Y37.3000 F1000.0000\nG1 Z17.4000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "reverted",
+        "row_parity": 0,
+        "pin": [
+          9,
+          13
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=9 COL=13\nG1 Y173.7000 F4000.0000\nG1 X160.0000 Z72.6000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Y169.7000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X33.0000 Y173.7000 F1000.0000\nG1 Z76.6000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "reverted",
+        "row_parity": 1,
+        "pin": [
+          0,
+          0
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=0 COL=0\nG1 Y12.5000 F4000.0000\nG1 X160.0000 Z6.0000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Y8.5000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X33.0000 Y12.5000 F1000.0000\nG1 Z10.0000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "reverted",
+        "row_parity": 1,
+        "pin": [
+          1,
+          2
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=1 COL=2\nG1 Y37.3000 F4000.0000\nG1 X160.0000 Z13.4000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Y33.3000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X33.0000 Y37.3000 F1000.0000\nG1 Z17.4000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "reverted",
+        "row_parity": 1,
+        "pin": [
+          9,
+          13
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=9 COL=13\nG1 Y173.7000 F4000.0000\nG1 X160.0000 Z72.6000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Y169.7000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X33.0000 Y173.7000 F1000.0000\nG1 Z76.6000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "alternating",
+        "row_parity": 0,
+        "pin": [
+          0,
+          0
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=0 COL=0\nG1 Y5.5000 F4000.0000\nG1 X160.0000 Z14.0000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Z8.0000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X33.0000 Z12.0000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "alternating",
+        "row_parity": 0,
+        "pin": [
+          1,
+          2
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=1 COL=2\nG1 Y38.3000 F4000.0000\nG1 X160.0000 Z19.4000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Z15.4000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X32.0000 Z18.4000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "alternating",
+        "row_parity": 0,
+        "pin": [
+          9,
+          13
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=9 COL=13\nG1 Y174.7000 F4000.0000\nG1 X160.0000 Z78.6000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Z74.6000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X32.0000 Z77.6000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "alternating",
+        "row_parity": 1,
+        "pin": [
+          0,
+          0
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=0 COL=0\nG1 Y13.5000 F4000.0000\nG1 X160.0000 Z12.0000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Z8.0000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X32.0000 Z11.0000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "alternating",
+        "row_parity": 1,
+        "pin": [
+          1,
+          2
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=1 COL=2\nG1 Y30.3000 F4000.0000\nG1 X160.0000 Z21.4000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Z15.4000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X33.0000 Z19.4000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      },
+      {
+        "type": "alternating",
+        "row_parity": 1,
+        "pin": [
+          9,
+          13
+        ],
+        "gcode": "; BEGIN_DYNAPIN_PULL ROW=9 COL=13\nG1 Y166.7000 F4000.0000\nG1 X160.0000 Z80.6000 F4000.0000\nG1 X166.0000 F1000.0000\nG1 Z74.6000 F1000.0000\n; DYNAPIN_PULL_MOVE\nG1 X30.0000 F2000.0000\nG1 X33.0000 Z78.6000 F1000.0000\n; END_DYNAPIN_PULL\n"
+      }
+    ]
+  }
+]

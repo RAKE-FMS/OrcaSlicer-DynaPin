@@ -16,6 +16,8 @@
 #include <cctype>
 #include <cmath>
 #include <iomanip>
+#include <initializer_list>
+#include <utility>
 #include <map>
 #include <chrono>
 #include <cstdlib>
@@ -84,10 +86,13 @@ int effective_debug_stage(const Print& print)
     return std::max(0, std::min(2, stage));
 }
 
-static double pull_y(const Config& config, const Pin& pin)
-{ return config.pull_origin_y + double(pin.col) * config.col_pitch_y + config.pull_gcode.y_offset; }
-
-static double pull_z(const Config& config, const Pin& pin) { return config.pull_origin_z + double(pin.row) * config.row_pitch_z; }
+static const PullMoveConfig& pull_parameters(const Config& config, const Pin& pin)
+{
+    const PullConfig& pull     = config.pull_gcode;
+    const bool        reverted = pull.type == PullType::RevertedOnly ||
+                                 (pull.type == PullType::Alternating && pin.row % 2 == pull.reverted_row_parity);
+    return reverted ? pull.reverted : pull.normal;
+}
 
 std::vector<Pin> parse_pin_list(const std::string& pins)
 {
@@ -416,7 +421,7 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
     }
 
     nlohmann::json j = nlohmann::json::parse(ifs, nullptr, false);
-    if (j.is_discarded()) {
+    if (j.is_discarded() || !j.is_object()) {
         if (error)
             *error = "Invalid DynaPin JSON: " + resolved.string();
         return false;
@@ -442,19 +447,69 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
     config.blocker_width_y         = number_or(exclusion, "blocker_width_y", config.blocker_width_y);
     config.blocker_height_z        = number_or(exclusion, "blocker_height_z", config.blocker_height_z);
 
-    const nlohmann::json pull  = j.contains("pull_gcode") && j["pull_gcode"].is_object() ? j["pull_gcode"] : nlohmann::json::object();
-    config.pull_gcode.x_hook   = number_or(pull, "x_hook", config.pull_gcode.x_hook);
-    config.pull_gcode.x_latch  = number_or(pull, "x_latch", config.pull_gcode.x_latch);
-    config.pull_gcode.x_front  = number_or(pull, "x_front", config.pull_gcode.x_front);
-    config.pull_gcode.y_offset = number_or(pull, "y_offset", config.pull_gcode.y_offset);
-    config.pull_gcode.z_offset = number_or(pull, "z_offset", config.pull_gcode.z_offset);
-    config.pull_gcode.travel_feedrate    = number_or(pull, "travel_feedrate", config.pull_gcode.travel_feedrate);
-    config.pull_gcode.pull_feedrate      = number_or(pull, "pull_feedrate", config.pull_gcode.pull_feedrate);
-    config.pull_gcode.travel_feedrate    = number_or(pull, "fast_feed_rate", config.pull_gcode.travel_feedrate);
-    config.pull_gcode.pull_feedrate      = number_or(pull, "feed_rate", config.pull_gcode.pull_feedrate);
-    config.pull_gcode.approach_y_offset  = number_or(pull, "approach_y_offset", config.pull_gcode.approach_y_offset);
-    config.pull_gcode.pull_feedrate_fast = number_or(pull, "pull_feedrate_fast", config.pull_gcode.pull_feedrate_fast);
-    config.pull_gcode.disengage_x_offset = number_or(pull, "disengage_x_offset", config.pull_gcode.disengage_x_offset);
+    const auto fail = [error](const std::string& message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    const nlohmann::json pull = j.value("pull_gcode", nlohmann::json::object());
+    if (!pull.is_object() || !pull.contains("type") || !pull["type"].is_string() || !pull.contains("common") ||
+        !pull["common"].is_object() || !pull.contains("normal") || !pull["normal"].is_object() || !pull.contains("reverted") ||
+        !pull["reverted"].is_object())
+        return fail("DynaPin requires pull_gcode.type, common, normal and reverted (legacy JSON is unsupported)");
+    const std::string type = pull["type"].get<std::string>();
+    if (type == "normalonly")
+        config.pull_gcode.type = PullType::NormalOnly;
+    else if (type == "revertedonly")
+        config.pull_gcode.type = PullType::RevertedOnly;
+    else if (type == "alternating")
+        config.pull_gcode.type = PullType::Alternating;
+    else
+        return fail("Invalid DynaPin pull_gcode.type: " + type);
+
+    const auto read_numbers = [&](const nlohmann::json& object, const std::string& prefix,
+                                  std::initializer_list<std::pair<const char*, double*>> fields) {
+        for (const auto& field : fields) {
+            if (!has_number_value(object, field.first))
+                return fail(prefix + "." + field.first + " must be a finite number");
+            const double value = number_or(object, field.first, 0.);
+            if (!std::isfinite(value))
+                return fail(prefix + "." + field.first + " must be a finite number");
+            *field.second = value;
+        }
+        return true;
+    };
+    PullCommonConfig& common = config.pull_gcode.common;
+    if (!read_numbers(pull["common"], "pull_gcode.common",
+                      {{"x_hook", &common.x_hook},
+                       {"x_latch", &common.x_latch},
+                       {"x_front", &common.x_front},
+                       {"fast_feed_rate", &common.fast_feed_rate},
+                       {"feed_rate", &common.feed_rate},
+                       {"pull_feedrate_fast", &common.pull_feedrate_fast}}))
+        return false;
+    if (common.fast_feed_rate <= 0. || common.feed_rate <= 0. || common.pull_feedrate_fast <= 0.)
+        return fail("DynaPin pull_gcode.common feed rates must be positive");
+    for (const auto& entry :
+         {std::make_pair("normal", &config.pull_gcode.normal), std::make_pair("reverted", &config.pull_gcode.reverted)}) {
+        PullMoveConfig& profile = *entry.second;
+        if (!read_numbers(pull[entry.first], std::string("pull_gcode.") + entry.first,
+                          {{"y_origin_offset", &profile.y_origin_offset},
+                           {"alternating_y_offset", &profile.alternating_y_offset},
+                           {"y_offset", &profile.y_offset},
+                           {"approach_y_offset", &profile.approach_y_offset},
+                           {"approach_z_offset", &profile.approach_z_offset},
+                           {"engage_z_drop", &profile.engage_z_drop},
+                           {"disengage_x_offset", &profile.disengage_x_offset},
+                           {"disengage_z_lift", &profile.disengage_z_lift},
+                           {"retreat_z_lift", &profile.retreat_z_lift}}))
+            return false;
+    }
+    const nlohmann::json& reverted = pull["reverted"];
+    if (!reverted.contains("row_parity") || !reverted["row_parity"].is_number_integer() ||
+        (reverted["row_parity"] != 0 && reverted["row_parity"] != 1))
+        return fail("DynaPin pull_gcode.reverted.row_parity must be 0 or 1");
+    config.pull_gcode.reverted_row_parity = reverted["row_parity"].get<int>();
 
     const std::optional<double> max_x_bed = bed_max_x(print);
     if (!max_x_bed) {
@@ -465,10 +520,10 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
             BOOST_LOG_TRIVIAL(warning) << "[DynaPin] cannot generate geometry: " << message;
         return false;
     }
-    if (!has_number_value(pull, "x_front") || !std::isfinite(config.pull_gcode.x_front) || config.pull_gcode.x_front >= *max_x_bed ||
+    if (!std::isfinite(config.pull_gcode.common.x_front) || config.pull_gcode.common.x_front >= *max_x_bed ||
         config.blocker_width_y <= 0. || config.row_pitch_z == 0. || config.col_pitch_y == 0.) {
         if (error)
-            *error = "DynaPin config requires pull_gcode.x_front and valid grid/support_exclusion dimensions";
+            *error = "DynaPin config requires pull_gcode.common.x_front and valid grid/support_exclusion dimensions";
         return false;
     }
 
@@ -478,7 +533,7 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
                              << config.pull_origin_y << "," << config.pull_origin_z << ")"
                              << ", support_origin_mm=(" << config.support_origin_y << "," << config.support_origin_z << ")"
                              << ", pitch_mm=(row_z=" << config.row_pitch_z << ", col_y=" << config.col_pitch_y << ")"
-                             << ", exclusion_x_mm=[" << config.pull_gcode.x_front << "," << *max_x_bed << "]"
+                             << ", exclusion_x_mm=[" << config.pull_gcode.common.x_front << "," << *max_x_bed << "]"
                              << ", exclusion_y_center_mm=" << config.support_origin_y + support_block_y_offset
                              << ", exclusion_width_y_mm=" << config.blocker_width_y << ", zero_row_blocker_z_range_mm=["
                              << zero_row_range.z_min << "," << zero_row_range.z_max << "]";
@@ -490,7 +545,7 @@ static LocalBlocker blocker_for_pin_shift(const Config& config, const Pin& pin, 
     const double        y       = pin_y(config, pin);
     const BlockerZRange z_range = blocker_z_range(config, pin);
     const double        block_y = y + support_block_y_offset;
-    const double        min_x   = config.pull_gcode.x_front;
+    const double        min_x   = config.pull_gcode.common.x_front;
     const double        max_x   = max_x_bed;
     const double        min_y   = block_y - 0.5 * config.blocker_width_y;
     const double        max_y   = block_y + 0.5 * config.blocker_width_y;
@@ -519,7 +574,7 @@ LocalBlocker blocker_for_pin(const PrintObject& object, const Config& config, co
 static VirtualSupportSurface surface_for_pin_shift(const Config& config, const Pin& pin, const Point& shift, double max_x_bed)
 {
     const double block_y = pin_y(config, pin) + support_block_y_offset;
-    const double min_x   = config.pull_gcode.x_front;
+    const double min_x   = config.pull_gcode.common.x_front;
     const double max_x   = max_x_bed;
     const double min_y   = block_y - 0.5 * config.blocker_width_y;
     const double max_y   = block_y + 0.5 * config.blocker_width_y;
@@ -720,7 +775,7 @@ std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
         const double        y       = pin_y(config, pin);
         const BlockerZRange z_range = blocker_z_range(config, pin);
         const double        block_y = y + support_block_y_offset;
-        const double        min_x   = config.pull_gcode.x_front;
+        const double        min_x   = config.pull_gcode.common.x_front;
         const double        max_x   = *max_x_bed;
         const double        min_y   = block_y - 0.5 * config.blocker_width_y;
         const double        max_y   = block_y + 0.5 * config.blocker_width_y;
@@ -736,30 +791,38 @@ std::vector<BlockerBox> selected_blocker_boxes(const Print& print)
 
 std::string pull_gcode_for_pin(const Config& config, const Pin& pin)
 {
-    const double       y      = pull_y(config, pin);
-    const double       z      = pull_z(config, pin);
-    const double       z_ret  = z + config.pull_gcode.z_offset;
-    const double       y_app  = y + config.pull_gcode.approach_y_offset;
-    const double       f_fast = config.pull_gcode.travel_feedrate;
-    const double       f_slow = config.pull_gcode.pull_feedrate;
-    const double       f_pull = config.pull_gcode.pull_feedrate_fast;
+    const PullCommonConfig& common      = config.pull_gcode.common;
+    const PullMoveConfig&   profile     = pull_parameters(config, pin);
+    const bool              alternating = config.pull_gcode.type == PullType::Alternating;
+    double                  y = config.pull_origin_y + double(pin.col) * config.col_pitch_y + profile.y_offset + profile.y_origin_offset;
+    if (alternating)
+        y += profile.alternating_y_offset;
+    const double z     = config.pull_origin_z + double(pin.row) * config.row_pitch_z;
+    double       y_app = y + profile.approach_y_offset;
+    if (config.pull_gcode.type == PullType::RevertedOnly)
+        std::swap(y, y_app);
+    const double       z_app    = z + (alternating ? profile.approach_z_offset : 0.);
+    const double       z_engage = z_app - (alternating ? profile.engage_z_drop : 0.);
     std::ostringstream gcode;
     gcode << std::fixed << std::setprecision(4);
     gcode << "; BEGIN_DYNAPIN_PULL ROW=" << pin.row << " COL=" << pin.col << "\n";
-    // Approach: shift Y away from pin, then move X+Z together to hook height
-    gcode << "G1 Y" << y_app << " F" << f_fast << "\n";
-    gcode << "G1 X" << config.pull_gcode.x_hook << " Z" << z << " F" << f_fast << "\n";
-    // Latch: advance X to latch position
-    gcode << "G1 X" << config.pull_gcode.x_latch << " F" << f_slow << "\n";
-    // Engage: move Y back onto pin
-    gcode << "G1 Y" << y << " F" << f_slow << "\n";
+    gcode << "G1 Y" << y_app << " F" << common.fast_feed_rate << "\n";
+    gcode << "G1 X" << common.x_hook << " Z" << z_app << " F" << common.fast_feed_rate << "\n";
+    gcode << "G1 X" << common.x_latch << " F" << common.feed_rate << "\n";
+    if (alternating)
+        gcode << "G1 Z" << z_engage << " F" << common.feed_rate << "\n";
+    else
+        gcode << "G1 Y" << y << " F" << common.feed_rate << "\n";
     gcode << "; DYNAPIN_PULL_MOVE\n";
-    // Pull pin out fast
-    gcode << "G1 X" << config.pull_gcode.x_front << " F" << f_pull << "\n";
-    // Disengage: shift X slightly and Y away
-    gcode << "G1 X" << (config.pull_gcode.x_front + config.pull_gcode.disengage_x_offset) << " Y" << y_app << " F" << f_slow << "\n";
-    // Retract Z to clear
-    gcode << "G1 Z" << z_ret << " F" << f_slow << "\n";
+    gcode << "G1 X" << common.x_front << " F" << common.pull_feedrate_fast << "\n";
+    gcode << "G1 X" << (common.x_front + profile.disengage_x_offset);
+    if (alternating)
+        gcode << " Z" << (z_engage + profile.disengage_z_lift);
+    else
+        gcode << " Y" << y_app;
+    gcode << " F" << common.feed_rate << "\n";
+    if (!alternating)
+        gcode << "G1 Z" << (z + profile.retreat_z_lift) << " F" << common.feed_rate << "\n";
     gcode << "; END_DYNAPIN_PULL\n";
     return gcode.str();
 }
@@ -769,8 +832,8 @@ std::string return_gcode(const Config& config, const Vec3d& return_position)
     std::ostringstream gcode;
     gcode << std::fixed << std::setprecision(4);
     gcode << "; BEGIN_DYNAPIN_RETURN\n";
-    gcode << "G1 X" << return_position.x() << " Y" << return_position.y() << " F" << config.pull_gcode.travel_feedrate << "\n";
-    gcode << "G1 Z" << return_position.z() << " F" << config.pull_gcode.pull_feedrate << "\n";
+    gcode << "G1 X" << return_position.x() << " Y" << return_position.y() << " F" << config.pull_gcode.common.fast_feed_rate << "\n";
+    gcode << "G1 Z" << return_position.z() << " F" << config.pull_gcode.common.feed_rate << "\n";
     gcode << "; END_DYNAPIN_RETURN\n";
     return gcode.str();
 }

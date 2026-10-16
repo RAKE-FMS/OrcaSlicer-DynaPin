@@ -44,7 +44,7 @@ class GeneratePullGcodeTests(unittest.TestCase):
 
     def test_alternating_even_row_uses_reverted_z_motion_without_retreat(self):
         self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (0, 0), "alternating")), [
-            "G1 Y5.5000 F5000.0000",
+            "G1 Y3.7000 F5000.0000",
             "G1 X169.0000 Z11.0000 F5000.0000",
             "G1 X174.0000 F1500.0000",
             "G1 Z6.0000 F1500.0000",
@@ -63,14 +63,14 @@ class GeneratePullGcodeTests(unittest.TestCase):
         ])
 
     def test_parity_one_swaps_row_assignments(self):
-        self.config["pull_gcode"]["reverted"]["row_parity"] = 1
+        self.config["pull_gcode"]["alternating"]["row_parity"] = 1
         even = moves(module.pull_gcode_for_pin(self.config, (0, 0), "alternating"))
         odd = moves(module.pull_gcode_for_pin(self.config, (1, 0), "alternating"))
         self.assertEqual(even[0], "G1 Y12.5000 F5000.0000")
-        self.assertEqual(odd[0], "G1 Y5.5000 F5000.0000")
+        self.assertEqual(odd[0], "G1 Y3.7000 F5000.0000")
 
-    def test_revertedonly_swaps_approach_and_engagement_without_mirroring(self):
-        self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (0, 0), "revertedonly")), [
+    def test_reverted_swaps_approach_and_engagement_without_mirroring(self):
+        self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (0, 0), "reverted")), [
             "G1 Y10.5000 F5000.0000",
             "G1 X169.0000 Z6.0000 F5000.0000",
             "G1 X174.0000 F1500.0000",
@@ -80,44 +80,58 @@ class GeneratePullGcodeTests(unittest.TestCase):
             "G1 Z10.0000 F1500.0000",
         ])
 
-    def test_normalonly_uses_normal_offset_for_every_row(self):
-        self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (0, 0), "normalonly"))[0],
+    def test_normal_uses_normal_offset_for_every_row(self):
+        self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (0, 0), "normal"))[0],
                          "G1 Y13.5000 F5000.0000")
-        self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (1, 0), "normalonly"))[0],
+        self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (1, 0), "normal"))[0],
                          "G1 Y13.5000 F5000.0000")
 
-    def test_orientation_parameters_are_independent_and_return_uses_last_pin(self):
-        normal = self.config["pull_gcode"]["normal"]
-        reverted = self.config["pull_gcode"]["reverted"]
-        normal.update(x_hook=150., fast_feed_rate=4100., feed_rate=1100., alternating_y_offset=-2.)
-        reverted.update(x_hook=160., fast_feed_rate=4200., feed_rate=1200., alternating_y_offset=-3.)
+    def test_standalone_mode_profiles_do_not_change_alternating_profiles(self):
+        alternating_before = moves(module.pull_gcode_for_pin(self.config, (1, 0), "alternating"))
+        self.config["pull_gcode"]["normal"].update(y_origin_offset=20., x_hook=140.)
+        self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (1, 0), "alternating")), alternating_before)
+        normal_moves = moves(module.pull_gcode_for_pin(self.config, (1, 0), "normal"))
+        self.assertEqual(normal_moves[0], "G1 Y26.5000 F5000.0000")
+        self.assertEqual(normal_moves[1], "G1 X140.0000 Z13.4000 F5000.0000")
+
+    def test_mode_and_alternating_orientation_parameters_are_independent(self):
+        alternating = self.config["pull_gcode"]["alternating"]
+        normal = alternating["normal"]
+        reverted = alternating["reverted"]
+        normal.update(alternating_y_offset=-2., approach_z_offset=6.)
+        reverted.update(alternating_y_offset=-3., approach_z_offset=8.)
+        normal.update(x_hook=150., fast_feed_rate=4100., feed_rate=1100.)
+        reverted.update(x_hook=150., fast_feed_rate=4100., feed_rate=1100.)
         normal_moves = moves(module.pull_gcode_for_pin(self.config, (1, 0), "alternating"))
         reverted_moves = moves(module.pull_gcode_for_pin(self.config, (0, 0), "alternating"))
         self.assertEqual(normal_moves[0], "G1 Y11.5000 F4100.0000")
-        self.assertEqual(normal_moves[1], "G1 X150.0000 Z18.4000 F4100.0000")
-        self.assertEqual(reverted_moves[0], "G1 Y3.5000 F4200.0000")
-        self.assertEqual(reverted_moves[1], "G1 X160.0000 Z11.0000 F4200.0000")
-        self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (0, 0), "normalonly"))[0],
-                         "G1 Y13.5000 F4100.0000")
-        self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (0, 0), "revertedonly"))[0],
-                         "G1 Y10.5000 F4200.0000")
-        for last_pin, fast, slow in [((1, 0), 4100, 1100), ((2, 0), 4200, 1200)]:
+        self.assertEqual(normal_moves[1], "G1 X150.0000 Z19.4000 F4100.0000")
+        self.assertEqual(reverted_moves[0], "G1 Y1.7000 F4100.0000")
+        self.assertEqual(reverted_moves[1], "G1 X150.0000 Z14.0000 F4100.0000")
+        self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (0, 0), "normal"))[0],
+                         "G1 Y13.5000 F5000.0000")
+        self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (0, 0), "reverted"))[0],
+                         "G1 Y10.5000 F5000.0000")
+        for last_pin in ((1, 0), (2, 0)):
             result = module.generate_gcode(self.config, [(0, 0), last_pin], return_position=(100., 120., 30.))
             self.assertEqual(moves(result)[-2:], [
-                f"G1 X100.0000 Y120.0000 F{fast:.4f}", f"G1 Z30.0000 F{slow:.4f}",
+                "G1 X100.0000 Y120.0000 F4100.0000", "G1 Z30.0000 F1100.0000",
             ])
 
     def test_configured_coordinates_and_feedrates_control_motion(self):
         grid = self.config["grid"]
         grid["pull_origin"] = {"y": 40., "z": 20.}
         grid["pitch"] = {"col_y": 10., "row_z": 8.}
-        self.config["pull_gcode"]["normal"]["y_origin_offset"] = 9.
-        self.config["pull_gcode"]["normal"].update({
+        alternating_normal = self.config["pull_gcode"]["alternating"]["normal"]
+        alternating_normal["y_origin_offset"] = 9.
+        alternating_normal.update({
             "x_hook": 160., "x_latch": 166., "x_front": 30.,
+            "fast_feed_rate": 4000., "feed_rate": 1000., "pull_feedrate_fast": 2000.,
+        })
+        alternating_normal.update({
             "y_offset": -2., "approach_y_offset": -3., "approach_z_offset": 6.,
             "engage_z_drop": 4., "disengage_z_lift": 3., "disengage_x_offset": 2.,
-            "retreat_z_lift": 80., "fast_feed_rate": 4000., "feed_rate": 1000.,
-            "pull_feedrate_fast": 2000.,
+            "retreat_z_lift": 80.,
         })
         self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (1, 2), "alternating")), [
             "G1 Y63.0000 F4000.0000",
@@ -140,6 +154,15 @@ class GeneratePullGcodeTests(unittest.TestCase):
                                        "G1 Z30.0000 F1500.0000\n"
                                        "; END_DYNAPIN_RETURN\n"))
 
+    def test_cpp_reference_fixture_matches_python(self):
+        fixtures = json.loads((ROOT / "tests/data/dynapin/pull_gcode_reference.json").read_text())
+        for fixture in fixtures:
+            config = fixture["config"]
+            for case in fixture["cases"]:
+                config["pull_gcode"]["alternating"]["row_parity"] = case["row_parity"]
+                with self.subTest(mode=case["type"], parity=case["row_parity"], pin=case["pin"]):
+                    self.assertEqual(module.pull_gcode_for_pin(config, tuple(case["pin"]), case["type"]), case["gcode"])
+
     def test_invalid_pins_are_rejected(self):
         for pin in [(-1, 0), (0, -1), (10, 0), (0, 14)]:
             with self.subTest(pin=pin), self.assertRaises(ValueError):
@@ -150,7 +173,7 @@ class GeneratePullGcodeTests(unittest.TestCase):
             module.generate_gcode(self.config, [])
 
     def test_cli_uses_supplied_json_and_type_without_default_path_dependency(self):
-        self.config["pull_gcode"]["type"] = "revertedonly"
+        self.config["pull_gcode"]["type"] = "reverted"
         self.config["pull_gcode"]["reverted"]["x_hook"] = 150.
         with tempfile.TemporaryDirectory() as temp:
             config_path = Path(temp) / "config.json"
@@ -160,7 +183,7 @@ class GeneratePullGcodeTests(unittest.TestCase):
                                           "--base-file", str(self.base_file),
                                           "--output", str(output_path)]), 0)
             gcode = output_path.read_text()
-            self.assertIn("TYPE=revertedonly", gcode)
+            self.assertIn("TYPE=reverted", gcode)
             self.assertIn("G1 X150.0000 Z6.0000", gcode)
             self.assertEqual(moves(gcode)[0], "G1 Y10.5000 F5000.0000")
             buffer = io.BytesIO()
@@ -209,13 +232,15 @@ class GeneratePullGcodeTests(unittest.TestCase):
         self.assertEqual(self.base_file.read_bytes(), original)
 
     def test_invalid_settings_do_not_write_output(self):
-        for field, value in [("type", "typo"), ("parity", 2), ("parity", True),
+        for field, value in [("legacy", None), ("type", "typo"), ("parity", 2), ("parity", True),
                              ("x_hook", float("nan")), ("feed_rate", 0)]:
             config = copy.deepcopy(self.config)
-            if field == "type":
+            if field == "legacy":
+                config["pull_gcode"].pop("alternating")
+            elif field == "type":
                 config["pull_gcode"]["type"] = value
             elif field == "parity":
-                config["pull_gcode"]["reverted"]["row_parity"] = value
+                config["pull_gcode"]["alternating"]["row_parity"] = value
             else:
                 config["pull_gcode"]["normal"][field] = value
             with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as temp:

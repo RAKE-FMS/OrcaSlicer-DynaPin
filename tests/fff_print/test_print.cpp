@@ -3,6 +3,11 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/DynaPin.hpp"
+#include "libslic3r/DynaPinGCode.hpp"
+#include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
+#include <nlohmann/json.hpp>
+#include <fstream>
 #include "libslic3r/DynaPinPlacement.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Layer.hpp"
@@ -24,11 +29,120 @@ using namespace Slic3r;
 using namespace Slic3r::Test;
 
 namespace {
+class PullConfigFile
+{
+public:
+    const boost::filesystem::path path = boost::filesystem::temp_directory_path() /
+                                         boost::filesystem::unique_path("dynapin-%%%%-%%%%.json");
+    ~PullConfigFile() { boost::filesystem::remove(path); }
+    void write(const nlohmann::json& config) const { std::ofstream(path.string()) << config.dump(); }
+};
+
+nlohmann::json pull_reference_fixtures()
+{
+    std::ifstream input(std::string(TEST_DATA_DIR) + "/dynapin/pull_gcode_reference.json");
+    return nlohmann::json::parse(input);
+}
+
+void init_pull_config_print(Print& print, Model& model, const PullConfigFile& file)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"dynapin_config_path", file.path.string()}, {"printable_area", "0x0,180x0,180x180,0x180"}});
+    print.apply(model, config);
+}
+} // namespace
+
+TEST_CASE("DynaPin pull blocks match the Python reference", "[DynaPin][DynaPinPull]")
+{
+    PullConfigFile file;
+    Print          print;
+    Model          model;
+    init_pull_config_print(print, model, file);
+    for (const auto& fixture : pull_reference_fixtures()) {
+        for (const auto& entry : fixture["cases"]) {
+            auto json                                       = fixture["config"];
+            json["pull_gcode"]["type"]                      = entry["type"];
+            json["pull_gcode"]["alternating"]["row_parity"] = entry["row_parity"];
+            file.write(json);
+            DynaPin::Config config;
+            std::string     error;
+            INFO(entry.dump());
+            REQUIRE(DynaPin::load_config_for_print(print, config, &error));
+            const DynaPin::Pin pin{entry["pin"][0].get<int>(), entry["pin"][1].get<int>()};
+            CHECK(DynaPin::pull_gcode_for_pin(config, pin) == entry["gcode"].get<std::string>());
+            CHECK(DynaPin::pin_y(config, pin) == Catch::Approx(18. + pin.col * 12.4));
+            const auto range = DynaPin::blocker_z_range(config, pin);
+            CHECK(range.z_max == Catch::Approx(7.3 + pin.row * 7.4));
+            CHECK(range.z_min == Catch::Approx(range.z_max - 5.));
+        }
+    }
+}
+
+TEST_CASE("DynaPin pull settings are isolated by mode", "[DynaPin][DynaPinPull]")
+{
+    auto json                                                = pull_reference_fixtures()[0]["config"];
+    json["pull_gcode"]["normal"]["x_hook"]                   = 140.;
+    json["pull_gcode"]["normal"]["x_front"]                  = 11.;
+    json["pull_gcode"]["normal"]["y_origin_offset"]          = 20.;
+    json["pull_gcode"]["alternating"]["normal"]["x_hook"]    = 150.;
+    json["pull_gcode"]["alternating"]["normal"]["x_front"]   = 21.;
+    json["pull_gcode"]["alternating"]["reverted"]["x_hook"]  = 160.;
+    json["pull_gcode"]["alternating"]["reverted"]["x_front"] = 22.;
+    json["pull_gcode"]["reverted"]["x_hook"]                 = 130.;
+    json["pull_gcode"]["reverted"]["x_front"]                = 30.;
+
+    PullConfigFile file;
+    file.write(json);
+    Print print;
+    Model model;
+    init_pull_config_print(print, model, file);
+    DynaPin::Config config;
+    REQUIRE(DynaPin::load_config_for_print(print, config));
+
+    CHECK(DynaPin::support_x_front(config) == Catch::Approx(21.));
+    CHECK(DynaPin::pull_gcode_for_pin(config, {1, 0}).find("G1 X150.0000 Z18.4000") != std::string::npos);
+    CHECK(DynaPin::pull_gcode_for_pin(config, {0, 0}).find("G1 X160.0000 Z11.0000") != std::string::npos);
+    config.pull_gcode.type = DynaPin::PullType::NormalOnly;
+    CHECK(DynaPin::support_x_front(config) == Catch::Approx(11.));
+    CHECK(DynaPin::pull_gcode_for_pin(config, {1, 0}).find("G1 X140.0000 Z13.4000") != std::string::npos);
+    CHECK(DynaPin::pull_gcode_for_pin(config, {1, 0}).find("G1 Y26.5000") != std::string::npos);
+    config.pull_gcode.type = DynaPin::PullType::RevertedOnly;
+    CHECK(DynaPin::support_x_front(config) == Catch::Approx(30.));
+    CHECK(DynaPin::pull_gcode_for_pin(config, {0, 0}).find("G1 X130.0000 Z6.0000") != std::string::npos);
+}
+
+TEST_CASE("DynaPin rejects legacy or invalid pull configurations", "[DynaPin][DynaPinPull]")
+{
+    const int invalid_case = GENERATE(0, 1, 2, 3, 4, 5, 6, 7);
+    auto      json         = pull_reference_fixtures()[0]["config"];
+    auto&     pull         = json["pull_gcode"];
+    switch (invalid_case) {
+    case 0: pull = {{"x_hook", 169}, {"x_latch", 174}, {"x_front", 20}}; break;
+    case 1: pull["type"] = "typo"; break;
+    case 2: pull["alternating"]["row_parity"] = 2; break;
+    case 3: pull["alternating"]["row_parity"] = true; break;
+    case 4: pull["normal"]["feed_rate"] = 0; break;
+    case 5: pull["alternating"]["normal"]["approach_z_offset"] = "nan"; break;
+    case 6: pull["normal"].erase("x_front"); break;
+    case 7: pull["reverted"]["y_offset"] = "-3.5junk"; break;
+    }
+    PullConfigFile file;
+    file.write(json);
+    Print print;
+    Model model;
+    init_pull_config_print(print, model, file);
+    DynaPin::Config config;
+    std::string     error;
+    CHECK_FALSE(DynaPin::load_config_for_print(print, config, &error));
+    CHECK_FALSE(error.empty());
+}
+
+namespace {
 
 class ResourcesDirGuard
 {
 public:
-    explicit ResourcesDirGuard(const std::string &path) : m_previous(resources_dir()) { set_resources_dir(path); }
+    explicit ResourcesDirGuard(const std::string& path) : m_previous(resources_dir()) { set_resources_dir(path); }
     ~ResourcesDirGuard() { set_resources_dir(m_previous); }
 
 private:
@@ -95,6 +209,7 @@ private:
 
 void init_dynapin_print(Print& print, Model& model, const DynamicPrintConfig& config)
 {
+    print.set_plate_origin(Vec3d::Zero());
     ModelObject* object = model.add_object();
     object->name        = "dynapin-test.stl";
     object->add_volume(Test::mesh(TestMesh::cube_20x20x20));
@@ -736,6 +851,7 @@ TEST_CASE("DynaPin Tree bounded placement keeps Simple Bridge support pins", "[P
         {"enable_dynapin_placement_optimization", false},
     });
     Print disabled_print;
+    disabled_print.set_plate_origin(Vec3d::Zero());
     for (ModelObject* object : disabled_model.objects)
         disabled_print.auto_assign_extruders(object);
     disabled_print.apply(disabled_model, disabled_config);
@@ -1206,8 +1322,8 @@ SCENARIO("Print: Model geometry before x_front does not collide with a DynaPin b
     GIVEN("A model entirely before the pull path") {
         ResourcesDirGuard resources_guard(test_resources_dir());
         Print print;
-        Model model;
-        TriangleMesh mesh = make_cube(10., 10., 5.);
+        Model             model;
+        TriangleMesh      mesh = make_cube(10., 10., 5.);
         mesh.translate(5.f, 5.f, 0.f);
         ModelObject *object = model.add_object();
         object->name        = "dynapin-before-x-front-test.stl";
@@ -1232,7 +1348,7 @@ SCENARIO("Print: Model geometry before x_front does not collide with a DynaPin b
 
         DynaPin::Config dynapin_config;
         REQUIRE(DynaPin::load_config_for_print(print, dynapin_config));
-        CHECK(dynapin_config.pull_gcode.x_front == Catch::Approx(20.));
+        CHECK(DynaPin::support_x_front(dynapin_config) == Catch::Approx(20.));
         CHECK_FALSE(DynaPin::pin_collides_with_model(print, dynapin_config, {0, 0}));
     }
 }
@@ -1878,4 +1994,110 @@ TEST_CASE("Tree pin selection preserves multi-stage overhang choices", "[Print][
             }
         }
     }
+}
+
+TEST_CASE("DynaPin pulls share one lift and restore the saved position", "[DynaPin][DynaPinPull]")
+{
+    const std::string  mode = GENERATE("normal", "reverted", "alternating");
+    TemporaryDirGuard  temporary_guard;
+    DebugStageEnvGuard stage_guard;
+    auto               json    = pull_reference_fixtures()[0]["config"];
+    json["pull_gcode"]["type"] = mode;
+    PullConfigFile file;
+    file.write(json);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"enable_dynapin_support_optimization", true},
+                                   {"dynapin_debug_stage", 2},
+                                   {"dynapin_config_path", file.path.string()},
+                                   {"dynapin_selected_pins", "0,0;0,1"},
+                                   {"support_type", "normal(auto)"},
+                                   {"z_hop", "0.4"},
+                                   {"retract_when_changing_layer", "1"}});
+    Print print;
+    Model model;
+    // Preset deserialization supplies these maps; static defaults only contain enum values.
+    for (const std::string& key : config.keys()) {
+        ConfigOption* option = config.option(key);
+        if (option->type() == coEnums) {
+            const auto* definition = print_config_def.get(key);
+            REQUIRE(definition->enum_keys_map != nullptr);
+            if (option->nullable())
+                static_cast<ConfigOptionEnumsGenericNullable*>(option)->keys_map = definition->enum_keys_map;
+            else
+                static_cast<ConfigOptionEnumsGeneric*>(option)->keys_map = definition->enum_keys_map;
+        }
+    }
+    init_dynapin_print(print, model, config);
+    const auto export_for_test = [](Print& target) {
+        const auto path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("dynapin-pull-%%%%-%%%%.gcode");
+        target.process();
+        GCodeProcessorResult processor_result;
+        target.export_gcode(path.string(), &processor_result, nullptr);
+        std::ifstream     input(path.string());
+        const std::string result((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        boost::filesystem::remove(path);
+        return result;
+    };
+    const std::string gcode                  = export_for_test(print);
+    size_t            pulls                  = 0;
+    size_t            returns                = 0;
+    bool              in_group               = false;
+    bool              previous_move_was_lift = false;
+    Vec3d             saved                  = Vec3d::Zero();
+    GCodeReader       reader;
+    reader.parse_buffer(gcode, [&](GCodeReader& state, const GCodeReader::GCodeLine& line) {
+        if (line.raw().find("; BEGIN_DYNAPIN_PULL") == 0) {
+            if (!in_group) {
+                CHECK(previous_move_was_lift);
+                saved    = Vec3d(state.x(), state.y(), state.z());
+                in_group = true;
+            }
+            ++pulls;
+        }
+        if (line.raw().find("; END_DYNAPIN_RETURN") == 0) {
+            REQUIRE(in_group);
+            CHECK(state.x() == Catch::Approx(saved.x()));
+            CHECK(state.y() == Catch::Approx(saved.y()));
+            CHECK(state.z() == Catch::Approx(saved.z()));
+            in_group = false;
+            ++returns;
+        }
+        if (line.cmd_is("G1") || line.cmd_is("G0"))
+            previous_move_was_lift = line.has_z() && !line.has_x() && !line.has_y() && line.z() > state.z();
+    });
+    CHECK(pulls == 2);
+    CHECK(returns == 1);
+    CHECK_FALSE(in_group);
+
+    config.set_key_value("enable_dynapin_support_optimization", new ConfigOptionBool(false));
+    Print disabled_print;
+    Model disabled_model;
+    init_dynapin_print(disabled_print, disabled_model, config);
+    CHECK(export_for_test(disabled_print).find("BEGIN_DYNAPIN_PULL") == std::string::npos);
+}
+
+TEST_CASE("DynaPin shared front bounds support independently of pull offsets", "[DynaPin][DynaPinPull]")
+{
+    PullConfigFile file;
+    file.write(pull_reference_fixtures()[1]["config"]);
+    DynamicPrintConfig runtime = DynamicPrintConfig::full_print_config();
+    runtime.set_deserialize_strict({{"dynapin_config_path", file.path.string()}, {"printable_area", "0x0,180x0,180x180,0x180"}});
+    Print print;
+    Model model;
+    init_dynapin_print(print, model, runtime);
+    DynaPin::Config config;
+    REQUIRE(DynaPin::load_config_for_print(print, config));
+    const PrintObject& object = *print.objects().front();
+    const DynaPin::Pin pin{0, 0};
+    const auto         blocker = DynaPin::blocker_for_pin(object, config, pin);
+    const auto         surface = DynaPin::surface_for_pin(object, config, pin);
+    const Point        shift   = object.instances().front().shift_without_plate_offset();
+    REQUIRE_FALSE(blocker.poly.points.empty());
+    CHECK(unscale_(blocker.poly.points.front().x() + shift.x()) == Catch::Approx(30.));
+    CHECK(blocker.poly.points == surface.poly.points);
+    config.pull_gcode.alternating.normal.y_origin_offset += 100.;
+    config.pull_gcode.alternating.reverted.y_offset -= 100.;
+    config.pull_gcode.alternating.normal.approach_z_offset += 100.;
+    CHECK(DynaPin::blocker_for_pin(object, config, pin).poly.points == blocker.poly.points);
+    CHECK(DynaPin::surface_for_pin(object, config, pin).poly.points == surface.poly.points);
 }

@@ -14,12 +14,11 @@ from typing import Sequence
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "resources/profiles/Kingroon/dynapin/kp3s.json"
 DEFAULT_BASE_FILE = Path(__file__).resolve().parents[1] / "old-models/min/min.gcode"
-PULL_TYPES = ("normalonly", "revertedonly", "alternating")
+PULL_TYPES = ("normal", "alternating", "reverted")
+MACHINE_FIELDS = ("x_hook", "x_latch", "x_front", "fast_feed_rate", "feed_rate", "pull_feedrate_fast")
 MOVE_FIELDS = (
-    "x_hook", "x_latch", "x_front", "y_offset", "approach_y_offset",
-    "approach_z_offset", "engage_z_drop", "disengage_x_offset",
-    "disengage_z_lift", "retreat_z_lift", "pull_feedrate_fast",
-    "feed_rate", "fast_feed_rate",
+    "y_origin_offset", "y_offset", "approach_y_offset", "approach_z_offset", "engage_z_drop",
+    "disengage_x_offset", "disengage_z_lift", "retreat_z_lift",
 )
 
 
@@ -44,18 +43,42 @@ def load_config(path: Path) -> dict:
         grid["pull_origin"][key] = number(grid["pull_origin"][key])
     for key in ("row_z", "col_y"):
         grid["pitch"][key] = number(grid["pitch"][key])
-    pull = config["pull_gcode"]
-    if pull["type"] not in PULL_TYPES:
+    pull = config.get("pull_gcode")
+    if not isinstance(pull, dict) or any(key not in pull for key in ("type", "normal", "alternating", "reverted")):
+        raise ValueError("pull_gcode requires type, normal, alternating and reverted; legacy schema is unsupported")
+    if not isinstance(pull["type"], str) or pull["type"] not in PULL_TYPES:
         raise ValueError(f"pull_gcode.type must be one of {PULL_TYPES}")
-    parity = pull["reverted"]["row_parity"]
+    for mode in ("normal", "reverted"):
+        profile = pull[mode]
+        if not isinstance(profile, dict):
+            raise ValueError(f"pull_gcode.{mode} must be an object")
+        for key in (*MACHINE_FIELDS, *MOVE_FIELDS):
+            if key not in profile:
+                raise ValueError(f"pull_gcode.{mode}.{key} is required")
+            profile[key] = number(profile[key])
+        for key in ("fast_feed_rate", "feed_rate", "pull_feedrate_fast"):
+            if profile[key] <= 0:
+                raise ValueError(f"pull_gcode.{mode}.{key} must be positive")
+
+    alternating = pull["alternating"]
+    if not isinstance(alternating, dict):
+        raise ValueError("pull_gcode.alternating must be an object")
+    if any(key not in alternating for key in ("row_parity", "normal", "reverted")):
+        raise ValueError("pull_gcode.alternating requires row_parity, normal and reverted")
+    parity = alternating["row_parity"]
     if isinstance(parity, bool) or not isinstance(parity, int) or parity not in (0, 1):
-        raise ValueError("reverted.row_parity must be 0 or 1")
+        raise ValueError("pull_gcode.alternating.row_parity must be 0 or 1")
     for kind in ("normal", "reverted"):
-        for key in ("y_origin_offset", "alternating_y_offset", *MOVE_FIELDS):
-            pull[kind][key] = number(pull[kind][key])
-        for key in ("pull_feedrate_fast", "feed_rate", "fast_feed_rate"):
-            if pull[kind][key] <= 0:
-                raise ValueError(f"{kind}.{key} must be positive")
+        profile = alternating[kind]
+        if not isinstance(profile, dict):
+            raise ValueError(f"pull_gcode.alternating.{kind} must be an object")
+        for key in (*MACHINE_FIELDS, *MOVE_FIELDS, "alternating_y_offset"):
+            if key not in profile:
+                raise ValueError(f"pull_gcode.alternating.{kind}.{key} is required")
+            profile[key] = number(profile[key])
+        for key in ("fast_feed_rate", "feed_rate", "pull_feedrate_fast"):
+            if profile[key] <= 0:
+                raise ValueError(f"pull_gcode.alternating.{kind}.{key} must be positive")
     return config
 
 
@@ -71,12 +94,17 @@ def parse_pins(value: str) -> list[tuple[int, int]]:
 
 def pull_parameters(config: dict, pin: tuple[int, int], mode: str) -> dict:
     pull = config["pull_gcode"]
-    reverted = mode == "revertedonly" or (mode == "alternating" and pin[0] % 2 == pull["reverted"]["row_parity"])
-    return pull["reverted" if reverted else "normal"]
+    if mode == "alternating":
+        profiles = pull["alternating"]
+        reverted = pin[0] % 2 == profiles["row_parity"]
+        return profiles["reverted" if reverted else "normal"]
+    if mode == "current":
+        return pull["normal"]
+    return pull[mode]
 
 
 def pull_gcode_for_pin(config: dict, pin: tuple[int, int], mode: str) -> str:
-    """Current matches C++; revertedonly swaps Y positions; alternating engages in Z."""
+    """Current reproduces the original C++ motion; reverted swaps Y positions; alternating engages in Z."""
     row, col = pin
     grid = config["grid"]
     if not 0 <= row < grid["row_count"] or not 0 <= col < grid["col_count"]:
@@ -91,7 +119,7 @@ def pull_gcode_for_pin(config: dict, pin: tuple[int, int], mode: str) -> str:
     if mode == "alternating":
         y += params["alternating_y_offset"]
     y_approach = y + params["approach_y_offset"]
-    if mode == "revertedonly":
+    if mode == "reverted":
         y, y_approach = y_approach, y
     fast = params["fast_feed_rate"]
     slow = params["feed_rate"]
@@ -135,11 +163,16 @@ def generate_gcode(config: dict, pins: Sequence[tuple[int, int]], mode: str | No
     result = f"; DynaPin Python pull verification TYPE={mode}\nG21\nG90\n" + "".join(blocks)
     if return_position is not None:
         x, y, z = (number(value) for value in return_position)
-        params = pull_parameters(config, ordered[-1], mode)
+        if mode in ("current", "normal"):
+            return_profile = config["pull_gcode"]["normal"]
+        elif mode == "reverted":
+            return_profile = config["pull_gcode"]["reverted"]
+        else:
+            return_profile = config["pull_gcode"]["alternating"]["normal"]
         result += (
             "; BEGIN_DYNAPIN_RETURN\n"
-            f"G1 X{x:.4f} Y{y:.4f} F{params['fast_feed_rate']:.4f}\n"
-            f"G1 Z{z:.4f} F{params['feed_rate']:.4f}\n"
+            f"G1 X{x:.4f} Y{y:.4f} F{return_profile['fast_feed_rate']:.4f}\n"
+            f"G1 Z{z:.4f} F{return_profile['feed_rate']:.4f}\n"
             "; END_DYNAPIN_RETURN\n"
         )
     return result
@@ -153,7 +186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--pins", required=True, help='zero-based pins, e.g. "0,0; 1,0"')
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--type", choices=PULL_TYPES, help="override pull_gcode.type")
-    modes.add_argument("--current", action="store_true", help="reproduce current C++ per-pin motion without orientation offsets")
+    modes.add_argument("--current", action="store_true", help="reproduce original C++ per-pin motion without orientation offsets")
     parser.add_argument("--return-position", nargs=3, type=float, metavar=("X", "Y", "Z"))
     parser.add_argument("--output", type=Path, help="write a file instead of stdout")
     args = parser.parse_args(argv)

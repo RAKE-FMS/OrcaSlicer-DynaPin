@@ -50,18 +50,40 @@ struct ProjectionSelection
     std::vector<Pin> rejected_collisions;
 };
 
+enum class PullType { NormalOnly, RevertedOnly, Alternating };
+
 struct PullMoveConfig
 {
-    double x_hook             = 0.;
-    double x_latch            = 0.;
-    double x_front            = 0.;
-    double y_offset           = 0.;
-    double z_offset           = 0.;
-    double approach_y_offset  = -4.;
-    double pull_feedrate_fast = 3000.;
-    double disengage_x_offset = 1.5;
-    double travel_feedrate    = 6000.;
-    double pull_feedrate      = 1200.;
+    double x_hook               = 0.;
+    double x_latch              = 0.;
+    double x_front              = 0.;
+    double fast_feed_rate       = 6000.;
+    double feed_rate            = 1200.;
+    double pull_feedrate_fast   = 3000.;
+    double y_origin_offset      = 0.;
+    double alternating_y_offset = 0.;
+    double y_offset             = 0.;
+    double approach_y_offset    = -4.;
+    double approach_z_offset    = 5.;
+    double engage_z_drop        = 5.;
+    double disengage_x_offset   = 1.5;
+    double disengage_z_lift     = 5.;
+    double retreat_z_lift       = 0.;
+};
+
+struct PullAlternatingConfig
+{
+    int            reverted_row_parity = 0;
+    PullMoveConfig normal;
+    PullMoveConfig reverted;
+};
+
+struct PullConfig
+{
+    PullType              type = PullType::NormalOnly;
+    PullMoveConfig        normal;
+    PullAlternatingConfig alternating;
+    PullMoveConfig        reverted;
 };
 
 struct Config
@@ -76,7 +98,7 @@ struct Config
     double         col_pitch_y      = 0.;
     double         blocker_width_y  = 0.;
     double         blocker_height_z = 0.;
-    PullMoveConfig pull_gcode;
+    PullConfig     pull_gcode;
 };
 
 struct BlockerZRange
@@ -165,6 +187,7 @@ std::vector<VirtualSupportSurface> pin_top_surfaces_for_object(const PrintObject
 std::vector<BlockerBox> selected_blocker_boxes(const Print& print);
 std::string             pull_gcode_for_pin(const Config& config, const Pin& pin);
 double                  pin_y(const Config& config, const Pin& pin);
+double                  support_x_front(const Config& config);
 BlockerZRange           blocker_z_range(const Config& config, const Pin& pin);
 
 // The support generator and G-code writer must use the same stage override.
