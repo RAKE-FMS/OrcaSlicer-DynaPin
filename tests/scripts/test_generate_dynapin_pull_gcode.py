@@ -44,7 +44,7 @@ class GeneratePullGcodeTests(unittest.TestCase):
 
     def test_alternating_even_row_uses_reverted_z_motion_without_retreat(self):
         self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (0, 0), "alternating")), [
-            "G1 Y3.7000 F5000.0000",
+            "G1 Y1.9000 F5000.0000",
             "G1 X169.0000 Z11.0000 F5000.0000",
             "G1 X174.0000 F1500.0000",
             "G1 Z6.0000 F1500.0000",
@@ -52,9 +52,9 @@ class GeneratePullGcodeTests(unittest.TestCase):
             "G1 X21.5000 Z11.0000 F1500.0000",
         ])
 
-    def test_alternating_normal_row_has_seven_mm_y_shift_and_row_col_pitch(self):
+    def test_alternating_normal_row_uses_configured_y_offsets_and_row_col_pitch(self):
         self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (1, 2), "alternating")), [
-            "G1 Y37.3000 F5000.0000",
+            "G1 Y35.5000 F5000.0000",
             "G1 X169.0000 Z18.4000 F5000.0000",
             "G1 X174.0000 F1500.0000",
             "G1 Z13.4000 F1500.0000",
@@ -66,8 +66,8 @@ class GeneratePullGcodeTests(unittest.TestCase):
         self.config["pull_gcode"]["alternating"]["row_parity"] = 1
         even = moves(module.pull_gcode_for_pin(self.config, (0, 0), "alternating"))
         odd = moves(module.pull_gcode_for_pin(self.config, (1, 0), "alternating"))
-        self.assertEqual(even[0], "G1 Y12.5000 F5000.0000")
-        self.assertEqual(odd[0], "G1 Y3.7000 F5000.0000")
+        self.assertEqual(even[0], "G1 Y10.7000 F5000.0000")
+        self.assertEqual(odd[0], "G1 Y1.9000 F5000.0000")
 
     def test_reverted_swaps_approach_and_engagement_without_mirroring(self):
         self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (0, 0), "reverted")), [
@@ -104,9 +104,9 @@ class GeneratePullGcodeTests(unittest.TestCase):
         reverted.update(x_hook=150., fast_feed_rate=4100., feed_rate=1100.)
         normal_moves = moves(module.pull_gcode_for_pin(self.config, (1, 0), "alternating"))
         reverted_moves = moves(module.pull_gcode_for_pin(self.config, (0, 0), "alternating"))
-        self.assertEqual(normal_moves[0], "G1 Y11.5000 F4100.0000")
+        self.assertEqual(normal_moves[0], "G1 Y9.7000 F4100.0000")
         self.assertEqual(normal_moves[1], "G1 X150.0000 Z19.4000 F4100.0000")
-        self.assertEqual(reverted_moves[0], "G1 Y1.7000 F4100.0000")
+        self.assertEqual(reverted_moves[0], "G1 Y-0.1000 F4100.0000")
         self.assertEqual(reverted_moves[1], "G1 X150.0000 Z14.0000 F4100.0000")
         self.assertEqual(moves(module.pull_gcode_for_pin(self.config, (0, 0), "normal"))[0],
                          "G1 Y13.5000 F5000.0000")
