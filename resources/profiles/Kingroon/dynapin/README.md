@@ -339,6 +339,13 @@ OrcaSlicerとPythonで共通のピン引き出し動作を定義します。次�
 4. `{resources_dir}/{path}`
 5. カレントディレクトリからの相対パス
 
+上位に同じパスのファイルがあると、後続の検索先にあるJSONは使われません。macOSでは通常、`{data_dir}` は `~/Library/Application Support/OrcaSlicer` です。そのため、たとえば `dynapin_config_path` が `Kingroon/dynapin/kp3s.json` の場合、次のユーザー設定またはシステム設定がアプリに同梱された `Resources/profiles/Kingroon/dynapin/kp3s.json` より優先されます。
+
+- `~/Library/Application Support/OrcaSlicer/user/Kingroon/dynapin/kp3s.json`
+- `~/Library/Application Support/OrcaSlicer/system/Kingroon/dynapin/kp3s.json`
+
+ソース側やアプリ内のJSONを更新しても、これらの優先ファイルが古いままだと、スライス結果には古い設定値（例: `pull_gcode` の `y_origin_offset`）が使われます。設定ファイルと実際の結果が食い違う場合は、まずこの検索順で実際に読まれるファイルを確認してください。設定をそろえるには、優先ファイルも同じ内容に更新するか、不要な優先ファイルを退避してから再スライスします。
+
 ---
 
 ## 完全な設定例（KP3S）
