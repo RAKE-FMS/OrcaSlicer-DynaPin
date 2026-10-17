@@ -137,7 +137,7 @@ static LocalBlocker reference_blocker_for_pin_shift(const Config& config, const 
     const double        y       = pin_y(config, pin);
     const BlockerZRange z_range = blocker_z_range(config, pin);
     const double        block_y = y - 7.2;
-    const double        min_x   = config.pull_gcode.x_front;
+    const double        min_x   = support_x_front(config);
     const double        max_x   = max_x_bed;
     const double        min_y   = block_y - 0.5 * config.blocker_width_y;
     const double        max_y   = block_y + 0.5 * config.blocker_width_y;

@@ -1,7 +1,37 @@
 # DynaPin 設定ファイル仕様
 
 DynaPinはプリンタのY軸側面に取り付けたピンアレイを使って、印刷途中にピンを引き出す機能です。  
-本ドキュメントではプリンタごとに用意するJSON設定ファイルのスキーマと、各設定値がスライサ上でどう使われるかを説明します。
+本ドキュメントではプリンタごとに用意するJSON設定ファイルのスキーマと、各設定値がどう使われるかを説明します。
+
+`kp3s.json` はOrcaSlicerとPython検証コードで共用します。`normal`・`alternating`・`reverted`を動作モードごとに分け、各モードのX座標・速度・移動量を独立して設定します。alternatingでは`alternating.normal`と`alternating.reverted`をrowごとに切り替えます。旧形式のJSONは読み込みエラーになります。
+
+## Pythonで引き出し動作を検証する
+
+リポジトリのルートで実行します。Python標準ライブラリだけを使用します。
+
+```bash
+# JSONのtypeに従う（現在はalternating）
+python3 scripts/generate_dynapin_pull_gcode.py --pins "0,0; 1,0" --output /tmp/alternating.gcode
+
+# 移植前C++のピン単体動作を比較用に再現する
+python3 scripts/generate_dynapin_pull_gcode.py --pins "0,0; 1,0" --current --output /tmp/current.gcode
+
+# typeを一時的に上書きし、接近Yと係合Yを入れ替える
+python3 scripts/generate_dynapin_pull_gcode.py --pins "0,0; 1,0" --type reverted --output /tmp/reverted.gcode
+```
+
+`--config` でJSONパスを指定できます。省略時は、このREADMEと同じディレクトリの `kp3s.json` を読みます。
+まずリポジトリ内の `old-models/min/min.gcode` を読み込み、内容を変更せず出力の先頭にコピーして、その後に引き出しG-codeを追記します。`--base-file /path/to/min.gcode` で別の読み込み元を指定できます。元ファイルは上書きしません。
+元の改行・バイト列を保持し、末尾に改行がない場合だけ追記との境界に改行を1つ加えます。読み込み元が存在しない場合はエラーにして、出力ファイルを変更しません。
+`--output` 省略時は標準出力へ出力します。ピンは0始まりで、指定したピンだけを高さ・列順に並べ、重複を取り除きます。
+`--type normal` は全段にnormalのYオフセットを適用します。`--current` は`normal`のX座標・速度・動作値を使い、向き別オフセットを適用せず、旧 `z_offset` に相当する値として `normal.retreat_z_lift` を使います。
+
+出力は `min.gcode` の内容に続いて `G21`（mm）・`G90`（絶対座標）と引き出し動作を含みます。ホーミング・加熱・押出などの初期化は、読み込んだ `min.gcode` の内容に従います。Pythonはプリンタへの送信やスライサのレイヤー判定・Z-hopは行いません。
+`--return-position X Y Z` を指定した場合だけ、全ピン処理後に一度、XY→Zの順で指定座標へ戻ります。復帰速度は選択モードの設定値を使います（alternatingでは`alternating.normal`の速度）。
+
+```bash
+python3 -m unittest discover -s tests/scripts -p test_generate_dynapin_pull_gcode.py -v
+```
 
 ---
 
@@ -22,7 +52,7 @@ Z軸 (印刷高さ)
 
 指定したレイヤー（ピンのZ高さ）に達したとき、ノズルがX軸を移動してピンを引き出す。
 
-### ピン引き出しのGコード動作
+### 現行比較モードのピン引き出し動作（`--current`）
 
 ```
 x_hook  x_latch             x_front
@@ -38,8 +68,25 @@ x_hook  x_latch             x_front
 5. G1 X(x_front)                                    ← 前面まで引き出す（高速）
 6. G1 X(x_front + disengage_x_offset) Y(pull_y + approach_y_offset)
                                                     ← XY同時移動でピンを外す（低速）
-7. G1 Z(pull_z + z_offset)                           ← Z退避（低速）
+7. G1 Z(pull_z + retreat_z_lift)                     ← Z退避（低速）
 ```
+
+`reverted` は上記の `pull_y + approach_y_offset` と `pull_y` を入れ替えます。Y位置を反転して新しい位置を作るのではなく、接近位置と係合位置を交換します。Z動作は現行比較モードと同じです。
+
+`alternating` は `row % 2 == alternating.row_parity` の段をreverted、それ以外をnormalにします。両者とも次の6動作で、現在の設定ではnormalの開始Yがrevertedより8.8mm大きくなります。
+
+```text
+1. Y = pull_y + approach_y_offset
+2. X = x_hook, Z = pull_z + approach_z_offset       （XZ同時移動）
+3. X = x_latch
+4. Z = 2のZ - engage_z_drop                        （Zで係合）
+5. X = x_front                                    （引き出し）
+6. X = x_front + disengage_x_offset,
+   Z = 4のZ + disengage_z_lift                     （XZ同時移動で離脱）
+```
+
+alternatingでは手順1のYを最後まで維持し、離脱後に `retreat_z_lift` を追加しません。
+現在のrow=0,col=0（reverted）はY=3.7、Z=11→6→11。row=1,col=0（normal）はY=12.5、Z=18.4→13.4→18.4です。
 
 ### サポート材の除外領域
 
@@ -116,9 +163,11 @@ Z
 
 引き抜きG-codeの座標：
 ```
-pull_y = pull_origin.y + col × pitch.col_y + pull_gcode.y_offset
+pull_y = pull_origin.y + col × pitch.col_y + 選ばれた向きのy_offset
 pull_z = pull_origin.z + row × pitch.row_z
 ```
+
+`--current` 以外では `pull_y` に、選ばれた向きの `y_origin_offset` を加えます。`alternating` の場合だけ、さらに選ばれた向きの `alternating_y_offset`（現在は両方-1mm）を加えます。単一向きモードと現行比較には適用しません。`support_origin` はこれらの動作オフセットとは独立です。
 
 サポートブロッカー上端の座標：
 ```
@@ -147,44 +196,103 @@ blocker_z_min = blocker_z_max - blocker_height_z
 | `blocker_width_y` | number | ○ | サポートブロッカーのY方向幅 [mm] |
 | `blocker_height_z` | number | – | サポートブロッカーの上端から下方向への高さ [mm]（省略時 0） |
 
-X範囲は `pull_gcode.x_front` とプリンタの `printable_area` から自動計算されるため、X位置やX幅をここへ記述しません。
+サポート除外領域・仮想支持面・プレビューのX範囲は、選択中の動作モードの `x_front` とプリンタの `printable_area` から自動計算されます。alternatingの場合はnested normal/revertedの小さい方の`x_front`を使い、両方の引き出し経路を含めます。引き出し用のY・Z補正はサポート座標に適用しません。
 
 ---
 
 ### `pull_gcode` セクション（必須）
 
-ピン引き出し動作のGコードパラメータを定義します。
+OrcaSlicerとPythonで共通のピン引き出し動作を定義します。次の形で、単独normal・alternating・単独revertedの設定を分離します。各プロファイルはX座標・速度・移動量を個別に持つため、あるモードの値を変えても別モードには影響しません。完全な値は[`kp3s.json`](kp3s.json)を参照してください。
 
 ```json
 "pull_gcode": {
-  "x_hook": 160,
-  "x_latch": 168,
-  "x_front": 30,
-  "y_offset": 4,
-  "z_offset": 4,
-  "approach_y_offset": -4,
-  "pull_feedrate_fast": 3000,
-  "disengage_x_offset": 1.5,
-  "disengage_z_offset": 4,
-  "feed_rate": 1500,
-  "fast_feed_rate": 5000
+  "type": "alternating",
+  "normal": {
+    "x_hook": 169,
+    "x_latch": 174,
+    "x_front": 20,
+    "fast_feed_rate": 5000,
+    "feed_rate": 1500,
+    "pull_feedrate_fast": 3000,
+    "y_origin_offset": 7,
+    "y_offset": -3.5,
+    "approach_y_offset": -4,
+    "approach_z_offset": 5,
+    "engage_z_drop": 5,
+    "disengage_x_offset": 1.5,
+    "disengage_z_lift": 5,
+    "retreat_z_lift": 4
+  },
+  "alternating": {
+    "row_parity": 0,
+    "normal": {
+      "x_hook": 169,
+      "x_latch": 174,
+      "x_front": 20,
+      "fast_feed_rate": 5000,
+      "feed_rate": 1500,
+      "pull_feedrate_fast": 3000,
+      "y_origin_offset": 7,
+      "alternating_y_offset": -1,
+      "y_offset": -3.5,
+      "approach_y_offset": -4,
+      "approach_z_offset": 5,
+      "engage_z_drop": 5,
+      "disengage_x_offset": 1.5,
+      "disengage_z_lift": 5,
+      "retreat_z_lift": 4
+    },
+    "reverted": {
+      "x_hook": 169,
+      "x_latch": 174,
+      "x_front": 20,
+      "fast_feed_rate": 5000,
+      "feed_rate": 1500,
+      "pull_feedrate_fast": 3000,
+      "y_origin_offset": -1.8,
+      "alternating_y_offset": -1,
+      "y_offset": -3.5,
+      "approach_y_offset": -4,
+      "approach_z_offset": 5,
+      "engage_z_drop": 5,
+      "disengage_x_offset": 1.5,
+      "disengage_z_lift": 5,
+      "retreat_z_lift": 4
+    }
+  },
+  "reverted": {
+    "x_hook": 169,
+    "x_latch": 174,
+    "x_front": 20,
+    "fast_feed_rate": 5000,
+    "feed_rate": 1500,
+    "pull_feedrate_fast": 3000,
+    "y_origin_offset": 0,
+    "y_offset": -3.5,
+    "approach_y_offset": -4,
+    "approach_z_offset": 5,
+    "engage_z_drop": 5,
+    "disengage_x_offset": 1.5,
+    "disengage_z_lift": 5,
+    "retreat_z_lift": 4
+  }
 }
 ```
 
-| フィールド | 型 | 必須 | 説明 |
-|---|---|---|---|
-| `x_hook` | number | ○ | フック位置のX座標 [mm]（ピンに引っかかる位置） |
-| `x_latch` | number | ○ | ラッチ位置のX座標 [mm]（ピンを捕捉する位置） |
-| `x_front` | number | ○ | 最終引き出し位置のX座標 [mm] |
-| `y_offset` | number | – | ピンY座標へのオフセット [mm]（省略時 0） |
-| `z_offset` | number | – | 引き出し完了後の退避Z量 [mm]（省略時 0）。`pull_z + z_offset` の高さまでZを上げる |
-| `approach_y_offset` | number | – | 接近時にY座標をさらにずらす量 [mm]（省略時 -4）。フック進入時にピンと干渉しないよう手前にずれる |
-| `pull_feedrate_fast` | number | – | 引き出し（`x_front`への移動）時の送り速度 [mm/min]（省略時 3000） |
-| `disengage_x_offset` | number | – | 外し動作でXを `x_front` から追加移動する量 [mm]（省略時 1.5） |
-| `feed_rate` | number | – | ラッチ・係合・外し動作の送り速度 [mm/min]（省略時 1200） |
-| `fast_feed_rate` | number | – | 接近・フック移動の送り速度 [mm/min]（省略時 6000） |
+`alternating.normal`と`alternating.reverted`は`normal`・`reverted`と同じ項目を持ち、さらに`alternating_y_offset`が必須です。`row_parity`はalternatingでrevertedにする段で、0は偶数、1は奇数です。座標・移動量はmm、送り速度はmm/minです。
 
-> `feed_rate` は `pull_feedrate`、`fast_feed_rate` は `travel_feedrate` としても記述できます。
+| フィールド | 説明 |
+|---|---|
+| `type` | `normal` / `alternating` / `reverted` |
+| `normal` / `reverted` | 各単独モードの設定。すべてのX座標・速度・移動量を含む |
+| `alternating.normal` / `alternating.reverted` | alternating内のrow別設定。単独モードとは独立 |
+| 各プロファイルの `x_hook` / `x_latch` / `x_front` | フック進入・ラッチ・引き出し先の絶対X座標 |
+| 各プロファイルの `fast_feed_rate` / `feed_rate` / `pull_feedrate_fast` | 接近・ラッチ等・引き出しの送り速度 |
+| 各プロファイルの `y_origin_offset` / `y_offset` | pull_originおよび列ごとのY基準への加算量 |
+| 各プロファイルの `approach_y_offset` | 接近Yと係合Yの差。単独revertedでは両者を交換 |
+| alternatingプロファイルの `alternating_y_offset` | alternatingだけに加えるY補正（現在は両方-1mm） |
+| `alternating.row_parity` | alternatingでrevertedにする段。0は偶数、1は奇数 |
+| 各プロファイルのZ・離脱項目 | approach/engage/disengage/retreatで使うZ量とX離脱量 |
 
 ---
 
@@ -211,24 +319,13 @@ X範囲は `pull_gcode.x_front` とプリンタの `printable_area` から自動
 
 ## 旧設定からの変更点
 
-`center_x`、`width_x`、`x_min`、`x_max` は使用しません。X範囲は必ず `pull_gcode.x_front..bed_max_x` になります。
+旧形式の `pull_gcode` は読み込みエラーになります。現在の `kp3s.json` を元に移行してください。
 
-`grid.origin`、`grid.physical_origin`、`origin_row`、`origin_col`、`origin_y`、`origin_z` は読み込まれません。新しい設定では必ず `pull_origin` と `support_origin` を使用してください。
-
-旧 `pitch.row_y` と `pitch.col_z` も読み込まれません。新しい設定では `pitch.row_z` と `pitch.col_y` を使用してください。
-
-| 旧フィールド | 現在の解釈 |
-|---|---|
-| `pull_gcode.pull_feedrate` | `feed_rate` の代替名 |
-| `pull_gcode.travel_feedrate` | `fast_feed_rate` の代替名 |
-
-旧形式のJSONを使う場合は、`support_exclusion` からX関連フィールドを削除し、プリンタの `printable_area` が正しく設定されていることを確認してください。
-
-| フィールド | 省略時のデフォルト |
-|---|---|
-| `pull_gcode.approach_y_offset` | `-4.0` mm |
-| `pull_gcode.pull_feedrate_fast` | `3000` mm/min |
-| `pull_gcode.disengage_x_offset` | `1.5` mm |
+- `type`、`normal`、`alternating`、`reverted` を明示し、各プロファイルに必要な全項目を設定します。
+- X座標と速度も各プロファイルに置きます。`alternating.normal` / `alternating.reverted` は単独モードとは独立した設定です。
+- 旧 `z_offset` は `retreat_z_lift` に置き換えます。
+- サポートのX範囲は選択中プロファイルの`x_front..bed_max_x`です。alternatingでは2つの`x_front`のうち小さい値を使います。`support_exclusion` にX関連フィールドは追加しません。
+- `grid` は `pull_origin` / `support_origin`、`pitch.row_z` / `pitch.col_y` を使います。行・列番号は0始まりです。
 
 ---
 
@@ -241,6 +338,13 @@ X範囲は `pull_gcode.x_front` とプリンタの `printable_area` から自動
 3. `{resources_dir}/profiles/{path}`
 4. `{resources_dir}/{path}`
 5. カレントディレクトリからの相対パス
+
+上位に同じパスのファイルがあると、後続の検索先にあるJSONは使われません。macOSでは通常、`{data_dir}` は `~/Library/Application Support/OrcaSlicer` です。そのため、たとえば `dynapin_config_path` が `Kingroon/dynapin/kp3s.json` の場合、次のユーザー設定またはシステム設定がアプリに同梱された `Resources/profiles/Kingroon/dynapin/kp3s.json` より優先されます。
+
+- `~/Library/Application Support/OrcaSlicer/user/Kingroon/dynapin/kp3s.json`
+- `~/Library/Application Support/OrcaSlicer/system/Kingroon/dynapin/kp3s.json`
+
+ソース側やアプリ内のJSONを更新しても、これらの優先ファイルが古いままだと、スライス結果には古い設定値（例: `pull_gcode` の `y_origin_offset`）が使われます。設定ファイルと実際の結果が食い違う場合は、まずこの検索順で実際に読まれるファイルを確認してください。設定をそろえるには、優先ファイルも同じ内容に更新するか、不要な優先ファイルを退避してから再スライスします。
 
 ---
 

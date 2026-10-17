@@ -59,14 +59,14 @@ TEST_CASE("DynaPin model names are parsed", "[DynaPinPreview]")
 TEST_CASE("DynaPin pull G-code comments match preview contract", "[DynaPin]")
 {
     DynaPin::Config config;
-    config.pull_origin_y       = 10.;
-    config.pull_origin_z       = 20.;
-    config.row_pitch_z         = 2.;
-    config.col_pitch_y         = 1.;
-    config.pull_gcode.x_hook   = 100.;
-    config.pull_gcode.x_latch  = 110.;
-    config.pull_gcode.x_front  = 20.;
-    config.pull_gcode.y_offset = -3.5;
+    config.pull_origin_y              = 10.;
+    config.pull_origin_z              = 20.;
+    config.row_pitch_z                = 2.;
+    config.col_pitch_y                = 1.;
+    config.pull_gcode.normal.x_hook   = 100.;
+    config.pull_gcode.normal.x_latch  = 110.;
+    config.pull_gcode.normal.x_front  = 20.;
+    config.pull_gcode.normal.y_offset = -3.5;
 
     const std::string gcode = DynaPin::pull_gcode_for_pin(config, {5, 2});
 
@@ -82,8 +82,8 @@ TEST_CASE("DynaPin pull G-code comments match preview contract", "[DynaPin]")
 TEST_CASE("DynaPin return keeps clearance until XY is restored", "[DynaPin]")
 {
     DynaPin::Config config;
-    config.pull_gcode.travel_feedrate = 5000.;
-    config.pull_gcode.pull_feedrate   = 1500.;
+    config.pull_gcode.normal.fast_feed_rate = 5000.;
+    config.pull_gcode.normal.feed_rate      = 1500.;
 
     const std::string gcode = DynaPin::return_gcode(config, Vec3d(102.667, 97.188, 59.3));
 
@@ -96,17 +96,17 @@ TEST_CASE("DynaPin return keeps clearance until XY is restored", "[DynaPin]")
 TEST_CASE("DynaPin support and pull coordinates are independent", "[DynaPin]")
 {
     DynaPin::Config config;
-    config.pull_origin_y       = 14.;
-    config.pull_origin_z       = 5.;
-    config.support_origin_y    = 18.;
-    config.support_origin_z    = 7.55;
-    config.row_pitch_z         = 7.4;
-    config.col_pitch_y         = 12.4;
-    config.blocker_height_z    = 5.;
-    config.pull_gcode.x_hook   = 160.;
-    config.pull_gcode.x_latch  = 165.;
-    config.pull_gcode.x_front  = 30.;
-    config.pull_gcode.y_offset = -3.5;
+    config.pull_origin_y              = 14.;
+    config.pull_origin_z              = 5.;
+    config.support_origin_y           = 18.;
+    config.support_origin_z           = 7.55;
+    config.row_pitch_z                = 7.4;
+    config.col_pitch_y                = 12.4;
+    config.blocker_height_z           = 5.;
+    config.pull_gcode.normal.x_hook   = 160.;
+    config.pull_gcode.normal.x_latch  = 165.;
+    config.pull_gcode.normal.x_front  = 30.;
+    config.pull_gcode.normal.y_offset = -3.5;
 
     const DynaPin::Pin pin{1, 1};
     CHECK(DynaPin::pin_y(config, pin) == 30.4);
