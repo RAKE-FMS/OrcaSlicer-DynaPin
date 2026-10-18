@@ -952,8 +952,10 @@ void StackImpl::take_snapshot(const std::string& snapshot_name, const Slic3r::Mo
 
     // Save the snapshot info.
 	m_snapshots.emplace_back(snapshot_name, m_current_time, model.id().id, snapshot_data);
-	if (topmost_saved)
-		// Restore the "saved" timestamp.
+    for (int i = 0; i < plate_list.get_plate_count(); ++i)
+        m_snapshots.back().preview_captures.push_back(plate_list.get_plate(i)->preview_capture());
+    if (topmost_saved)
+        // Restore the "saved" timestamp.
 		m_saved_snapshot_time = m_current_time;
 	m_active_snapshot_time = ++ m_current_time;
 	// Save snapshot info of the last "current" aka "top most" state, that is only being serialized
@@ -1003,8 +1005,29 @@ void StackImpl::load_snapshot(size_t timestamp, Slic3r::Model& model, Slic3r::GU
 	if (it_snapshot == m_snapshots.end() || it_snapshot->timestamp != timestamp)
 		throw Slic3r::RuntimeError((boost::format("Snapshot with timestamp %1% does not exist") % timestamp).str());
 
-	m_active_snapshot_time = timestamp;
-	// BBS: reuse objects for backup, objects should clear children before load them
+    const auto first_change = std::lower_bound(m_snapshots.begin(), m_snapshots.end(),
+                                               Snapshot(std::min(timestamp, m_active_snapshot_time)));
+    const auto last_change = std::lower_bound(m_snapshots.begin(), m_snapshots.end(), Snapshot(std::max(timestamp, m_active_snapshot_time)));
+    const bool capture_only = std::any_of(first_change, last_change,
+                                          [](const Snapshot& snapshot) {
+                                              return !snapshot.is_topmost() &&
+                                                     snapshot.snapshot_data.snapshot_type == SnapshotType::PreviewCapture;
+                                          }) &&
+                              std::all_of(first_change, last_change, [](const Snapshot& snapshot) {
+                                  // undo() captures the temporary topmost state and advances the active timestamp before loading.
+                                  // That bookkeeping snapshot does not represent another user action.
+                                  return snapshot.is_topmost() || snapshot.snapshot_data.snapshot_type == SnapshotType::PreviewCapture ||
+                                         snapshot.snapshot_data.snapshot_type == SnapshotType::Selection;
+                              });
+    if (capture_only && it_snapshot->preview_captures.size() == size_t(plate_list.get_plate_count())) {
+        for (int i = 0; i < plate_list.get_plate_count(); ++i)
+            plate_list.get_plate(i)->set_preview_capture(it_snapshot->preview_captures[i]);
+        m_active_snapshot_time = timestamp;
+        return;
+    }
+
+    m_active_snapshot_time = timestamp;
+    // BBS: reuse objects for backup, objects should clear children before load them
 	model.collect_reusable_objects(m_reusable_objects);
 	// model.clear_objects();
 	model.clear_materials();

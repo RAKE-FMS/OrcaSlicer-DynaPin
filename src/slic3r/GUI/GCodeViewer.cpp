@@ -322,11 +322,13 @@ void GCodeViewer::load_dynapin_overlays(const Print& print)
 }
 
 void GCodeViewer::render_dynapin_overlays()
+{ render_dynapin_overlays(wxGetApp().plater()->get_camera(), wxGetApp().get_shader("gouraud_light")); }
+
+void GCodeViewer::render_dynapin_overlays(const Camera& camera, GLShaderProgram* shader)
 {
     if (!m_dynapin_blocker_model.is_initialized() && !m_dynapin_pin_model.is_initialized())
         return;
 
-    GLShaderProgram* shader = wxGetApp().get_shader("gouraud_light");
     if (shader == nullptr)
         return;
 
@@ -337,7 +339,6 @@ void GCodeViewer::render_dynapin_overlays()
     shader->start_using();
     shader->set_uniform("emission_factor", 0.0f);
 
-    const Camera&      camera      = wxGetApp().plater()->get_camera();
     const Transform3d& view_matrix = camera.get_view_matrix();
     // Box geometry is already expressed in world (machine) coordinates, so the
     // model matrix is the identity.
@@ -349,9 +350,9 @@ void GCodeViewer::render_dynapin_overlays()
     // Blocked regions are translucent: don't write depth so the toolpaths behind
     // them stay visible. The pin markers are nearly opaque and do write depth.
     glsafe(::glDepthMask(GL_FALSE));
-    m_dynapin_blocker_model.render();
+    m_dynapin_blocker_model.render(shader);
     glsafe(::glDepthMask(GL_TRUE));
-    m_dynapin_pin_model.render();
+    m_dynapin_pin_model.render(shader);
 
     shader->stop_using();
 
@@ -1114,8 +1115,10 @@ void GCodeViewer::SequentialView::render(const bool                  has_render_
                             gcode_id);
 }
 
-GCodeViewer::GCodeViewer()
+GCodeViewer::GCodeViewer(bool with_ui)
 {
+    if (!with_ui)
+        return;
     m_moves_slider  = new IMSlider(0, 0, 0, 100, wxSL_HORIZONTAL);
     m_layers_slider = new IMSlider(0, 0, 0, 100, wxSL_VERTICAL);
 }
@@ -2339,7 +2342,7 @@ void GCodeViewer::load_shells(const Print& print, bool initialized, bool force_p
     // adds objects' volumes
     // BBS: fix the issue that object_idx is not assigned as index of Model.objects array
     int                    object_count = 0;
-    const ModelObjectPtrs& model_objs   = wxGetApp().model().objects;
+    const ModelObjectPtrs& model_objs   = print.objects().front()->model_object()->get_model()->objects;
     for (const PrintObject* obj : print.objects()) {
         const ModelObject* model_obj = obj->model_object();
 
@@ -2434,9 +2437,10 @@ void GCodeViewer::load_shells(const Print& print, bool initialized, bool force_p
                                     m_shells.print_id % m_shells.print_modify_count % object_count % m_shells.volumes.volumes.size();
 }
 
-void GCodeViewer::render_toolpaths()
+void GCodeViewer::render_toolpaths() { render_toolpaths(wxGetApp().plater()->get_camera()); }
+
+void GCodeViewer::render_toolpaths(const Camera& camera)
 {
-    const Camera&           camera                = wxGetApp().plater()->get_camera();
     const libvgcode::Mat4x4 converted_view_matrix = libvgcode::convert(
         static_cast<Matrix4f>(camera.get_view_matrix().matrix().cast<float>()));
     const libvgcode::Mat4x4 converted_projetion_matrix = libvgcode::convert(
@@ -2450,7 +2454,7 @@ void GCodeViewer::render_toolpaths()
     m_viewer.render(converted_view_matrix, converted_projetion_matrix);
 
 #if ENABLE_NEW_GCODE_VIEWER_DEBUG
-    if (is_legend_shown()) {
+    if (m_moves_slider && is_legend_shown()) {
         ImGuiWrapper& imgui    = *wxGetApp().imgui();
         const Size    cnv_size = wxGetApp().plater()->get_current_canvas3D()->get_canvas_size();
         imgui.set_next_window_pos(static_cast<float>(cnv_size.get_width()), 0.0f, ImGuiCond_Always, 1.0f, 0.0f);
@@ -2609,6 +2613,95 @@ void GCodeViewer::render_toolpaths()
         imgui.end();
     }
 #endif // ENABLE_NEW_GCODE_VIEWER_DEBUG
+}
+
+void GCodeViewer::capture_display_settings(PreviewCapture& capture) const
+{
+    capture.role_colors.clear();
+    for (size_t i = 0; i < libvgcode::GCODE_EXTRUSION_ROLES_COUNT; ++i)
+        capture.role_colors.push_back(m_viewer.get_extrusion_role_color(static_cast<libvgcode::EGCodeExtrusionRole>(i)));
+    capture.dynapin = m_dynapin_overlays_visible;
+    capture.shells  = m_shells.previewing || m_shells.visible;
+    if (!m_shells.volumes.empty())
+        capture.shell_opacity = m_shells.volumes.volumes.front()->color.a();
+}
+
+BoundingBoxf3 GCodeViewer::capture_bounding_box(bool dynapin) const
+{
+    BoundingBoxf3 box = m_paths_bounding_box;
+    box.merge(m_shell_bounding_box);
+    if (dynapin) {
+        if (m_dynapin_blocker_model.is_initialized())
+            box.merge(m_dynapin_blocker_model.get_bounding_box());
+        if (m_dynapin_pin_model.is_initialized())
+            box.merge(m_dynapin_pin_model.get_bounding_box());
+    }
+    return box;
+}
+
+void GCodeViewer::load_for_capture(const GCodeProcessorResult& result, const Print& print, const PreviewCapture& capture)
+{
+    m_viewer.init(reinterpret_cast<const char*>(glGetString(GL_VERSION)));
+    m_viewer.load(libvgcode::convert(result, result.extruder_colors, {}, m_viewer));
+    m_viewer.set_view_type(libvgcode::EViewType::FeatureType);
+    for (size_t i = 0; i < libvgcode::GCODE_EXTRUSION_ROLES_COUNT; ++i) {
+        const auto role = static_cast<libvgcode::EGCodeExtrusionRole>(i);
+        if (!m_viewer.is_extrusion_role_visible(role))
+            m_viewer.toggle_extrusion_role_visibility(role);
+        if (i < capture.role_colors.size())
+            m_viewer.set_extrusion_role_color(role, capture.role_colors[i]);
+    }
+    for (size_t i = 0; i < libvgcode::OPTION_TYPES_COUNT; ++i) {
+        const auto option  = static_cast<libvgcode::EOptionType>(i);
+        const bool visible = option == libvgcode::EOptionType::Seams;
+        if (m_viewer.is_option_visible(option) != visible)
+            m_viewer.toggle_option_visibility(option);
+    }
+    if (m_viewer.is_top_layer_only_view_range())
+        m_viewer.toggle_top_layer_only_view_range();
+    const auto range = m_viewer.get_view_full_range();
+    m_viewer.set_view_visible_range(range.front(), range.back());
+    const auto box       = m_viewer.get_extrusion_bounding_box();
+    m_paths_bounding_box = BoundingBoxf3(libvgcode::convert(box[0]).cast<double>(), libvgcode::convert(box[1]).cast<double>());
+    if (capture.shells && !print.objects().empty()) {
+        load_shells(print, true, true);
+        set_shell_transparency(capture.shell_opacity);
+        m_capture_shell_objects = print.objects().front()->model_object()->get_model()->objects;
+        decode_colors(result.extruder_colors, m_capture_shell_colors);
+        if (m_capture_shell_colors.empty())
+            m_capture_shell_colors.push_back(ColorRGBA::WHITE());
+        for (auto* volume : m_shells.volumes.volumes) {
+            const size_t id = size_t(std::max(1, volume->extruder_id) - 1);
+            if (id < m_capture_shell_colors.size()) {
+                volume->color = m_capture_shell_colors[id];
+                volume->color.a(capture.shell_opacity);
+                volume->set_render_color();
+            }
+        }
+    }
+    load_dynapin_overlays(print);
+}
+
+void GCodeViewer::render_capture(const Camera& camera, GLShaderProgram* shader, bool dynapin)
+{
+    glEnable(GL_DEPTH_TEST);
+    if (shader && !m_shells.volumes.empty()) {
+        shader->start_using();
+        shader->set_uniform("emission_factor", 0.1f);
+        shader->set_uniform("z_far", camera.get_far_z());
+        shader->set_uniform("z_near", camera.get_near_z());
+        glDepthMask(GL_FALSE);
+        GLVolumeCollection::RenderContext context{shader, m_capture_shell_objects, m_capture_shell_colors};
+        m_shells.volumes.render(GLVolumeCollection::ERenderType::Transparent, false, camera.get_view_matrix(),
+                                camera.get_projection_matrix(), {camera.get_viewport()[2], camera.get_viewport()[3]}, nullptr, false,
+                                &context);
+        glDepthMask(GL_TRUE);
+        shader->set_uniform("emission_factor", 0.0f);
+        shader->stop_using();
+    }
+    render_toolpaths(camera);
+    if (dynapin)
+        render_dynapin_overlays(camera, shader);
 }
 
 void GCodeViewer::render_shells(int canvas_width, int canvas_height)

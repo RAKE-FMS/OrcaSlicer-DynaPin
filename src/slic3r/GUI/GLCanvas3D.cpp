@@ -1,5 +1,7 @@
 #include "libslic3r/libslic3r.h"
 #include "GLCanvas3D.hpp"
+#include "PreviewCaptureRenderer.hpp"
+#include <wx/filedlg.h>
 
 #include <igl/unproject.h>
 
@@ -3345,7 +3347,7 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
 #else  /* __APPLE__ */
         case WXK_CONTROL_Y:
 #endif /* __APPLE__ */
-            if (m_canvas_type == CanvasView3D || m_canvas_type == CanvasAssembleView) {
+            if (m_canvas_type == CanvasView3D || m_canvas_type == CanvasAssembleView || m_canvas_type == CanvasPreview) {
                 post_event(SimpleEvent(EVT_GLCANVAS_REDO));
             }
             break;
@@ -3355,8 +3357,7 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
 #else  /* __APPLE__ */
         case WXK_CONTROL_Z:
 #endif /* __APPLE__ */
-            // only support redu/undo in CanvasView3D
-            if (m_canvas_type == CanvasView3D || m_canvas_type == CanvasAssembleView) {
+            if (m_canvas_type == CanvasView3D || m_canvas_type == CanvasAssembleView || m_canvas_type == CanvasPreview) {
                 post_event(SimpleEvent(EVT_GLCANVAS_UNDO));
             }
             break;
@@ -8593,6 +8594,95 @@ void GLCanvas3D::_render_return_toolbar() const
     imgui.end();
 }
 
+void GLCanvas3D::_record_preview_capture()
+{
+    auto* plater = wxGetApp().plater();
+    auto* plate  = plater->get_partplate_list().get_curr_plate();
+    if (!plate || !m_gcode_viewer.has_data())
+        return;
+    PreviewCapture  capture    = plater->get_camera().capture_view(plate->get_origin());
+    const ColorRGBA background = m_is_dark ? DEFAULT_BG_LIGHT_COLOR_DARK : DEFAULT_BG_LIGHT_COLOR;
+    for (size_t i = 0; i < 4; ++i)
+        capture.background[i] = background[i];
+    capture.dark        = m_is_dark;
+    capture.axes        = m_show_world_axes;
+    capture.grid        = wxGetApp().show_plate_gridlines();
+    capture.bed_model   = preview_capture_asset_path(m_bed.model_filename());
+    capture.bed_texture = preview_capture_asset_path(plater->get_partplate_list().get_logo_texture_filename());
+    plate->capture_bed_textures(capture);
+    m_gcode_viewer.capture_display_settings(capture);
+    capture.validate();
+    plater->take_snapshot(_u8L("Record preview capture view"), UndoRedo::SnapshotType::PreviewCapture);
+    plate->set_preview_capture(std::move(capture));
+    plater->set_plater_dirty(true);
+    set_as_dirty();
+}
+
+void GLCanvas3D::_restore_preview_capture()
+{
+    auto* plater = wxGetApp().plater();
+    auto* plate  = plater->get_partplate_list().get_curr_plate();
+    if (plate && plate->preview_capture()) {
+        Camera& camera = plater->get_camera();
+        // Keep the current canvas dimensions when restoring in the GUI.
+        const auto viewport = camera.get_viewport();
+        auto       capture  = *plate->preview_capture();
+        // Preserve the visible vertical span if the window was resized since recording.
+        capture.zoom *= double(viewport[3]) / capture.height;
+        capture.width  = viewport[2];
+        capture.height = viewport[3];
+        camera.restore_view(capture, plate->get_origin());
+        set_as_dirty();
+    }
+}
+
+void GLCanvas3D::_delete_preview_capture()
+{
+    auto* plater = wxGetApp().plater();
+    auto* plate  = plater->get_partplate_list().get_curr_plate();
+    if (plate && plate->preview_capture()) {
+        plater->take_snapshot(_u8L("Delete preview capture view"), UndoRedo::SnapshotType::PreviewCapture);
+        plate->set_preview_capture(std::nullopt);
+        plater->set_plater_dirty(true);
+        set_as_dirty();
+    }
+}
+
+void GLCanvas3D::_export_preview_capture()
+{
+    auto* plater = wxGetApp().plater();
+    auto* plate  = plater->get_partplate_list().get_curr_plate();
+    if (!plate || !plate->preview_capture() || !plate->is_slice_result_valid() || plater->is_background_process_slicing())
+        return;
+    wxFileDialog dialog(m_canvas, _L("Save preview image"), wxEmptyString, "preview.png", "PNG (*.png)|*.png",
+                        wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+    if (dialog.ShowModal() != wxID_OK || !_set_current() || plater->is_background_process_slicing() || !plate->is_slice_result_valid())
+        return;
+    try {
+        export_preview_capture(into_u8(dialog.GetPath()), *plate);
+    } catch (const std::exception& e) {
+        wxMessageBox(from_u8(e.what()), _L("Preview capture failed"), wxOK | wxICON_WARNING, m_canvas);
+    }
+}
+
+void GLCanvas3D::export_preview_capture(const std::string& path, PartPlate& plate)
+{
+    if (!plate.preview_capture())
+        return;
+    if (!_set_current())
+        throw std::runtime_error("Cannot activate the preview OpenGL context");
+    PrintBase*   base   = nullptr;
+    GCodeResult* result = nullptr;
+    plate.get_print(&base, &result, nullptr);
+    auto* print = dynamic_cast<Print*>(base);
+    if (!print || !result)
+        throw std::runtime_error("Preview toolpaths are unavailable");
+    result->lock();
+    ScopeGuard unlock_result([result] { result->unlock(); });
+    ScopeGuard redraw([this] { set_as_dirty(); });
+    export_preview_image(path, *plate.preview_capture(), *print, *result, plate, wxGetApp().get_opengl_manager());
+}
+
 void GLCanvas3D::_render_canvas_toolbar()
 {
     ImGuiWrapper& imgui = *wxGetApp().imgui();
@@ -8617,8 +8707,9 @@ void GLCanvas3D::_render_canvas_toolbar()
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {0, 0});
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, padding); // without padding images clipping
 
-    imgui.begin(_L("Canvas Toolbar"), ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar |
-                                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse); //
+    imgui.begin(_L("Canvas Toolbar"), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBackground |
+                                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar |
+                                          ImGuiWindowFlags_NoCollapse); //
 
     ImTextureID m_normal_id = m_gizmos.get_icon_texture_id(m_is_dark ? GLGizmosManager::MENU_ICON_NAME::IC_CANVAS_MENU_DARK :
                                                                        GLGizmosManager::MENU_ICON_NAME::IC_CANVAS_MENU);
@@ -8657,6 +8748,35 @@ void GLCanvas3D::_render_canvas_toolbar()
 
             float width = ImGui::CalcTextSize(tooltip_str.c_str()).x + imgui.scaled(2.0f);
             imgui.tooltip(tooltip_str, width);
+        }
+    }
+
+    if (m_canvas_type == ECanvasType::CanvasPreview) {
+        ImGui::Dummy({0, spacing.y});
+        const ImVec2 top_left  = ImGui::GetCursorScreenPos();
+        const bool   available = m_gcode_viewer.has_data();
+        if (ImGui::InvisibleButton("##record_preview_capture", btn_size) && available)
+            wxGetApp().CallAfter([this] { _record_preview_capture(); });
+        auto*        draw     = ImGui::GetWindowDrawList();
+        const auto*  plate    = wxGetApp().plater()->get_partplate_list().get_curr_plate();
+        const bool   recorded = plate && plate->preview_capture().has_value();
+        const ImU32  color = ImGui::GetColorU32(available ? (recorded ? ImGuiWrapper::COL_ORCA : ImGui::GetStyleColorVec4(ImGuiCol_Text)) :
+                                                            ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        const ImVec2 a     = top_left + ImVec2(7, 11) * sc;
+        draw->AddRect(a, top_left + ImVec2(29, 28) * sc, color, 3 * sc, 0, 1.5f * sc);
+        draw->AddCircle(top_left + ImVec2(18, 19) * sc, 5 * sc, color, 16, 1.5f * sc);
+        draw->AddLine(top_left + ImVec2(12, 10) * sc, top_left + ImVec2(24, 10) * sc, color, 3 * sc);
+        if (ImGui::IsItemHovered())
+            imgui.tooltip(_u8L("Record preview capture view. Right-click to restore, delete or export."), imgui.scaled(300.0f));
+        if (ImGui::BeginPopupContextItem("PreviewCaptureMenu")) {
+            if (ImGui::MenuItem(_u8L("Restore recorded view").c_str(), nullptr, false, recorded))
+                wxGetApp().CallAfter([this] { _restore_preview_capture(); });
+            if (ImGui::MenuItem(_u8L("Delete recorded view").c_str(), nullptr, false, recorded))
+                wxGetApp().CallAfter([this] { _delete_preview_capture(); });
+            const bool can_export = recorded && plate->is_slice_result_valid() && !wxGetApp().plater()->is_background_process_slicing();
+            if (ImGui::MenuItem(_u8L("Export preview PNG").c_str(), nullptr, false, can_export))
+                wxGetApp().CallAfter([this] { _export_preview_capture(); });
+            ImGui::EndPopup();
         }
     }
 

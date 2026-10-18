@@ -203,6 +203,32 @@ const std::string _3MF_COVER_FILE = "/Auxiliaries/.thumbnails/thumbnail_3mf.png"
 //const std::string PRINT_CONFIG_FILE = "Metadata/Slic3r_PE.config";
 //const std::string MODEL_CONFIG_FILE = "Metadata/Slic3r_PE_model.config";
 const std::string BBS_PRINT_CONFIG_FILE = "Metadata/print_profile.config";
+namespace Slic3r {
+static void load_preview_captures(mz_zip_archive& archive, PlateDataPtrs& plates, int index_offset = 0)
+{
+    const int entry = mz_zip_reader_locate_file(&archive, PREVIEW_CAPTURE_FILE, nullptr, 0);
+    if (entry < 0)
+        return;
+    try {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&archive, entry, &stat) || stat.m_uncomp_size > 1024 * 1024)
+            throw std::runtime_error("Preview capture metadata is too large");
+        std::string text(size_t(stat.m_uncomp_size), '\0');
+        if (!mz_zip_reader_extract_to_mem(&archive, entry, text.data(), text.size(), 0))
+            throw std::runtime_error("Cannot read preview capture metadata");
+        const auto captures = deserialize_preview_captures(text);
+        for (PlateData* plate : plates) {
+            auto it = captures.find(plate->plate_index - index_offset);
+            if (it != captures.end())
+                plate->preview_capture = it->second;
+        }
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(warning) << "Ignoring preview capture metadata: " << e.what();
+    }
+}
+
+} // namespace Slic3r
+
 const std::string BBS_PROJECT_CONFIG_FILE = "Metadata/project_settings.config";
 const std::string BBS_MODEL_CONFIG_FILE = "Metadata/model_settings.config";
 const std::string BBS_MODEL_CONFIG_RELS_FILE = "Metadata/_rels/model_settings.config.rels";
@@ -1576,6 +1602,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             it++;
         }
 
+        load_preview_captures(archive, plate_data_list);
         lock.close();
 
         return true;
@@ -1918,6 +1945,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
         }
 
+        if (!dont_load_config) {
+            PlateDataPtrs preview_plates;
+            for (const auto& item : m_plater_data)
+                preview_plates.push_back(item.second);
+            // Importer's plate IDs are one based, exported capture IDs are zero based.
+            load_preview_captures(archive, preview_plates, 1);
+        }
         lock.close();
 
         if (!m_is_bbl_3mf) {
@@ -2206,6 +2240,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             plate_data_list[it->first-1]->locked = it->second->locked;
             plate_data_list[it->first-1]->plate_index = it->second->plate_index-1;
             plate_data_list[it->first-1]->plate_name = it->second->plate_name;
+            plate_data_list[it->first - 1]->preview_capture = it->second->preview_capture;
             plate_data_list[it->first-1]->obj_inst_map = it->second->obj_inst_map;
             plate_data_list[it->first-1]->gcode_file = (m_load_restore || it->second->gcode_file.empty()) ? it->second->gcode_file : m_backup_path + "/" + it->second->gcode_file;
             plate_data_list[it->first-1]->gcode_prediction = it->second->gcode_prediction;
@@ -5915,6 +5950,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format(",before add thumbnails, count %1%") % thumbnail_data.size();
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" <<__LINE__ << boost::format(",top&&pick thumbnails, count %1%")%top_thumbnail_data.size();
 
+        std::map<int, PreviewCapture> captures;
+        for (const PlateData* plate : plate_data_list)
+            if (plate->preview_capture && (export_plate_idx < 0 || export_plate_idx == plate->plate_index))
+                captures.emplace(plate->plate_index, *plate->preview_capture);
+        if (!captures.empty()) {
+            const std::string text = serialize_preview_captures(captures);
+            if (!mz_zip_writer_add_mem(&archive, PREVIEW_CAPTURE_FILE, text.data(), text.size(), MZ_DEFAULT_COMPRESSION))
+                return false;
+        }
+
         //BBS: add thumbnail for each plate
         if (!m_skip_static) {
             std::vector<bool> thumbnail_status(plate_data_list.size(), false);
@@ -6345,6 +6390,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         stream << " <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\n";
         stream << " <Default Extension=\"model\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/>\n";
         stream << " <Default Extension=\"png\" ContentType=\"image/png\"/>\n";
+        stream << " <Default Extension=\"json\" ContentType=\"application/json\"/>\n";
         stream << " <Default Extension=\"gcode\" ContentType=\"text/x.gcode\"/>\n";
         stream << "</Types>";
 

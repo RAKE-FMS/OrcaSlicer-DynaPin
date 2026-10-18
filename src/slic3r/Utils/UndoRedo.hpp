@@ -9,6 +9,7 @@
 
 #include <libslic3r/ObjectID.hpp>
 #include <libslic3r/Config.hpp>
+#include <libslic3r/PreviewCapture.hpp>
 
 typedef double                          coordf_t;
 typedef std::pair<coordf_t, coordf_t>   t_layer_height_range;
@@ -27,22 +28,24 @@ namespace GUI {
 namespace UndoRedo {
 
 enum class SnapshotType : unsigned char {
-	// Some action modifying project state, outside any EnteringGizmo / LeavingGizmo interval.
-	Action,
-	// Some action modifying project state, inside some EnteringGizmo / LeavingGizmo interval.
-	GizmoAction,
-	// Selection change at the Plater.
-	Selection,
-	// New project, Reset project, Load project ...
-	ProjectSeparator,
-	// Entering a Gizmo, which opens a secondary Undo / Redo stack.
-	EnteringGizmo,
-	// Leaving a Gizmo, which closes a secondary Undo / Redo stack. 
-	// No action modifying a project state was done between EnteringGizmo / LeavingGizmo.
-	LeavingGizmoNoAction,
-	// Leaving a Gizmo, which closes a secondary Undo / Redo stack.
-	// Some action modifying a project state was done between EnteringGizmo / LeavingGizmo.
-	LeavingGizmoWithAction,
+    // Some action modifying project state, outside any EnteringGizmo / LeavingGizmo interval.
+    Action,
+    // Some action modifying project state, inside some EnteringGizmo / LeavingGizmo interval.
+    GizmoAction,
+    // Selection change at the Plater.
+    Selection,
+    // New project, Reset project, Load project ...
+    ProjectSeparator,
+    // Entering a Gizmo, which opens a secondary Undo / Redo stack.
+    EnteringGizmo,
+    // Leaving a Gizmo, which closes a secondary Undo / Redo stack.
+    // No action modifying a project state was done between EnteringGizmo / LeavingGizmo.
+    LeavingGizmoNoAction,
+    // Leaving a Gizmo, which closes a secondary Undo / Redo stack.
+    // Some action modifying a project state was done between EnteringGizmo / LeavingGizmo.
+    LeavingGizmoWithAction,
+    // Display metadata only; does not invalidate slicing.
+    PreviewCapture,
 };
 
 // Data structure to be stored with each snapshot.
@@ -70,7 +73,9 @@ struct SnapshotData
 
 struct Snapshot
 {
-	Snapshot(size_t timestamp) : timestamp(timestamp) {}
+    // Kept separately so display-only undo never replaces live model or Print objects.
+    std::vector<std::optional<PreviewCapture>> preview_captures;
+    Snapshot(size_t timestamp) : timestamp(timestamp) {}
 	Snapshot(const std::string &name, size_t timestamp, size_t model_id, const SnapshotData &snapshot_data) :
 		name(name), timestamp(timestamp), model_id(model_id), snapshot_data(snapshot_data) {}
 	
@@ -94,7 +99,8 @@ struct Snapshot
 // If a snapshot modifies the snapshot type, 
 inline bool snapshot_modifies_project(SnapshotType type)
 {
-	return type == SnapshotType::Action || type == SnapshotType::GizmoAction || type == SnapshotType::ProjectSeparator;
+    return type == SnapshotType::Action || type == SnapshotType::GizmoAction || type == SnapshotType::ProjectSeparator ||
+           type == SnapshotType::PreviewCapture;
 }
 
 inline bool snapshot_modifies_project(const Snapshot &snapshot)

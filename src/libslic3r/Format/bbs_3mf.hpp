@@ -5,6 +5,7 @@
 #include "libslic3r/ProjectTask.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include <functional>
+#include "../PreviewCapture.hpp"
 
 namespace Slic3r {
 class Model;
@@ -68,6 +69,7 @@ struct PlateData
 
     void parse_filament_info(GCodeProcessorResult *result);
 
+    std::optional<PreviewCapture>      preview_capture;
     int plate_index;
     std::vector<std::pair<int, int>> objects_and_instances;
     std::map<int, std::pair<int, int>> obj_inst_map;

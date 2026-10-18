@@ -4719,6 +4719,13 @@ struct Plater::priv
     ExportingStatus             exporting_status { NOT_EXPORTING };
     std::string                 last_output_path;
     std::string                 last_output_dir_path;
+    struct PreviewExport
+    {
+        int          plate_index;
+        unsigned int result_id;
+        std::string  gcode_path;
+    };
+    std::optional<PreviewExport> pending_preview_export;
     //BBS store machine_sn and 3mf_path for PrintJob
     PrintPrepareData            m_print_job_data;
     bool                        inside_snapshot_capture() { return m_prevent_snapshots != 0; }
@@ -5113,6 +5120,14 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
             preview->get_canvas3d()->set_as_dirty();
         });
     if (wxGetApp().is_editor()) {
+        preview_canvas->Bind(EVT_GLCANVAS_UNDO, [this](SimpleEvent&) {
+            if (this->q->can_undo())
+                this->undo();
+        });
+        preview_canvas->Bind(EVT_GLCANVAS_REDO, [this](SimpleEvent&) {
+            if (this->q->can_redo())
+                this->redo();
+        });
         preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_TAB, [this](SimpleEvent&) { select_next_view_3D(); });
         preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_COLLAPSE_SIDEBAR, [this](SimpleEvent&) { this->q->collapse_sidebar(!this->q->is_sidebar_collapsed());  });
         preview->get_wxglcanvas()->Bind(EVT_CUSTOMEVT_TICKSCHANGED, [this](wxCommandEvent& event) {
@@ -7920,6 +7935,7 @@ void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_remova
 
     show_warning_dialog = true;
     if (! output_path.empty()) {
+        pending_preview_export.reset();
         background_process.schedule_export(output_path.string(), output_path_on_removable_media);
         notification_manager->push_delayed_notification(NotificationType::ExportOngoing, []() {return true; }, 1000, 0);
     } else {
@@ -9428,6 +9444,8 @@ void Plater::priv::on_export_began(wxCommandEvent& evt)
 
 void Plater::priv::on_export_finished(wxCommandEvent& evt)
 {
+    // This event precedes process completion. Wait until the worker is idle before reading Print or using OpenGL.
+    pending_preview_export = PreviewExport{evt.GetInt(), static_cast<unsigned int>(evt.GetExtraLong()), into_u8(evt.GetString())};
 #if 0
     //BBS: also export 3mf to the same directory for debugging
     std::string gcode_path_str(evt.GetString().ToUTF8().data());
@@ -9518,6 +9536,7 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     //BBS:ignore cancel event for some special case
     if (m_ignore_event)
     {
+        pending_preview_export.reset();
         m_ignore_event = false;
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": ignore this event %1%") % evt.status();
         return;
@@ -9544,6 +9563,26 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     // so the following call just confirms, that the produced data were consumed.
     this->background_process.stop();
     notification_manager->set_slicing_progress_export_possible();
+
+    auto preview_export = std::move(pending_preview_export);
+    pending_preview_export.reset();
+    if (preview_export && evt.success()) {
+        const auto& [plate_index, result_id, gcode_path] = *preview_export;
+        auto* plate                                      = partplate_list.get_plate(plate_index);
+        // An internal cancellation may suppress completion. Never pair a stale export with newer toolpaths.
+        if (plate && plate->preview_capture() && plate->get_slice_result() && plate->get_slice_result()->id == result_id) {
+            try {
+                const std::string image_path = fs::path(gcode_path).replace_extension(".preview.png").string();
+                preview->get_canvas3d()->export_preview_capture(image_path, *plate);
+            } catch (const std::exception& error) {
+                const std::string message = (boost::format("Plate %1%: preview capture failed: %2%") % (plate_index + 1) % error.what())
+                                                .str();
+                BOOST_LOG_TRIVIAL(warning) << message;
+                notification_manager->push_notification(NotificationType::CustomNotification,
+                                                        NotificationManager::NotificationLevel::WarningNotificationLevel, message);
+            }
+        }
+    }
 
     // Reset the "export G-code path" name, so that the automatic background processing will be enabled again.
     this->background_process.reset_export();
@@ -11440,12 +11479,36 @@ void Plater::priv::undo_redo_to(std::vector<UndoRedo::Snapshot>::const_iterator 
     if (!new_variable_layer_editing_active && view3D->is_layers_editing_enabled())
         view3D->get_canvas3d()->force_main_toolbar_left_action(view3D->get_canvas3d()->get_main_toolbar_item_id("layersediting"));
 
+    const auto&  snapshots    = this->undo_redo_stack().snapshots();
+    const size_t active_time  = this->undo_redo_stack().active_snapshot_time();
+    const auto   first_change = std::lower_bound(snapshots.begin(), snapshots.end(),
+                                                 UndoRedo::Snapshot(std::min(active_time, it_snapshot->timestamp)));
+    const auto   last_change  = std::lower_bound(snapshots.begin(), snapshots.end(),
+                                                 UndoRedo::Snapshot(std::max(active_time, it_snapshot->timestamp)));
+    const bool   capture_only = std::any_of(first_change, last_change,
+                                            [](const UndoRedo::Snapshot& snapshot) {
+                                              return snapshot.snapshot_data.snapshot_type == UndoRedo::SnapshotType::PreviewCapture;
+                                            }) &&
+                                std::all_of(first_change, last_change, [](const UndoRedo::Snapshot& snapshot) {
+                                  return snapshot.snapshot_data.snapshot_type == UndoRedo::SnapshotType::PreviewCapture ||
+                                         snapshot.snapshot_data.snapshot_type == UndoRedo::SnapshotType::Selection;
+                                });
+
     // Make a copy of the snapshot, undo/redo could invalidate the iterator
     const UndoRedo::Snapshot snapshot_copy = *it_snapshot;
     // Do the jump in time.
     if (it_snapshot->timestamp < this->undo_redo_stack().active_snapshot_time() ?
         this->undo_redo_stack().undo(model, get_current_canvas3D()->get_canvas_type() == GLCanvas3D::CanvasAssembleView ? assemble_view->get_canvas3d()->get_selection() : this->view3D->get_canvas3d()->get_selection(), get_current_canvas3D()->get_canvas_type() == GLCanvas3D::CanvasAssembleView ? assemble_view->get_canvas3d()->get_gizmos_manager() : this->view3D->get_canvas3d()->get_gizmos_manager(), this->partplate_list, top_snapshot_data, it_snapshot->timestamp) :
         this->undo_redo_stack().redo(model, get_current_canvas3D()->get_canvas_type() == GLCanvas3D::CanvasAssembleView ? assemble_view->get_canvas3d()->get_gizmos_manager() : this->view3D->get_canvas3d()->get_gizmos_manager(), this->partplate_list, it_snapshot->timestamp)) {
+        if (capture_only) {
+            // Plate metadata was restored without changing any model/configuration. Keep the valid preview and slicing cache.
+            dirty_state.update_from_undo_redo_stack(m_undo_redo_stack_main.project_modified());
+            update_title_dirty_status();
+            preview->get_canvas3d()->set_as_dirty();
+            view3D->get_canvas3d()->set_as_dirty();
+            this->undo_redo_stack().release_least_recently_used();
+            return;
+        }
         if (printer_technology_changed) {
             // Switch to the other printer technology. Switch to the last printer active for that particular technology.
             AppConfig *app_config = wxGetApp().app_config;
@@ -18168,8 +18231,38 @@ bool Plater::can_copy_to_clipboard() const
     return true;
 }
 
-bool Plater::can_undo() const { return IsShown() && p->is_view3D_shown() && p->undo_redo_stack().has_undo_snapshot(); }
-bool Plater::can_redo() const { return IsShown() && p->is_view3D_shown() && p->undo_redo_stack().has_redo_snapshot(); }
+static bool preview_capture_history_action(const UndoRedo::Stack& stack, bool undo)
+{
+    const auto& snapshots = stack.snapshots();
+    auto        active    = std::lower_bound(snapshots.begin(), snapshots.end(), UndoRedo::Snapshot(stack.active_snapshot_time()));
+    if (undo) {
+        while (active != snapshots.begin()) {
+            --active;
+            if (UndoRedo::snapshot_modifies_project(*active))
+                return active->snapshot_data.snapshot_type == UndoRedo::SnapshotType::PreviewCapture;
+        }
+    } else {
+        while (active != snapshots.end() && !UndoRedo::snapshot_modifies_project(*active))
+            ++active;
+        return active != snapshots.end() && active->snapshot_data.snapshot_type == UndoRedo::SnapshotType::PreviewCapture;
+    }
+    return false;
+}
+
+bool Plater::can_undo() const
+{
+    const auto& stack = p->undo_redo_stack();
+    return IsShown() && stack.has_undo_snapshot() &&
+           (p->is_view3D_shown() || (p->is_preview_shown() && preview_capture_history_action(stack, true)));
+}
+
+bool Plater::can_redo() const
+{
+    const auto& stack = p->undo_redo_stack();
+    return IsShown() && stack.has_redo_snapshot() &&
+           (p->is_view3D_shown() || (p->is_preview_shown() && preview_capture_history_action(stack, false)));
+}
+
 bool Plater::can_reload_from_disk() const { return p->can_reload_from_disk(); }
 //BBS
 bool Plater::can_fillcolor() const { return p->can_fillcolor(); }

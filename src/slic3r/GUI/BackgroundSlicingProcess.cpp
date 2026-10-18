@@ -873,6 +873,11 @@ void BackgroundSlicingProcess::finalize_gcode()
 
 	write_slice_statistics_for_export(export_path);
 	m_print->set_status(100, GUI::format(_L("G-code file exported to %1%"), export_path));
+    auto* evt = new wxCommandEvent(m_event_export_finished_id, GUI::wxGetApp().mainframe->m_plater->GetId());
+    evt->SetString(wxString::FromUTF8(export_path.c_str()));
+    evt->SetInt(m_current_plate->get_index());
+    evt->SetExtraLong(m_gcode_result->id);
+    wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt);
 }
 
 // G-code is generated in m_temp_output_path.
@@ -927,7 +932,9 @@ void BackgroundSlicingProcess::export_gcode()
 	auto evt = new wxCommandEvent(m_event_export_finished_id, GUI::wxGetApp().mainframe->m_plater->GetId());
 	wxString output_gcode_str = wxString::FromUTF8(export_path.c_str(), export_path.length());
 	evt->SetString(output_gcode_str);
-	wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt);
+    evt->SetInt(m_current_plate->get_index());
+    evt->SetExtraLong(m_gcode_result->id);
+    wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt);
 }
 
 // A print host upload job has been scheduled, enqueue it to the printhost job queue
