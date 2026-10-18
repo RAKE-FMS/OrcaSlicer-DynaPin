@@ -69,6 +69,39 @@ TEST_CASE("Slice statistics log accepts each successful plate result only once",
     last_logged_result_id = first.id;
     CHECK_FALSE(should_log_slice_statistics(true, true, &first, last_logged_result_id));
     CHECK(should_log_slice_statistics(true, true, &second, last_logged_result_id));
+
+    // Each plate retains its own state through an A -> B -> A sequence.
+    unsigned int second_plate_logged_result_id = 0;
+    CHECK(should_log_slice_statistics(true, true, &second, second_plate_logged_result_id));
+    second_plate_logged_result_id = second.id;
+    CHECK_FALSE(should_log_slice_statistics(true, true, &first, last_logged_result_id));
+    CHECK_FALSE(should_log_slice_statistics(true, true, &second, second_plate_logged_result_id));
+
+    // Re-slicing A creates a new result and must still produce a log.
+    first.id = 44;
+    CHECK(should_log_slice_statistics(true, true, &first, last_logged_result_id));
+}
+
+TEST_CASE("Slice statistics reflects changed units and plate numbering for the same result", "[SliceStatisticsLog]")
+{
+    GCodeProcessorResult result;
+    initialize_sample_result(result);
+    PrintStatistics print_statistics;
+    print_statistics.total_used_filament = 1175.0;
+
+    const auto metric     = make_slice_statistics_log(result, print_statistics, 1, false);
+    const auto imperial   = make_slice_statistics_log(result, print_statistics, 1, true);
+    const auto renumbered = make_slice_statistics_log(result, print_statistics, 3, true);
+    CHECK(metric["result_id"] == imperial["result_id"]);
+    CHECK(imperial["result_id"] == renumbered["result_id"]);
+    CHECK(metric["unit_system"] == "metric");
+    CHECK(metric["total_filament"]["length_display"] == "1.18m");
+    CHECK(imperial["unit_system"] == "imperial");
+    CHECK(imperial["total_filament"]["length_display"] == "46.26in");
+    CHECK(metric["plate_index"] == 1);
+    CHECK(renumbered["plate_index"] == 3);
+    CHECK(metric["total_filament"]["length_mm"] == renumbered["total_filament"]["length_mm"]);
+    CHECK(make_slice_statistics_log(result, print_statistics, 3, false)["unit_system"] == "metric");
 }
 
 TEST_CASE("Slice statistics log matches metric GUI formatting", "[SliceStatisticsLog]")

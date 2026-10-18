@@ -4255,7 +4255,6 @@ struct Plater::priv
     //BBS: add a flag to ignore cancel event
     bool m_ignore_event{false};
     bool m_slice_all{false};
-    unsigned int m_last_logged_slice_result_id{0};
     bool m_is_slicing {false};
     bool auto_reslice_pending {false};
     bool auto_reslice_after_cancel {false};
@@ -9637,10 +9636,10 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         GCodeProcessorResult *result = this->background_process.get_current_gcode_result();
         const Print *print = this->background_process.fff_print();
         if (sliced_plate != nullptr && print != nullptr &&
-            should_log_slice_statistics(evt.success(), this->printer_technology == ptFFF, result, m_last_logged_slice_result_id)) {
+            should_log_slice_statistics(evt.success(), this->printer_technology == ptFFF, result, sliced_plate->last_logged_slice_result_id())) {
             try {
                 BOOST_LOG_TRIVIAL(warning) << "slice_statistics " << this->background_process.current_slice_statistics().dump();
-                m_last_logged_slice_result_id = result->id;
+                sliced_plate->set_last_logged_slice_result_id(result->id);
             } catch (const std::exception &error) {
                 BOOST_LOG_TRIVIAL(error) << "Could not format slice statistics: " << error.what();
             }

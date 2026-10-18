@@ -108,6 +108,8 @@ private:
 
     Print *m_print; //Print reference, not own it, no need to serialize
     GCodeProcessorResult *m_gcode_result;
+    // Runtime-only log state, kept with its plate when switching or reordering plates.
+    unsigned int m_last_logged_slice_result_id{0};
     std::vector<FilamentInfo> slice_filaments_info;
     int m_print_index;
 
@@ -466,6 +468,9 @@ public:
     {
         m_apply_invalid = invalid;
     }
+
+    unsigned int last_logged_slice_result_id() const { return m_last_logged_slice_result_id; }
+    void set_last_logged_slice_result_id(unsigned int result_id) { m_last_logged_slice_result_id = result_id; }
 
     //is slice result valid or not
     bool is_slice_result_valid() const

@@ -787,17 +787,14 @@ bool BackgroundSlicingProcess::invalidate_all_steps()
 	return m_step_state.invalidate_all([this](){ this->stop_internal(); });
 }
 
-const nlohmann::ordered_json& BackgroundSlicingProcess::current_slice_statistics()
+nlohmann::ordered_json BackgroundSlicingProcess::current_slice_statistics() const
 {
     if (m_fff_print == nullptr || m_gcode_result == nullptr || m_current_plate == nullptr)
         throw Slic3r::ExportError("Slice statistics are unavailable for the current plate.");
-    if (m_slice_statistics.is_null() || m_slice_statistics_result_id != m_gcode_result->id) {
-        const bool imperial_units = wxGetApp().app_config->get("use_inches") == "1";
-        m_slice_statistics = make_slice_statistics_log(*m_gcode_result, m_fff_print->print_statistics(), m_current_plate->get_index() + 1,
-                                                       imperial_units);
-        m_slice_statistics_result_id = m_gcode_result->id;
-    }
-    return m_slice_statistics;
+    // Units and plate numbering may change without generating a new G-code result ID.
+    const bool imperial_units = wxGetApp().app_config->get("use_inches") == "1";
+    return make_slice_statistics_log(*m_gcode_result, m_fff_print->print_statistics(), m_current_plate->get_index() + 1,
+                                     imperial_units);
 }
 
 void BackgroundSlicingProcess::write_slice_statistics_for_export(const std::string& export_path)
