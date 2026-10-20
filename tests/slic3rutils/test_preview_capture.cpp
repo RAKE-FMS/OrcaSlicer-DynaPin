@@ -156,3 +156,69 @@ TEST_CASE("Render preview PNG through hidden CLI context", "[.preview_capture_re
             ++changed;
     REQUIRE(changed < byte_count / 100);
 }
+
+// Unsliced capture must work before any slicing and include only instances on the target plate.
+TEST_CASE("Render unsliced models without toolpaths", "[.preview_capture_render]")
+{
+    const auto old_resources = resources_dir();
+    const auto old_var_dir   = var_dir();
+    set_resources_dir((boost::filesystem::path(TEST_DATA_DIR).parent_path().parent_path() / "resources").string());
+    set_var_dir((boost::filesystem::path(resources_dir()) / "images").string());
+    ScopeGuard restore_resources([&] {
+        set_resources_dir(old_resources);
+        set_var_dir(old_var_dir);
+    });
+    Model      model;
+    auto*      object = model.add_object();
+    object->add_volume(TriangleMesh(its_make_cube(20, 20, 30)));
+    object->add_instance()->set_offset(Vec3d(40, 40, 0));
+    Print                print;
+    GCodeProcessorResult result;
+    DynamicPrintConfig   config;
+    config.set_key_value("filament_colour", new ConfigOptionStrings({"#FF8000"}));
+    print.apply_config_for_render(config);
+    PartPlate plate(nullptr, Vec3d::Zero(), 100, 100, 100, nullptr, &model, true, ptFFF);
+    plate.set_shape({{0, 0}, {100, 0}, {100, 100}, {0, 100}}, {}, {}, {}, Vec2d::Zero(), 0, 0);
+    plate.add_instance(0, 0, false);
+    PreviewCapture capture;
+    capture.width    = 640;
+    capture.height   = 360;
+    capture.position = {150, -180, 180};
+    capture.target   = {50, 50, 0};
+    capture.zoom     = 2;
+    capture.bed      = false;
+    const auto path  = boost::filesystem::temp_directory_path() / "orca-unsliced-capture.png";
+    export_preview_image_cli(path.string(), capture, print, result, plate, true);
+    wxImage original;
+    REQUIRE(original.LoadFile(wxString::FromUTF8(path.string()), wxBITMAP_TYPE_PNG));
+    REQUIRE(original.GetWidth() == 640);
+    REQUIRE(original.GetHeight() == 360);
+    size_t foreground = 0;
+    for (size_t i = 0; i < 640 * 360 * 3; i += 3)
+        if (original.GetData()[i] > original.GetData()[i + 1] + 20)
+            ++foreground;
+    REQUIRE(foreground > 100);
+
+    // An overlapping instance belonging to another plate and non-printing volumes must not change the image.
+    object->add_instance()->set_offset(Vec3d(40, 40, 40));
+    auto* modifier = object->add_volume(TriangleMesh(its_make_cube(80, 80, 80)));
+    modifier->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+    const auto filtered_path = boost::filesystem::temp_directory_path() / "orca-unsliced-filtered.png";
+    export_preview_image_cli(filtered_path.string(), capture, print, result, plate, true);
+    wxImage filtered;
+    REQUIRE(filtered.LoadFile(wxString::FromUTF8(filtered_path.string()), wxBITMAP_TYPE_PNG));
+    REQUIRE(std::equal(original.GetData(), original.GetData() + 640 * 360 * 3, filtered.GetData()));
+
+    const Vec3d offset(250, -250, 0);
+    object->instances[0]->set_offset(Vec3d(40, 40, 0) + offset);
+    PartPlate shifted(nullptr, offset, 100, 100, 100, nullptr, &model, true, ptFFF);
+    shifted.set_shape({{0, 0}, {100, 0}, {100, 100}, {0, 100}}, {}, {}, {}, offset.head<2>(), 0, 0);
+    shifted.add_instance(0, 0, false);
+    export_preview_image_cli(filtered_path.string(), capture, print, result, shifted, true);
+    REQUIRE(filtered.LoadFile(wxString::FromUTF8(filtered_path.string()), wxBITMAP_TYPE_PNG));
+    size_t changed = 0;
+    for (size_t i = 0; i < 640 * 360 * 3; ++i)
+        if (std::abs(int(original.GetData()[i]) - int(filtered.GetData()[i])) > 2)
+            ++changed;
+    REQUIRE(changed < 640 * 360 * 3 / 100);
+}

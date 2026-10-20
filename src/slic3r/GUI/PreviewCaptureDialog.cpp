@@ -74,12 +74,13 @@ public:
 
 class PreviewCaptureDialog : public DPIDialog
 {
-    GLCanvas3D&                   m_canvas;
+    GLCanvas3D*                   m_canvas;
     PartPlate&                    m_plate;
     CaptureImagePanel*            m_image;
     wxStaticText*                 m_status;
     wxStaticText*                 m_dimensions;
     wxChoice*                     m_ratio;
+    wxChoice*                     m_scene;
     wxSpinCtrl*                   m_width;
     wxSpinCtrl*                   m_height;
     wxButton*                     m_apply;
@@ -95,12 +96,15 @@ class PreviewCaptureDialog : public DPIDialog
     bool                          m_closing        = false;
     bool                          m_width_anchor   = false;
     unsigned int                  m_result_id      = 0;
+    size_t                        m_scene_revision = 0;
 
     void status(const wxString& message)
     {
         m_status->SetLabel(message);
         m_status->SetToolTip(message);
     }
+    bool unsliced() const { return m_scene->GetSelection() == 0; }
+    bool ready() const { return !busy() && (unsliced() ? !m_plate.empty() : m_plate.is_slice_result_valid()); }
     bool busy() const
     { return wxGetApp().plater()->is_background_process_slicing() || wxGetApp().plater()->is_background_process_running(); }
     std::string saved_settings() const
@@ -124,13 +128,14 @@ class PreviewCaptureDialog : public DPIDialog
     {
         const bool exists     = m_draft.has_value();
         const bool processing = busy();
-        const bool valid      = exists && m_plate.is_slice_result_valid() && !processing;
+        const bool valid      = exists && ready();
         m_ratio->Enable(exists);
         m_width->Enable(exists);
         m_height->Enable(exists);
         m_apply->Enable(exists && serialize_preview_captures({{0, *m_draft}}) != m_saved);
-        m_record->Enable(!processing && wxGetApp().plater()->get_partplate_list().get_curr_plate() == &m_plate &&
-                         m_plate.is_slice_result_valid());
+        const auto type = wxGetApp().plater()->get_current_canvas3D()->get_canvas_type();
+        m_record->Enable(!processing && wxGetApp().plater()->get_partplate_list().get_curr_plate() == &m_plate && !m_plate.empty() &&
+                         (type == GLCanvas3D::ECanvasType::CanvasView3D || type == GLCanvas3D::ECanvasType::CanvasPreview));
         m_restore->Enable(m_plate.preview_capture().has_value() && !processing);
         m_delete->Enable(m_plate.preview_capture().has_value());
         m_export->Enable(valid);
@@ -191,22 +196,26 @@ class PreviewCaptureDialog : public DPIDialog
             status(_L("No recorded view. Record the current view to begin."));
             return;
         }
-        if (busy() || !m_plate.is_slice_result_valid()) {
-            status(_L("Waiting for a valid slice. The displayed image may be out of date."));
+        if (!ready()) {
+            status(busy()     ? _L("Waiting for background processing. The displayed image may be out of date.") :
+                   unsliced() ? _L("No printable models to capture. The displayed image may be out of date.") :
+                                _L("Waiting for a valid slice. The displayed image may be out of date."));
             m_refresh = true;
             return;
         }
         const auto* result = m_plate.get_slice_result();
-        if (!m_refresh && result && m_result_id == result->id)
+        const size_t revision = wxGetApp().plater()->get_view3D_canvas3D()->m_capture_scene_revision;
+        if (!m_refresh && (unsliced() ? m_scene_revision == revision : (result && m_result_id == result->id)))
             return;
         m_refresh   = false;
+        m_scene_revision = revision;
         m_result_id = result ? result->id : 0;
         try {
             const double scale   = std::min({1.0, 1600.0 / m_draft->width, 1600.0 / m_draft->height});
             const auto   capture = m_draft->resized(std::max(1U, unsigned(std::lround(m_draft->width * scale))),
                                                     std::max(1U, unsigned(std::lround(m_draft->height * scale))));
-            m_image->set_image(m_canvas.render_preview_capture(capture, m_plate));
-            status(_L("Preview from the recorded view"));
+            m_image->set_image(m_canvas->render_preview_capture(capture, m_plate, unsliced()));
+            status(unsliced() ? _L("Unsliced model from the recorded view") : _L("Sliced toolpaths from the recorded view"));
         } catch (const std::exception& error) {
             status(_L("Preview capture failed") + ": " + from_u8(error.what()));
         }
@@ -223,23 +232,23 @@ class PreviewCaptureDialog : public DPIDialog
         m_plate.set_preview_capture(*m_draft);
         m_saved = saved_settings();
         plater->set_plater_dirty(true);
-        m_canvas.set_as_dirty();
+        m_canvas->set_as_dirty();
         update_controls();
     }
     void export_png()
     {
-        if (!update_size(m_width_anchor) || busy() || !m_plate.is_slice_result_valid())
+        if (!update_size(m_width_anchor) || !ready())
             return;
         wxWeakRef<PreviewCaptureDialog> alive(this);
-        wxFileDialog dialog(wxGetApp().plater(), _L("Save preview image"), wxEmptyString, "preview.png", "PNG (*.png)|*.png",
-                            wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+        wxFileDialog dialog(wxGetApp().plater(), _L("Save preview image"), wxEmptyString, unsliced() ? "unsliced.png" : "sliced.png",
+                            "PNG (*.png)|*.png", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
         const int    response = dialog.ShowModal();
         if (!alive || alive->m_closing || response != wxID_OK)
             return;
-        if (busy() || !m_plate.is_slice_result_valid())
+        if (!ready())
             return;
         try {
-            save_preview_image(into_u8(dialog.GetPath()), m_canvas.render_preview_capture(*m_draft, m_plate));
+            save_preview_image(into_u8(dialog.GetPath()), m_canvas->render_preview_capture(*m_draft, m_plate, unsliced()));
             status(_L("Preview image saved"));
         } catch (const std::exception& error) {
             status(_L("Preview capture failed") + ": " + from_u8(error.what()));
@@ -252,6 +261,13 @@ class PreviewCaptureDialog : public DPIDialog
     }
 
 public:
+    void show_scene(GLCanvas3D& canvas)
+    {
+        m_canvas = &canvas;
+        m_scene->SetSelection(canvas.get_canvas_type() == GLCanvas3D::ECanvasType::CanvasView3D ? 0 : 1);
+        m_refresh = true;
+        Raise();
+    }
     bool targets(const PartPlate& plate) const { return &m_plate == &plate; }
     PreviewCaptureDialog(GLCanvas3D& canvas, PartPlate& plate)
         : DPIDialog(wxGetApp().plater(),
@@ -262,7 +278,7 @@ public:
                     wxDefaultPosition,
                     wxDefaultSize,
                     wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
-        , m_canvas(canvas)
+        , m_canvas(&canvas)
         , m_plate(plate)
         , m_timer(this)
     {
@@ -278,6 +294,16 @@ public:
         left->Add(m_status, 0, wxEXPAND | wxTOP, FromDIP(8));
         body->Add(left, 1, wxEXPAND | wxALL, FromDIP(12));
         auto* controls = new wxBoxSizer(wxVERTICAL);
+        controls->Add(new wxStaticText(this, wxID_ANY, _L("Image")), 0, wxBOTTOM, FromDIP(6));
+        m_scene = new wxChoice(this, wxID_ANY);
+        m_scene->Append(_L("Unsliced model"));
+        m_scene->Append(_L("Sliced toolpaths"));
+        m_scene->SetSelection(canvas.get_canvas_type() == GLCanvas3D::ECanvasType::CanvasView3D ? 0 : 1);
+        m_scene->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
+            m_refresh = true;
+            update_controls();
+        });
+        controls->Add(m_scene, 0, wxEXPAND | wxBOTTOM, FromDIP(12));
         controls->Add(new wxStaticText(this, wxID_ANY, _L("Aspect ratio")), 0, wxBOTTOM, FromDIP(6));
         m_ratio = new wxChoice(this, wxID_ANY);
         for (const auto& label : std::array<wxString, 7>{_L("Recorded ratio"), "1:1", "4:3", "3:2", "16:9", "9:16", _L("Free")})
@@ -303,19 +329,19 @@ public:
         m_record  = button(_L("Record current view"), [this](wxCommandEvent&) {
             if (wxGetApp().plater()->get_partplate_list().get_curr_plate() != &m_plate)
                 return;
-            m_canvas._record_preview_capture();
+            wxGetApp().plater()->get_current_canvas3D()->_record_preview_capture();
             load_settings();
         });
         m_restore = button(_L("Restore recorded view"), [this](wxCommandEvent&) {
             wxGetApp().plater()->select_plate(m_plate.get_index());
-            m_canvas._restore_preview_capture();
+            m_canvas->_restore_preview_capture();
         });
         m_delete  = button(_L("Delete recorded view"), [this](wxCommandEvent&) {
             auto* plater = wxGetApp().plater();
             plater->take_snapshot(_u8L("Delete preview capture view"), UndoRedo::SnapshotType::PreviewCapture);
             m_plate.set_preview_capture(std::nullopt);
             plater->set_plater_dirty(true);
-            m_canvas.set_as_dirty();
+            m_canvas->set_as_dirty();
             load_settings();
         });
         m_export  = button(_L("Export preview PNG"), [this](wxCommandEvent&) { export_png(); });
@@ -372,7 +398,7 @@ void close_preview_capture_dialog()
 void show_preview_capture_dialog(GLCanvas3D& canvas, PartPlate& plate)
 {
     if (capture_dialog && capture_dialog->targets(plate)) {
-        capture_dialog->Raise();
+        capture_dialog->show_scene(canvas);
         return;
     }
     close_preview_capture_dialog();

@@ -1880,6 +1880,7 @@ void GLCanvas3D::select_plate()
 
 void GLCanvas3D::update_volumes_colors_by_extruder()
 {
+    ++m_capture_scene_revision;
     if (m_config != nullptr)
         m_volumes.update_colors_by_extruder(m_config);
 }
@@ -2400,6 +2401,7 @@ void GLCanvas3D::mirror_selection(Axis axis)
 // 5) Out of bed collision status & message overlay (texture)
 void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_refresh)
 {
+    ++m_capture_scene_revision;
     if (m_canvas == nullptr || m_config == nullptr || m_model == nullptr)
         return;
 
@@ -8598,7 +8600,7 @@ void GLCanvas3D::_record_preview_capture()
 {
     auto* plater = wxGetApp().plater();
     auto* plate  = plater->get_partplate_list().get_curr_plate();
-    if (!plate || !m_gcode_viewer.has_data())
+    if (!plate || plate->empty())
         return;
     PreviewCapture  capture    = plater->get_camera().capture_view(plate->get_origin());
     const ColorRGBA background = m_is_dark ? DEFAULT_BG_LIGHT_COLOR_DARK : DEFAULT_BG_LIGHT_COLOR;
@@ -8610,7 +8612,7 @@ void GLCanvas3D::_record_preview_capture()
     capture.bed_model   = preview_capture_asset_path(m_bed.model_filename());
     capture.bed_texture = preview_capture_asset_path(plater->get_partplate_list().get_logo_texture_filename());
     plate->capture_bed_textures(capture);
-    m_gcode_viewer.capture_display_settings(capture);
+    plater->get_preview_canvas3D()->get_gcode_viewer().capture_display_settings(capture);
     capture.validate();
     plater->take_snapshot(_u8L("Record preview capture view"), UndoRedo::SnapshotType::PreviewCapture);
     plate->set_preview_capture(std::move(capture));
@@ -8636,18 +8638,24 @@ void GLCanvas3D::_restore_preview_capture()
     }
 }
 
-void GLCanvas3D::export_preview_capture(const std::string& path, PartPlate& plate)
+void GLCanvas3D::export_preview_capture(const std::string& path, PartPlate& plate, bool unsliced)
 {
     if (plate.preview_capture())
-        save_preview_image(path, render_preview_capture(*plate.preview_capture(), plate));
+        save_preview_image(path, render_preview_capture(*plate.preview_capture(), plate, unsliced));
 }
 
-ThumbnailData GLCanvas3D::render_preview_capture(const PreviewCapture& capture, PartPlate& plate)
+ThumbnailData GLCanvas3D::render_preview_capture(const PreviewCapture& capture, PartPlate& plate, bool unsliced)
 {
     if (wxGetApp().plater()->is_background_process_running())
         throw std::runtime_error("Preview capture is waiting for background processing");
     if (!_set_current())
         throw std::runtime_error("Cannot activate the preview OpenGL context");
+    if (unsliced) {
+        ScopeGuard redraw([this] { set_as_dirty(); });
+        return render_unsliced_image(capture, plate, wxGetApp().get_opengl_manager(),
+                                     wxGetApp().plater()->get_extruder_colors_from_plater_config(),
+                                     wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_float("printable_height"));
+    }
     PrintBase*   base   = nullptr;
     GCodeResult* result = nullptr;
     plate.get_print(&base, &result, nullptr);
@@ -8728,10 +8736,12 @@ void GLCanvas3D::_render_canvas_toolbar()
         }
     }
 
-    if (m_canvas_type == ECanvasType::CanvasPreview && wxGetApp().show_canvas_capture_button()) {
+    if ((m_canvas_type == ECanvasType::CanvasPreview || m_canvas_type == ECanvasType::CanvasView3D) &&
+        wxGetApp().show_canvas_capture_button()) {
         ImGui::Dummy({0, spacing.y});
         const ImVec2 top_left  = ImGui::GetCursorScreenPos();
-        const bool   available = m_gcode_viewer.has_data();
+        auto*        current_plate = wxGetApp().plater()->get_partplate_list().get_curr_plate();
+        const bool   available     = current_plate && !current_plate->empty();
         if (ImGui::InvisibleButton("##record_preview_capture", btn_size) && available)
             wxGetApp().CallAfter([this] { _record_preview_capture(); });
         auto*        draw     = ImGui::GetWindowDrawList();
@@ -8808,8 +8818,9 @@ void GLCanvas3D::_render_canvas_toolbar()
                              ImGui::CloseCurrentPopup(); // Close popup to show changes on UI
                          });
 
-        create_menu_item(_utf8(L("Capture button")), m_canvas_type == ECanvasType::CanvasPreview, wxGetApp().show_canvas_capture_button(),
-                         [this] {
+        create_menu_item(_utf8(L("Capture button")),
+                         (m_canvas_type == ECanvasType::CanvasPreview || m_canvas_type == ECanvasType::CanvasView3D),
+                         wxGetApp().show_canvas_capture_button(), [this] {
                              wxGetApp().toggle_canvas_capture_button();
                              ImGui::CloseCurrentPopup();
                          });

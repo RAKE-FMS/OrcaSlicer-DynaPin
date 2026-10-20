@@ -724,6 +724,8 @@ public:
     CameraTarget m_camera_target;
 #endif // ENABLE_SHOW_CAMERA_TARGET
     GLModel m_background;
+    size_t  m_capture_scene_revision = 0;
+
 public:
     explicit GLCanvas3D(wxGLCanvas* canvas, Bed3D &bed);
     ~GLCanvas3D();
@@ -733,8 +735,8 @@ public:
     void set_context(wxGLContext* context) { m_context = context; }
     // UI thread only; the caller must wait for slicing/export to finish.
     friend class PreviewCaptureDialog;
-    ThumbnailData render_preview_capture(const PreviewCapture& capture, PartPlate& plate);
-    void        export_preview_capture(const std::string& path, PartPlate& plate);
+    ThumbnailData render_preview_capture(const PreviewCapture& capture, PartPlate& plate, bool unsliced = false);
+    void          export_preview_capture(const std::string& path, PartPlate& plate, bool unsliced = false);
     void set_type(ECanvasType type) { m_canvas_type = type; }
     ECanvasType get_canvas_type() { return m_canvas_type; }
 

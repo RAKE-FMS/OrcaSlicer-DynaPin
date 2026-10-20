@@ -3,6 +3,10 @@
 #include "GCodeViewer.hpp"
 #include "OpenGLManager.hpp"
 #include "PartPlate.hpp"
+#include "3DScene.hpp"
+#include "GLShader.hpp"
+#include "libslic3r/Model.hpp"
+#include <functional>
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/GCode/Thumbnails.hpp"
 #include <GL/glew.h>
@@ -177,12 +181,15 @@ std::string preview_capture_asset_path(const std::string& path)
     return path;
 }
 
-ThumbnailData render_preview_image(
-    const PreviewCapture& capture, const Print& print, const GCodeProcessorResult& result, PartPlate& source_plate, OpenGLManager& gl)
+static ThumbnailData render_capture_scene(const PreviewCapture&                     capture,
+                                          PartPlate&                                source_plate,
+                                          OpenGLManager&                            gl,
+                                          double                                    printable_height,
+                                          BoundingBoxf3                             scene,
+                                          CaptureGLState&                           state,
+                                          const std::function<void(const Camera&)>& draw)
 {
     capture.validate();
-    if (result.moves.empty())
-        throw std::runtime_error("No toolpaths to capture");
     for (const char* shader : {"flat", "hotbed", "printbed", "gouraud_light"})
         if (!gl.get_shader(shader))
             throw std::runtime_error(std::string("Preview capture shader is unavailable: ") + shader);
@@ -190,7 +197,6 @@ ThumbnailData render_preview_image(
     glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_size);
     if (capture.width > unsigned(max_size) || capture.height > unsigned(max_size))
         throw std::runtime_error("Preview image exceeds the GPU renderbuffer size limit");
-    CaptureGLState state;
     glGenFramebuffers(1, &state.fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, state.fbo);
     glGenRenderbuffers(1, &state.color);
@@ -213,14 +219,10 @@ ThumbnailData render_preview_image(
     glClearColor(capture.background[0], capture.background[1], capture.background[2], capture.background[3]);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    GCodeViewer viewer(false);
-    viewer.load_for_capture(result, print, capture);
     Camera camera;
-    // The processor has already applied this plate's display offset to the G-code vertices.
     camera.restore_view(capture, source_plate.get_origin());
-    BoundingBoxf3 scene = viewer.capture_bounding_box(capture.dynapin);
-    Pointfs       shape, excluded;
-    const Vec3d   origin = source_plate.get_origin();
+    Pointfs     shape, excluded;
+    const Vec3d origin = source_plate.get_origin();
     for (const auto& p : source_plate.get_shape())
         shape.emplace_back(p - origin.head<2>());
     for (const auto& p : source_plate.get_exclude_shape())
@@ -238,7 +240,7 @@ ThumbnailData render_preview_image(
         throw std::runtime_error("Cannot load preview bed model: " + model_file);
     if (capture.bed) {
         bed.on_change_color_mode(capture.dark);
-        bed.set_shape(shape, print.config().printable_height.value, {}, {}, model_file, true, origin.head<2>());
+        bed.set_shape(shape, printable_height, {}, {}, model_file, true, origin.head<2>());
         bed.set_axes_mode(false);
         scene.merge(bed.capture_bounding_box());
     }
@@ -284,7 +286,7 @@ ThumbnailData render_preview_image(
         }
         plate.render_capture(camera, gl.get_shader("flat"), lines, gl.get_shader("printbed"), logo, capture.dark, capture.grid, parts);
     }
-    viewer.render_capture(camera, gl.get_shader("gouraud_light"), capture.dynapin);
+    draw(camera);
     ThumbnailData image;
     image.set(capture.width, capture.height);
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
@@ -295,6 +297,68 @@ ThumbnailData render_preview_image(
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glReadPixels(0, 0, capture.width, capture.height, GL_RGBA, GL_UNSIGNED_BYTE, image.pixels.data());
     return image;
+}
+
+ThumbnailData render_preview_image(
+    const PreviewCapture& capture, const Print& print, const GCodeProcessorResult& result, PartPlate& source_plate, OpenGLManager& gl)
+{
+    if (result.moves.empty())
+        throw std::runtime_error("No toolpaths to capture");
+    CaptureGLState state;
+    GCodeViewer    viewer(false);
+    viewer.load_for_capture(result, print, capture);
+    return render_capture_scene(capture, source_plate, gl, print.config().printable_height.value,
+                                viewer.capture_bounding_box(capture.dynapin), state, [&](const Camera& camera) {
+                                    viewer.render_capture(camera, gl.get_shader("gouraud_light"), capture.dynapin);
+                                });
+}
+
+ThumbnailData render_unsliced_image(const PreviewCapture&           capture,
+                                    PartPlate&                      source_plate,
+                                    OpenGLManager&                  gl,
+                                    const std::vector<std::string>& filament_colors,
+                                    double                          printable_height)
+{
+    CaptureGLState         state;
+    GLVolumeCollection     volumes;
+    auto                   objects = source_plate.get_objects();
+    std::vector<ColorRGBA> colors;
+    decode_colors(filament_colors, colors);
+    if (colors.empty())
+        colors.push_back(ColorRGBA::WHITE());
+    BoundingBoxf3 scene;
+    for (size_t obj = 0; obj < objects.size(); ++obj) {
+        const auto* object = objects[obj];
+        for (size_t instance = 0; instance < object->instances.size(); ++instance) {
+            if (!source_plate.contain_instance(int(obj), int(instance)) || !object->instances[instance]->is_printable())
+                continue;
+            for (size_t volume = 0; volume < object->volumes.size(); ++volume) {
+                if (!object->volumes[volume]->is_model_part())
+                    continue;
+                const int    index = volumes.load_object_volume(object, int(obj), int(volume), int(instance), "object", true, false, false,
+                                                                false);
+                auto*        v     = volumes.volumes[index];
+                const size_t color = size_t(std::max(1, v->extruder_id) - 1);
+                v->color           = colors[std::min(color, colors.size() - 1)];
+                v->color.a(1.f);
+                v->set_render_color();
+                scene.merge(v->transformed_bounding_box());
+            }
+        }
+    }
+    if (volumes.empty())
+        throw std::runtime_error("No printable models to capture");
+    return render_capture_scene(capture, source_plate, gl, printable_height, scene, state, [&](const Camera& camera) {
+        auto* shader = gl.get_shader("gouraud_light");
+        shader->start_using();
+        shader->set_uniform("emission_factor", 0.f);
+        shader->set_uniform("z_far", camera.get_far_z());
+        shader->set_uniform("z_near", camera.get_near_z());
+        GLVolumeCollection::RenderContext context{shader, objects, colors};
+        volumes.render(GLVolumeCollection::ERenderType::Opaque, false, camera.get_view_matrix(), camera.get_projection_matrix(),
+                       {camera.get_viewport()[2], camera.get_viewport()[3]}, nullptr, false, &context);
+        shader->stop_using();
+    });
 }
 
 void save_preview_image(const std::string& path, const ThumbnailData& image)
@@ -327,8 +391,12 @@ void export_preview_image(const std::string&          path,
                           OpenGLManager&              gl)
 { save_preview_image(path, render_preview_image(capture, print, result, plate, gl)); }
 
-void export_preview_image_cli(
-    const std::string& path, const PreviewCapture& capture, const Print& print, const GCodeProcessorResult& result, PartPlate& plate)
+void export_preview_image_cli(const std::string&          path,
+                              const PreviewCapture&       capture,
+                              const Print&                print,
+                              const GCodeProcessorResult& result,
+                              PartPlate&                  plate,
+                              bool                        unsliced)
 {
     if (!wxImage::FindHandler(wxBITMAP_TYPE_PNG))
         wxImage::AddHandler(new wxPNGHandler);
@@ -336,6 +404,10 @@ void export_preview_image_cli(
     OpenGLManager        gl;
     if (!gl.init_gl(false))
         throw std::runtime_error("Cannot initialize preview capture OpenGL shaders");
-    export_preview_image(path, capture, print, result, plate, gl);
+    if (unsliced)
+        save_preview_image(path, render_unsliced_image(capture, plate, gl, print.config().filament_colour.values,
+                                                       print.config().printable_height.value));
+    else
+        export_preview_image(path, capture, print, result, plate, gl);
 }
 } // namespace Slic3r::GUI

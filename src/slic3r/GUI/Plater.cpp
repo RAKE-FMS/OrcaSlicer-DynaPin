@@ -9571,15 +9571,17 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         auto* plate                                      = partplate_list.get_plate(plate_index);
         // An internal cancellation may suppress completion. Never pair a stale export with newer toolpaths.
         if (plate && plate->preview_capture() && plate->get_slice_result() && plate->get_slice_result()->id == result_id) {
-            try {
-                const std::string image_path = fs::path(gcode_path).replace_extension(".preview.png").string();
-                preview->get_canvas3d()->export_preview_capture(image_path, *plate);
-            } catch (const std::exception& error) {
-                const std::string message = (boost::format("Plate %1%: preview capture failed: %2%") % (plate_index + 1) % error.what())
-                                                .str();
-                BOOST_LOG_TRIVIAL(warning) << message;
-                notification_manager->push_notification(NotificationType::CustomNotification,
-                                                        NotificationManager::NotificationLevel::WarningNotificationLevel, message);
+            for (bool unsliced : {true, false}) {
+                const std::string image_path = fs::path(gcode_path).replace_extension(unsliced ? ".unsliced.png" : ".sliced.png").string();
+                try {
+                    preview->get_canvas3d()->export_preview_capture(image_path, *plate, unsliced);
+                } catch (const std::exception& error) {
+                    const std::string message =
+                        (boost::format("Plate %1%: capture failed for %2%: %3%") % (plate_index + 1) % image_path % error.what()).str();
+                    BOOST_LOG_TRIVIAL(warning) << message;
+                    notification_manager->push_notification(NotificationType::CustomNotification,
+                                                            NotificationManager::NotificationLevel::WarningNotificationLevel, message);
+                }
             }
         }
     }

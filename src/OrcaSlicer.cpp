@@ -6272,16 +6272,20 @@ int CLI::run(int argc, char **argv)
                                     boost::nowide::cerr << "slice_statistics " << statistics.dump() << std::endl;
                                 }
                                 if (!m_config.opt_bool("no_export_preview") && part_plate->preview_capture() && gcode_result) {
-                                    try {
-                                        const std::string image_path =
-                                            boost::filesystem::path(outfile).replace_extension(".preview.png").string();
-                                        GUI::export_preview_image_cli(image_path, *part_plate->preview_capture(), *print_fff, *gcode_result,
-                                                                      *part_plate);
-                                        BOOST_LOG_TRIVIAL(info) << "Plate " << index + 1 << ": saved preview " << image_path;
-                                    } catch (const std::exception& e) {
-                                        BOOST_LOG_TRIVIAL(warning) << "Plate " << index + 1 << ": preview capture failed: " << e.what();
-                                        boost::nowide::cerr << "Warning: Plate " << index + 1 << ": preview capture failed: " << e.what()
-                                                           << std::endl;
+                                    for (bool unsliced : {true, false}) {
+                                        const std::string image_path = boost::filesystem::path(outfile)
+                                                                           .replace_extension(unsliced ? ".unsliced.png" : ".sliced.png")
+                                                                           .string();
+                                        try {
+                                            GUI::export_preview_image_cli(image_path, *part_plate->preview_capture(), *print_fff,
+                                                                          *gcode_result, *part_plate, unsliced);
+                                            BOOST_LOG_TRIVIAL(info) << "Plate " << index + 1 << ": saved image " << image_path;
+                                        } catch (const std::exception& e) {
+                                            BOOST_LOG_TRIVIAL(warning)
+                                                << "Plate " << index + 1 << ": capture failed for " << image_path << ": " << e.what();
+                                            boost::nowide::cerr << "Warning: Plate " << index + 1 << ": capture failed for " << image_path
+                                                                << ": " << e.what() << std::endl;
+                                        }
                                     }
                                 }
 
