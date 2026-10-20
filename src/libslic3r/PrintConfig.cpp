@@ -10182,6 +10182,12 @@ CLIMiscConfigDef::CLIMiscConfigDef()
 {
     ConfigOptionDef* def;
 
+    def          = this->add("no_export_preview", coBool);
+    def->label   = L("Disable preview image export");
+    def->tooltip = L("Do not render preview images recorded in the 3MF project.");
+    def->cli     = "no-export-preview";
+    def->set_default_value(new ConfigOptionBool(false));
+
     /*def = this->add("ignore_nonexistent_config", coBool);
     def->label = L("Ignore non-existent config files");
     def->tooltip = L("Do not fail if a file supplied to --load does not exist.");

@@ -82,6 +82,7 @@ using namespace nlohmann;
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
+#include "slic3r/GUI/PreviewCaptureRenderer.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/Plater.hpp"
@@ -6270,6 +6271,24 @@ int CLI::run(int argc, char **argv)
                                     write_slice_statistics_sidecar(outfile, statistics);
                                     boost::nowide::cerr << "slice_statistics " << statistics.dump() << std::endl;
                                 }
+                                if (!m_config.opt_bool("no_export_preview") && part_plate->preview_capture() && gcode_result) {
+                                    for (bool unsliced : {true, false}) {
+                                        const std::string image_path = boost::filesystem::path(outfile)
+                                                                           .replace_extension(unsliced ? ".unsliced.png" : ".sliced.png")
+                                                                           .string();
+                                        try {
+                                            GUI::export_preview_image_cli(image_path, *part_plate->preview_capture(), *print_fff,
+                                                                          *gcode_result, *part_plate, unsliced);
+                                            BOOST_LOG_TRIVIAL(info) << "Plate " << index + 1 << ": saved image " << image_path;
+                                        } catch (const std::exception& e) {
+                                            BOOST_LOG_TRIVIAL(warning)
+                                                << "Plate " << index + 1 << ": capture failed for " << image_path << ": " << e.what();
+                                            boost::nowide::cerr << "Warning: Plate " << index + 1 << ": capture failed for " << image_path
+                                                                << ": " << e.what() << std::endl;
+                                        }
+                                    }
+                                }
+
                                 sliced_info.sliced_plates.push_back(sliced_plate_info);
                             } catch (const std::exception &ex) {
                                 BOOST_LOG_TRIVIAL(error) << "found slicing or export error for partplate "<<index+1 << std::endl;

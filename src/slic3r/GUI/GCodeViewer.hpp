@@ -3,6 +3,7 @@
 
 #include "3DScene.hpp"
 #include "libslic3r/DynaPinPreview.hpp"
+#include "libslic3r/PreviewCapture.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "IMSlider.hpp"
@@ -27,6 +28,7 @@ class TriangleMesh;
 class PresetBundle;
 
 namespace GUI {
+struct Camera;
 
 class PartPlateList;
 class OpenGLManager;
@@ -183,6 +185,8 @@ public:
     GCodeCheckResult        m_gcode_check_result;
     FilamentPrintableResult filament_printable_reuslt;
     Shells                  m_shells;
+    ModelObjectPtrs         m_capture_shell_objects;
+    std::vector<ColorRGBA>  m_capture_shell_colors;
 
 private:
     std::vector<int> m_plater_extruder;
@@ -214,8 +218,8 @@ private:
     std::vector<float> m_filament_diameters;
     std::vector<float> m_filament_densities;
     SequentialView     m_sequential_view;
-    IMSlider*          m_moves_slider;
-    IMSlider*          m_layers_slider;
+    IMSlider*          m_moves_slider  = nullptr;
+    IMSlider*          m_layers_slider = nullptr;
 #if VGCODE_ENABLE_COG_AND_TOOL_MARKERS
     // whether or not to render the cog model with fixed screen size
     bool  m_cog_marker_fixed_screen_size{true};
@@ -257,9 +261,10 @@ private:
 
     void load_dynapin_overlays(const Print& print);
     void render_dynapin_overlays();
+    void render_dynapin_overlays(const Camera& camera, GLShaderProgram* shader);
 
 public:
-    GCodeViewer();
+    explicit GCodeViewer(bool with_ui = true);
     ~GCodeViewer();
 
     void  on_change_color_mode(bool is_dark);
@@ -282,6 +287,10 @@ public:
     void update_shells_color_by_extruder(const DynamicPrintConfig* config);
     void set_shell_transparency(float alpha = 0.15f);
 
+    void          capture_display_settings(PreviewCapture& capture) const;
+    BoundingBoxf3 capture_bounding_box(bool dynapin) const;
+    void          load_for_capture(const GCodeProcessorResult& result, const Print& print, const PreviewCapture& capture);
+    void          render_capture(const Camera& camera, GLShaderProgram* shader, bool dynapin);
     void reset();
     // BBS: always load shell at preview
     void reset_shell();
@@ -378,6 +387,7 @@ private:
     // BBS: always load shell at preview
     // void load_shells(const Print& print);
     void render_toolpaths();
+    void render_toolpaths(const Camera& camera);
     void render_shells(int canvas_width, int canvas_height);
 
     // BBS: GUI refactor: add canvas size

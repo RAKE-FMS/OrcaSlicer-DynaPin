@@ -488,17 +488,23 @@ public:
     GLVolume* new_toolpath_volume(const ColorRGBA& rgba);
     GLVolume* new_nontoolpath_volume(const ColorRGBA& rgba);
 
+    struct RenderContext
+    {
+        GLShaderProgram*        shader;
+        ModelObjectPtrs&        model_objects;
+        std::vector<ColorRGBA>& colors;
+    };
     int get_selection_support_threshold_angle(bool&) const;
     // Render the volumes by OpenGL.
     //BBS: add outline drawing logic
-    void render(ERenderType                           type,
-                bool                                  disable_cullface,
-                const Transform3d &                   view_matrix,
-                const Transform3d&                    projection_matrix,
-                const GUI::Size&                      cnv_size,
-                std::function<bool(const GLVolume &)> filter_func   = std::function<bool(const GLVolume &)>(),
-                bool                                  partly_inside_enable =true
-           ) const;
+    void render(ERenderType                          type,
+                bool                                 disable_cullface,
+                const Transform3d&                   view_matrix,
+                const Transform3d&                   projection_matrix,
+                const GUI::Size&                     cnv_size,
+                std::function<bool(const GLVolume&)> filter_func          = std::function<bool(const GLVolume&)>(),
+                bool                                 partly_inside_enable = true,
+                RenderContext*                       context              = nullptr) const;
 
     // Clear the geometry
     void clear() { for (auto *v : volumes) delete v; volumes.clear(); }

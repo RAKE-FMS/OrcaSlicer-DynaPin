@@ -205,23 +205,23 @@ void Bed3D::load_render_colors()
     RenderColor::colors[RenderCol_Axis_Z] = ImGuiWrapper::to_ImVec4(Bed3D::AXIS_Z_COLOR);
 }
 
-void Bed3D::Axes::render()
+void Bed3D::Axes::render() { render(wxGetApp().plater()->get_camera(), wxGetApp().get_shader("flat")); }
+
+void Bed3D::Axes::render(const Camera& camera, GLShaderProgram* shader)
 {
-    auto render_axis = [this](GLShaderProgram* shader, const Transform3d& transform) {
-        const Camera& camera = wxGetApp().plater()->get_camera();
+    auto render_axis = [this, &camera](GLShaderProgram* shader, const Transform3d& transform) {
         const Transform3d& view_matrix = camera.get_view_matrix();
         shader->set_uniform("view_model_matrix", view_matrix * transform);
         shader->set_uniform("projection_matrix", camera.get_projection_matrix());
         //const Matrix3d view_normal_matrix = view_matrix.matrix().block(0, 0, 3, 3) * transform.matrix().block(0, 0, 3, 3).inverse().transpose();
         //shader->set_uniform("view_normal_matrix", view_normal_matrix);
-        m_arrow.render();
+        m_arrow.render(shader);
     };
 
     if (!m_arrow.is_initialized())
         //m_arrow.init_from(stilized_arrow(16, DefaultTipRadius, DefaultTipLength, DefaultStemRadius, m_stem_length));
         m_arrow.init_from(smooth_cylinder(16, /*Radius*/ m_stem_length / 75.f, m_stem_length)); // ORCA use simple cylinder and scale thickness depends on length
 
-    GLShaderProgram* shader = wxGetApp().get_shader("flat"); // ORCA dont use shading to get closer color tone
     if (shader == nullptr)
         return;
 
@@ -671,24 +671,13 @@ void Bed3D::update_bed_triangles()
 }
 
 void Bed3D::render_model(const Transform3d& view_matrix, const Transform3d& projection_matrix)
+{ render_model(view_matrix, projection_matrix, wxGetApp().get_shader("hotbed")); }
+
+void Bed3D::render_model(const Transform3d& view_matrix, const Transform3d& projection_matrix, GLShaderProgram* shader)
 {
-    if (m_model_filename.empty())
-        return;
-
-    if (m_model.get_filename() != m_model_filename && m_model.init_from_file(m_model_filename)) {
-        m_model.set_color(m_is_dark ? DEFAULT_MODEL_COLOR_DARK : DEFAULT_MODEL_COLOR);
-
-        update_model_offset();
-
-        // BBS: remove the bed picking logic
-        //register_raycasters_for_picking(m_model.model.get_geometry(), Geometry::assemble_transform(m_model_offset));
-    }
+    load_model();
 
     if (!m_model.get_filename().empty()) {
-        const Camera &     camera      = wxGetApp().plater()->get_camera();
-        const Transform3d &view_matrix = camera.get_view_matrix();
-        const Transform3d &projection_matrix = camera.get_projection_matrix();
-        GLShaderProgram* shader = wxGetApp().get_shader("hotbed");
         if (shader != nullptr) {
             shader->start_using();
             shader->set_uniform("emission_factor", 0.0f);
@@ -711,10 +700,43 @@ void Bed3D::render_model(const Transform3d& view_matrix, const Transform3d& proj
                 //use -1 ad a invalid type
                 shader->set_uniform("print_volume.type", -1);
             }
-            m_model.render();
+            m_model.render(shader);
             shader->stop_using();
         }
     }
+}
+
+void Bed3D::load_model()
+{
+    if (m_model_filename.empty())
+        return;
+
+    if (m_model.get_filename() != m_model_filename && m_model.init_from_file(m_model_filename)) {
+        m_model.set_color(m_is_dark ? DEFAULT_MODEL_COLOR_DARK : DEFAULT_MODEL_COLOR);
+
+        update_model_offset();
+
+        // BBS: remove the bed picking logic
+        // register_raycasters_for_picking(m_model.model.get_geometry(), Geometry::assemble_transform(m_model_offset));
+    }
+}
+
+BoundingBoxf3 Bed3D::capture_bounding_box()
+{
+    load_model();
+    return calc_extended_bounding_box();
+}
+
+void Bed3D::render_capture(const Camera& camera, GLShaderProgram* flat, GLShaderProgram* hotbed, bool axes)
+{
+    if (axes)
+        m_axes.render(camera, flat);
+    glEnable(GL_DEPTH_TEST);
+    const bool bottom = !camera.is_looking_downward();
+    if (m_model_filename.empty())
+        render_default(bottom, camera.get_view_matrix(), camera.get_projection_matrix(), flat);
+    else if (!bottom)
+        render_model(camera.get_view_matrix(), camera.get_projection_matrix(), hotbed);
 }
 
 void Bed3D::render_custom(GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom)
@@ -732,12 +754,14 @@ void Bed3D::render_custom(GLCanvas3D& canvas, const Transform3d& view_matrix, co
 }
 
 void Bed3D::render_default(bool bottom, const Transform3d& view_matrix, const Transform3d& projection_matrix)
+{ render_default(bottom, view_matrix, projection_matrix, wxGetApp().get_shader("flat")); }
+
+void Bed3D::render_default(bool bottom, const Transform3d& view_matrix, const Transform3d& projection_matrix, GLShaderProgram* shader)
 {
     // m_texture.reset();
 
     update_bed_triangles();
 
-    GLShaderProgram* shader = wxGetApp().get_shader("flat");
     if (shader != nullptr) {
         shader->start_using();
 
@@ -754,7 +778,7 @@ void Bed3D::render_default(bool bottom, const Transform3d& view_matrix, const Tr
             ColorRGBA color = m_is_dark ? DEFAULT_MODEL_COLOR_DARK : DEFAULT_MODEL_COLOR;   // ORCA add dark mode support
             color = ColorRGBA(color[0] * 0.8f, color[1] * 0.8f,color[2] * 0.8f, color[3]);  // ORCA shift color a darker tone to fix difference between flat / gouraud_light shader
             m_triangles.set_color(color);
-            m_triangles.render();
+            m_triangles.render(shader);
             glsafe(::glDepthMask(GL_TRUE));
         }
 

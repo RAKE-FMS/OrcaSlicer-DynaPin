@@ -987,27 +987,30 @@ int GLVolumeCollection::get_selection_support_threshold_angle(bool &enable_suppo
 }
 
 //BBS: add outline drawing logic
-void GLVolumeCollection::render(GLVolumeCollection::ERenderType       type,
-                                bool                                  disable_cullface,
-                                const Transform3d &                   view_matrix,
-                                const Transform3d&                    projection_matrix,
-                                const GUI::Size&                      cnv_size,
-                                std::function<bool(const GLVolume &)> filter_func,
-                                bool                                  partly_inside_enable) const
+void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
+                                bool                                 disable_cullface,
+                                const Transform3d&                   view_matrix,
+                                const Transform3d&                   projection_matrix,
+                                const GUI::Size&                     cnv_size,
+                                std::function<bool(const GLVolume&)> filter_func,
+                                bool                                 partly_inside_enable,
+                                RenderContext*                       context) const
 {
     GLVolumeWithIdAndZList to_render = volumes_to_render(volumes, type, view_matrix, filter_func);
     if (to_render.empty())
         return;
 
-    GLShaderProgram* shader = GUI::wxGetApp().get_current_shader();
+    GLShaderProgram* shader = context ? context->shader : GUI::wxGetApp().get_current_shader();
     if (shader == nullptr)
         return;
 
-    GLShaderProgram* sink_shader = GUI::wxGetApp().get_shader("flat");
+    GLShaderProgram* sink_shader = context ? nullptr : GUI::wxGetApp().get_shader("flat");
 #if SLIC3R_OPENGL_ES
-    GLShaderProgram* edges_shader = GUI::wxGetApp().get_shader("dashed_lines");
+    GLShaderProgram* edges_shader = context ? nullptr : GUI::wxGetApp().get_shader("dashed_lines");
 #else
-    GLShaderProgram* edges_shader = GUI::OpenGLManager::get_gl_info().is_core_profile() ? GUI::wxGetApp().get_shader("dashed_thick_lines") : GUI::wxGetApp().get_shader("flat");
+    GLShaderProgram* edges_shader = context                                             ? nullptr :
+                                    GUI::OpenGLManager::get_gl_info().is_core_profile() ? GUI::wxGetApp().get_shader("dashed_thick_lines") :
+                                                                                          GUI::wxGetApp().get_shader("flat");
 #endif // SLIC3R_OPENGL_ES
 
     if (type == ERenderType::Transparent) {
@@ -1077,17 +1080,18 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType       type,
         }
         
         bool  enable_support;
-        int   support_threshold_angle = get_selection_support_threshold_angle(enable_support);
-    
+        int   support_threshold_angle = context ? 0 : get_selection_support_threshold_angle(enable_support);
+
         float normal_z  = -::cos(Geometry::deg2rad((float) support_threshold_angle));
   
         shader->set_uniform("volume_world_matrix", volume.first->world_matrix());
-        shader->set_uniform("slope.actived", m_slope.isGlobalActive && !volume.first->is_modifier && !volume.first->is_wipe_tower);
+        shader->set_uniform("slope.actived",
+                            !context && m_slope.isGlobalActive && !volume.first->is_modifier && !volume.first->is_wipe_tower);
         shader->set_uniform("slope.volume_world_normal_matrix", static_cast<Matrix3f>(volume.first->world_matrix().matrix().block(0, 0, 3, 3).inverse().transpose().cast<float>()));
         shader->set_uniform("slope.normal_z", normal_z);
 
 #if ENABLE_ENVIRONMENT_MAP
-        unsigned int environment_texture_id = GUI::wxGetApp().plater()->get_environment_texture_id();
+        unsigned int environment_texture_id  = context ? 0 : GUI::wxGetApp().plater()->get_environment_texture_id();
         bool use_environment_texture = environment_texture_id > 0 && GUI::wxGetApp().app_config->get("use_environment_map") == "1";
         shader->set_uniform("use_environment_tex", use_environment_texture);
         if (use_environment_texture)
@@ -1103,7 +1107,9 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType       type,
         const Matrix3d view_normal_matrix = view_matrix.matrix().block(0, 0, 3, 3) * model_matrix.matrix().block(0, 0, 3, 3).inverse().transpose();
         shader->set_uniform("view_normal_matrix", view_normal_matrix);
 		//BBS: add outline related logic
-        if (volume.first->selected && GUI::wxGetApp().show_outline())
+        if (context)
+            volume.first->simple_render(shader, context->model_objects, context->colors);
+        else if (volume.first->selected && GUI::wxGetApp().show_outline())
             volume.first->render_with_outline(cnv_size);
         else
             volume.first->render();

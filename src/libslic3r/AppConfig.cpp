@@ -361,6 +361,9 @@ void AppConfig::set_defaults()
         set("auto_calculate_flush","all");
     }
 
+    if (get("show_canvas_capture_button").empty())
+        set_bool("show_canvas_capture_button", true);
+
     if (get("show_canvas_zoom_button").empty()) {
         set_bool("show_canvas_zoom_button", true);
     }

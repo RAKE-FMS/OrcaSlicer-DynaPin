@@ -33,6 +33,7 @@
 #include "2DBed.hpp"
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
+#include "PreviewCaptureDialog.hpp"
 #include "Camera.hpp"
 #include "GUI_Colors.hpp"
 #include "GUI_ObjectList.hpp"
@@ -728,6 +729,9 @@ void PartPlate::render_background(bool force_default_color)
 }
 
 void PartPlate::render_logo_texture(GLTexture &logo_texture, GLModel& logo_buffer, bool bottom)
+{ render_logo_texture(logo_texture, logo_buffer, bottom, wxGetApp().plater()->get_camera(), wxGetApp().get_shader("printbed")); }
+
+void PartPlate::render_logo_texture(GLTexture& logo_texture, GLModel& logo_buffer, bool bottom, const Camera& camera, GLShaderProgram* shader)
 {
 	//check valid
 	if (logo_texture.unsent_compressed_data_available()) {
@@ -736,10 +740,8 @@ void PartPlate::render_logo_texture(GLTexture &logo_texture, GLModel& logo_buffe
 	}
 
 	if (logo_buffer.is_initialized()) {
-		GLShaderProgram* shader = wxGetApp().get_shader("printbed");
 		if (shader != nullptr) {
 			shader->start_using();
-            const Camera &camera = wxGetApp().plater()->get_camera();
             shader->set_uniform("view_model_matrix", camera.get_view_matrix());
             shader->set_uniform("projection_matrix", camera.get_projection_matrix());
 			shader->set_uniform("transparent_background", 0);
@@ -758,10 +760,10 @@ void PartPlate::render_logo_texture(GLTexture &logo_texture, GLModel& logo_buffe
 			GLuint tex_id = (GLuint)logo_texture.get_id();
 
 			glsafe(::glBindTexture(GL_TEXTURE_2D, tex_id));
-            logo_buffer.render();
-			glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+            logo_buffer.render(shader);
+            glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
 
-			if (bottom)
+            if (bottom)
 				glsafe(::glFrontFace(GL_CCW));
 
             glsafe(::glDisable(GL_BLEND));
@@ -844,73 +846,62 @@ void PartPlate::render_logo(bool bottom, bool render_cali)
 		return;
 	}
 
-	m_partplate_list->load_bedtype_textures();
-	m_partplate_list->load_cali_textures();
-    m_partplate_list->load_extruder_only_area_textures();
-	// btDefault should be skipped
-	auto curr_bed_type = get_bed_type();
-	if (curr_bed_type == btDefault) {
-        DynamicConfig& proj_cfg = wxGetApp().preset_bundle->project_config;
-        if (proj_cfg.has(std::string("curr_bed_type")))
-            curr_bed_type = proj_cfg.opt_enum<BedType>(std::string("curr_bed_type"));
-	}
-	int bed_type_idx = (int)curr_bed_type;
-    auto is_single_extruder = wxGetApp().preset_bundle->get_printer_extruder_count() == 1;
-    if (!is_single_extruder) {
-        if (m_partplate_list->m_allow_bed_type_in_double_nozzle.find(bed_type_idx) == m_partplate_list->m_allow_bed_type_in_double_nozzle.end()) {
-            bed_type_idx = 0;
+    for (auto* part : m_partplate_list->preview_texture_parts(*this, render_cali)) {
+        if (part->texture && part->buffer && part->buffer->is_initialized()) {
+            if (part->offset != m_origin.head<2>()) {
+                part->offset = m_origin.head<2>();
+                part->update_buffer();
+            }
+            render_logo_texture(*part->texture, *part->buffer, bottom);
         }
     }
-	// render bed textures
-	for (auto &part : m_partplate_list->bed_texture_info[bed_type_idx].parts) {
-		if (part.texture) {
-			if (part.buffer && part.buffer->is_initialized()
-				//&& part.vbo_id != 0
-				) {
-				if (part.offset.x() != m_origin.x() || part.offset.y() != m_origin.y()) {
-					part.offset = Vec2d(m_origin.x(), m_origin.y());
-					part.update_buffer();
-				}
-				render_logo_texture(*(part.texture),
-									*(part.buffer),
-									bottom);
-			}
-		}
-	}
+}
 
-	// render cali texture
-	if (render_cali) {
-		for (auto& part : m_partplate_list->cali_texture_info.parts) {
-			if (part.texture) {
-                if (part.buffer && part.buffer->is_initialized()) {
-					if (part.offset.x() != m_origin.x() || part.offset.y() != m_origin.y()) {
-						part.offset = Vec2d(m_origin.x(), m_origin.y());
-						part.update_buffer();
-					}
-					render_logo_texture(*(part.texture),
-						*(part.buffer),
-						bottom);
-				}
-			}
-		}
-	}
+std::vector<PartPlateList::BedTextureInfo::TexturePart*> PartPlateList::preview_texture_parts(PartPlate& plate, bool calibration)
+{
+    load_bedtype_textures();
+    load_cali_textures();
+    load_extruder_only_area_textures();
+    auto bed_type = plate.get_bed_type();
+    if (bed_type == btDefault) {
+        const auto& config = wxGetApp().preset_bundle->project_config;
+        if (config.has("curr_bed_type"))
+            bed_type = config.opt_enum<BedType>("curr_bed_type");
+    }
+    int        index           = int(bed_type);
+    const bool single_extruder = wxGetApp().preset_bundle->get_printer_extruder_count() == 1;
+    if (!single_extruder && m_allow_bed_type_in_double_nozzle.count(index) == 0)
+        index = 0;
+    std::vector<BedTextureInfo::TexturePart*> parts;
+    for (auto& part : bed_texture_info[index].parts)
+        parts.push_back(&part);
+    if (calibration)
+        for (auto& part : cali_texture_info.parts)
+            parts.push_back(&part);
+    if (!single_extruder) {
+        const bool chinese  = wxGetApp().app_config->get("language") == "zh_CN";
+        const int  language = int(chinese ? ExtruderOnlyAreaType::Chinese : ExtruderOnlyAreaType::Engilish);
+        for (auto& part : extruder_only_area_info[language].parts)
+            parts.push_back(&part);
+    }
+    return parts;
+}
 
-	//render extruder_only_area_info
-    bool is_zh        = wxGetApp().app_config->get("language") == "zh_CN";
-    int  language_idx = (int) (is_zh ? ExtruderOnlyAreaType::Chinese:ExtruderOnlyAreaType::Engilish);
-    if (!is_single_extruder) {
-        for (auto &part : m_partplate_list->extruder_only_area_info[language_idx].parts) {
-            if (part.texture) {
-                if (part.buffer && part.buffer->is_initialized()) {
-                    if (part.offset.x() != m_origin.x() || part.offset.y() != m_origin.y()) {
-                        part.offset = Vec2d(m_origin.x(), m_origin.y());
-                        part.update_buffer();
-                    }
-                    render_logo_texture(*(part.texture), *(part.buffer), bottom);
-                }
-            }
+void PartPlate::capture_bed_textures(PreviewCapture& capture)
+{
+    capture.bed_parts.clear();
+    if (!m_partplate_list || !m_partplate_list->render_bedtype_logo)
+        return;
+    capture.bed_texture.clear();
+    // Preview requests no calibration logo (same argument as GLCanvas3D's preview plate pass).
+    for (const auto* part : m_partplate_list->preview_texture_parts(*this, false)) {
+        if (part->texture && part->buffer && part->buffer->is_initialized()) {
+            PreviewCaptureTexture texture;
+            texture.rectangle = {part->x, part->y, part->w, part->h};
+            texture.file      = "images/" + part->filename;
+            capture.bed_parts.push_back(std::move(texture));
         }
-	}
+    }
 }
 
 void PartPlate::render_wrapping_detection_area(bool force_default_color)
@@ -957,22 +948,75 @@ void PartPlate::render_exclude_area(bool force_default_color) {
 	glsafe(::glDepthMask(GL_TRUE));
 }*/
 
-void PartPlate::render_grid(bool bottom) {
-	//glsafe(::glEnable(GL_MULTISAMPLE));
-	// draw grid
-
-    // ORCA: OpenGL Core Profile support
-    // FIXME: ideally, we'd use the same shader for both the thin and thick lines, but for some reason setting the uniforms has no effect
-    GLShaderProgram* shader = wxGetApp().get_shader("flat");
-    if (shader == nullptr) {
-        return;
+void PartPlate::render_capture(const Camera&                                       camera,
+                               GLShaderProgram*                                    flat,
+                               GLShaderProgram*                                    lines,
+                               GLShaderProgram*                                    printbed,
+                               GLTexture*                                          texture,
+                               bool                                                dark,
+                               bool                                                grid,
+                               const std::vector<std::pair<GLTexture*, GLModel*>>& texture_parts)
+{
+    // CLI plates normally skip GPU geometry creation. Build only the scene geometry, never picking or UI assets.
+    if (!m_triangles.model.is_initialized()) {
+        ExPolygon poly;
+        generate_print_polygon(poly);
+        calc_triangles(poly);
+        calc_gridlines(poly, poly.contour.bounding_box());
+        ExPolygon excluded;
+        generate_exclude_polygon(excluded);
+        if (!excluded.empty())
+            calc_exclude_triangles(excluded);
     }
+    m_selected        = true;
+    const bool bottom = !camera.is_looking_downward();
+    if (!bottom && flat) {
+        flat->start_using();
+        flat->set_uniform("view_model_matrix", camera.get_view_matrix());
+        flat->set_uniform("projection_matrix", camera.get_projection_matrix());
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);
+        m_exclude_triangles.set_color({0.9f, 0.86f, 0.82f, 0.7f});
+        m_exclude_triangles.render(flat);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+        flat->stop_using();
+    }
+    if (grid)
+        render_grid(bottom, camera, flat, lines, dark);
+    if (!bottom && texture) {
+        if (!m_logo_triangles.is_initialized()) {
+            ExPolygon logo;
+            generate_logo_polygon(logo);
+            init_model_from_poly(m_logo_triangles, logo, GROUND_Z + 0.02f);
+        }
+        render_logo_texture(*texture, m_logo_triangles, bottom, camera, printbed);
+    }
+    if (!bottom)
+        for (const auto& [part_texture, model] : texture_parts)
+            render_logo_texture(*part_texture, *model, bottom, camera, printbed);
+}
 
+void PartPlate::render_grid(bool bottom)
+{
+#if SLIC3R_OPENGL_ES
+    auto* lines = wxGetApp().get_shader("dashed_lines");
+#else
+    auto* lines = wxGetApp().get_shader(OpenGLManager::get_gl_info().is_core_profile() ? "dashed_thick_lines" : "flat");
+#endif
+    render_grid(bottom, wxGetApp().plater()->get_camera(), wxGetApp().get_shader("flat"), lines, m_partplate_list->m_is_dark);
+}
+
+void PartPlate::render_grid(bool bottom, const Camera& camera, GLShaderProgram* flat, GLShaderProgram* lines, bool dark)
+{
+    GLShaderProgram* shader = flat;
+    if (!shader)
+        return;
     shader->start_using();
     glsafe(::glEnable(GL_BLEND));
     glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
 
-    const Camera& camera = wxGetApp().plater()->get_camera();
     const std::array<int, 4>& viewport = camera.get_viewport();
     const Transform3d& view_matrix = camera.get_view_matrix();
     const Transform3d& projection_matrix = camera.get_projection_matrix();
@@ -990,21 +1034,16 @@ void PartPlate::render_grid(bool bottom) {
         color = LINE_BOTTOM_COLOR;
 	else {
 		if (m_selected)
-            color = m_partplate_list->m_is_dark ? LINE_TOP_SEL_DARK_COLOR : LINE_TOP_SEL_COLOR;
-		else
-            color = m_partplate_list->m_is_dark ? LINE_TOP_DARK_COLOR : LINE_TOP_COLOR;
-	}
+            color = dark ? LINE_TOP_SEL_DARK_COLOR : LINE_TOP_SEL_COLOR;
+        else
+            color = dark ? LINE_TOP_DARK_COLOR : LINE_TOP_COLOR;
+    }
     m_gridlines.set_color(color);
-    m_gridlines.render();
+    m_gridlines.render(shader);
 
     shader->stop_using();
 
-    // ORCA: OpenGL Core Profile support
-#if SLIC3R_OPENGL_ES
-    shader = wxGetApp().get_shader("dashed_lines");
-#else
-    shader = OpenGLManager::get_gl_info().is_core_profile() ? wxGetApp().get_shader("dashed_thick_lines") : wxGetApp().get_shader("flat");
-#endif // SLIC3R_OPENGL_ES
+    shader = lines;
     if (shader == nullptr) {
         return;
     }
@@ -1025,7 +1064,7 @@ void PartPlate::render_grid(bool bottom) {
 #endif // !SLIC3R_OPENGL_ES
 
     m_gridlines_bolder.set_color(color);
-    m_gridlines_bolder.render();
+    m_gridlines_bolder.render(shader);
 
     shader->stop_using();
 }
@@ -4158,6 +4197,7 @@ void PartPlateList::reset_size(int width, int depth, int height, bool reload_obj
 //clear all the instances in the plate, but keep the plates
 void PartPlateList::clear(bool delete_plates, bool release_print_list, bool except_locked, int plate_index)
 {
+    close_preview_capture_dialog();
 	for (unsigned int i = 0; i < (unsigned int)m_plate_list.size(); ++i)
 	{
 		PartPlate* plate = m_plate_list[i];
@@ -4403,6 +4443,7 @@ int PartPlateList::destroy_print(int print_index)
 //update the plate index and position after it
 int PartPlateList::delete_plate(int index)
 {
+    close_preview_capture_dialog();
 	int ret = 0;
 	PartPlate* plate = NULL;
 
@@ -4548,7 +4589,7 @@ bool PartPlateList::check_all_plate_local_bed_type(const std::vector<BedType> &c
 }
 
 //get a plate pointer by index
-PartPlate* PartPlateList::get_plate(int index)
+PartPlate* PartPlateList::get_plate(int index) const
 {
 	PartPlate* plate = NULL;
 
@@ -4744,6 +4785,7 @@ void PartPlateList::update_all_plates_pos_and_size(bool adjust_position, bool wi
 //move the plate to position index
 int PartPlateList::move_plate_to_index(int old_index, int new_index)
 {
+    close_preview_capture_dialog();
 	int ret = 0, delta;
 	Vec3d origin;
 
@@ -5837,6 +5879,7 @@ void PartPlateList::get_sliced_result(std::vector<bool>& sliced_result, std::vec
 //rebuild data which are not serialized after de-serialize
 int PartPlateList::rebuild_plates_after_deserialize(std::vector<bool>& previous_sliced_result, std::vector<std::string>& previous_gcode_paths)
 {
+    close_preview_capture_dialog();
 	int ret = 0;
 
 	BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": plates count %1%") % m_plate_list.size();
@@ -5945,6 +5988,7 @@ int PartPlateList::rebuild_plates_after_deserialize(std::vector<bool>& previous_
 //retruct plates structures after auto-arrangement
 int PartPlateList::rebuild_plates_after_arrangement(bool recycle_plates, bool except_locked, int plate_index)
 {
+    close_preview_capture_dialog();
 	int ret = 0;
 
 	BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":before rebuild, plates count %1%, recycle_plates %2%") % m_plate_list.size() % recycle_plates;
@@ -6002,9 +6046,12 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 		plate_data_item->locked = m_plate_list[i]->m_locked;
 		plate_data_item->plate_index = m_plate_list[i]->m_plate_index;
 		plate_data_item->plate_name  = m_plate_list[i]->get_plate_name();
-		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": plate %1% before load, width %2%, height %3%, size %4%!")
-			%(i+1) %m_plate_list[i]->thumbnail_data.width %m_plate_list[i]->thumbnail_data.height %m_plate_list[i]->thumbnail_data.pixels.size();
-		plate_data_item->plate_thumbnail.load_from(m_plate_list[i]->thumbnail_data);
+        plate_data_item->preview_capture = m_plate_list[i]->preview_capture();
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__
+                                << boost::format(": plate %1% before load, width %2%, height %3%, size %4%!") % (i + 1) %
+                                       m_plate_list[i]->thumbnail_data.width % m_plate_list[i]->thumbnail_data.height %
+                                       m_plate_list[i]->thumbnail_data.pixels.size();
+        plate_data_item->plate_thumbnail.load_from(m_plate_list[i]->thumbnail_data);
 		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": plate %1% after load, width %2%, height %3%, size %4%!")
 			%(i+1) %plate_data_item->plate_thumbnail.width %plate_data_item->plate_thumbnail.height %plate_data_item->plate_thumbnail.pixels.size();
 		plate_data_item->config.apply(*m_plate_list[i]->config());
@@ -6090,11 +6137,11 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list, int f
 		m_plate_list[index]->m_locked = plate_data_list[i]->locked;
 		m_plate_list[index]->config()->apply(plate_data_list[i]->config);
 		m_plate_list[index]->set_plate_name(plate_data_list[i]->plate_name);
-		if (plate_data_list[i]->plate_index != index)
-		{
-			BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(":plate index %1% seems invalid, skip it")% plate_data_list[i]->plate_index;
-		}
-		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": plate %1%, gcode_file %2%, is_sliced_valid %3%, toolpath_outside %4%, is_support_used %5% is_label_object_enabled %6%")
+        m_plate_list[index]->set_preview_capture(plate_data_list[i]->preview_capture);
+        if (plate_data_list[i]->plate_index != index) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(":plate index %1% seems invalid, skip it")% plate_data_list[i]->plate_index;
+        }
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": plate %1%, gcode_file %2%, is_sliced_valid %3%, toolpath_outside %4%, is_support_used %5% is_label_object_enabled %6%")
 			%i %plate_data_list[i]->gcode_file %plate_data_list[i]->is_sliced_valid %plate_data_list[i]->toolpath_outside %plate_data_list[i]->is_support_used %plate_data_list[i]->is_label_object_enabled;
 		//load object and instance from 3mf
 		//just test for file correct or not, we will rebuild later

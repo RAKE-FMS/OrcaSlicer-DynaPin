@@ -15,6 +15,7 @@ namespace Slic3r {
 namespace GUI {
 
 class GLCanvas3D;
+struct Camera;
 
 /*
 class GeometryBuffer
@@ -82,6 +83,7 @@ public:
         }
         float get_total_length() const { return m_stem_length; } // + DefaultTipLength; } // ORCA axis without arrow
         void render();
+        void  render(const Camera& camera, GLShaderProgram* shader);
     };
 
 public:
@@ -159,6 +161,9 @@ public:
     void render(GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, float scale_factor, bool show_axes);
 
     void on_change_color_mode(bool is_dark);
+    const std::string& model_filename() const { return m_model_filename; }
+    BoundingBoxf3      capture_bounding_box();
+    void               render_capture(const Camera& camera, GLShaderProgram* flat, GLShaderProgram* hotbed, bool axes);
 
 private:
     //BBS: add partplate related logic
@@ -166,6 +171,7 @@ private:
     BoundingBoxf3 calc_printable_bounding_box() const;
     BoundingBoxf3 calc_extended_bounding_box() const;
     void update_model_offset();
+    void          load_model();
     //BBS: with offset
     void update_bed_triangles();
     static std::tuple<Type, std::string, std::string> detect_type(const Pointfs& shape);
@@ -175,9 +181,12 @@ private:
     void render_system(GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom);
     //void render_texture(bool bottom, GLCanvas3D& canvas);
     void render_model(const Transform3d& view_matrix, const Transform3d& projection_matrix);
+    void render_model(const Transform3d& view_matrix, const Transform3d& projection_matrix, GLShaderProgram* shader);
+
     void render_custom(GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom);
     void render_default(bool bottom, const Transform3d& view_matrix, const Transform3d& projection_matrix);
-    
+    void render_default(bool bottom, const Transform3d& view_matrix, const Transform3d& projection_matrix, GLShaderProgram* shader);
+
     // BBS: remove the bed picking logic
     // void register_raycasters_for_picking(const GLModel::Geometry& geometry, const Transform3d& trafo);
 };

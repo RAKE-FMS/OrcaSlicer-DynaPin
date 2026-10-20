@@ -3,6 +3,7 @@
 
 #include "libslic3r/BoundingBox.hpp"
 #include "3DScene.hpp"
+#include "libslic3r/PreviewCapture.hpp"
 #include <array>
 
 namespace Slic3r {
@@ -133,7 +134,7 @@ public:
     void apply_viewport() const;
     // Calculates and applies the projection matrix tighting the frustrum z range around the given box.
     // If larger z span is needed, pass the desired values of near and far z (negative values are ignored)
-    void apply_projection(const BoundingBoxf3& box, double near_z = -1.0, double far_z = -1.0);
+    void apply_projection(const BoundingBoxf3& box, double near_z = -1.0, double far_z = -1.0, bool preserve_view = false);
 
     void apply_projection(double left, double right, double bottom, double top, double near_z, double far_z);
 
@@ -174,6 +175,8 @@ public:
     void load_camera_view(Camera& cam);
 
     void look_at(const Vec3d& position, const Vec3d& target, const Vec3d& up);
+    PreviewCapture capture_view(const Vec3d& plate_origin);
+    void           restore_view(const PreviewCapture& capture, const Vec3d& plate_origin);
 
     double max_zoom() const { return 250.0; }
     double min_zoom() const { return 0.2 * calc_zoom_to_bounding_box_factor(m_scene_box); }
@@ -181,7 +184,7 @@ public:
 private:
     // returns tight values for nearZ and farZ plane around the given bounding box
     // the camera MUST be outside of the bounding box in eye coordinate of the given box
-    std::pair<double, double> calc_tight_frustrum_zs_around(const BoundingBoxf3& box);
+    std::pair<double, double> calc_tight_frustrum_zs_around(const BoundingBoxf3& box, bool preserve_view);
     double calc_zoom_to_bounding_box_factor(const BoundingBoxf3& box, double margin_factor = DefaultZoomToBoxMarginFactor) const;
     double calc_zoom_to_volumes_factor(const GLVolumePtrs& volumes, Vec3d& center, double margin_factor = DefaultZoomToVolumesMarginFactor) const;
     void set_distance(double distance);

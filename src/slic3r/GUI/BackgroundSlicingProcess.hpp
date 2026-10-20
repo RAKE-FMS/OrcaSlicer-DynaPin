@@ -96,7 +96,7 @@ public:
 	void set_current_plate(GUI::PartPlate* plate) { m_current_plate = plate; }
 	GUI::PartPlate* get_current_plate() { return m_current_plate; }
 	GCodeProcessorResult* get_current_gcode_result() { return m_gcode_result;}
-	const nlohmann::ordered_json& current_slice_statistics();
+	nlohmann::ordered_json current_slice_statistics() const;
 
 	// The following wxCommandEvent will be sent to the UI thread / Plater window, when the slicing is finished
 	// and the background processing will transition into G-code export.
@@ -238,8 +238,6 @@ private:
 	SLAPrint 				   *m_sla_print			 = nullptr;
 	// Data structure, to which the G-code export writes its annotations.
 	GCodeProcessorResult     *m_gcode_result 		 = nullptr;
-    unsigned int              m_slice_statistics_result_id = 0;
-    nlohmann::ordered_json    m_slice_statistics;
 	// Callback function, used to write thumbnails into gcode.
 	ThumbnailsGeneratorCallback m_thumbnail_cb 	     = nullptr;
 	SL1Archive                  m_sla_archive;

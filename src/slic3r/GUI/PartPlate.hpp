@@ -108,6 +108,8 @@ private:
 
     Print *m_print; //Print reference, not own it, no need to serialize
     GCodeProcessorResult *m_gcode_result;
+    // Runtime-only log state, kept with its plate when switching or reordering plates.
+    unsigned int m_last_logged_slice_result_id{0};
     std::vector<FilamentInfo> slice_filaments_info;
     int m_print_index;
 
@@ -161,6 +163,7 @@ private:
     // SoftFever
     // part plate name
     std::string m_name;
+    std::optional<PreviewCapture> m_preview_capture;
     GLModel m_plate_name_icon;
     GLTexture m_name_texture;
     wxCoord m_name_texture_width;
@@ -184,9 +187,13 @@ private:
     void render_background(bool force_default_color = false);
     void render_logo(bool bottom, bool render_cali = true);
     void render_logo_texture(GLTexture &logo_texture, GLModel &logo_buffer, bool bottom);
+    void render_logo_texture(GLTexture& texture, GLModel& model, bool bottom, const Camera& camera, GLShaderProgram* shader);
+
     void render_exclude_area(bool force_default_color);
     //void render_background_for_picking(const ColorRGBA render_color) const;
     void render_grid(bool bottom);
+    void render_grid(bool bottom, const Camera& camera, GLShaderProgram* flat, GLShaderProgram* lines, bool dark);
+
     void render_wrapping_detection_area(bool force_default_color);
     void render_height_limit(PartPlate::HeightLimitMode mode = HEIGHT_LIMIT_BOTH);
     // void render_label(GLCanvas3D& canvas) const;
@@ -295,6 +302,9 @@ public:
     // SoftFever
     //get the plate's name
     std::string get_plate_name() const { return m_name; }
+    const std::optional<PreviewCapture>& preview_capture() const { return m_preview_capture; }
+    void set_preview_capture(std::optional<PreviewCapture> capture) { m_preview_capture = std::move(capture); }
+
     void generate_plate_name_texture();
     //set the plate's name
     void set_plate_name(const std::string& name);
@@ -395,6 +405,18 @@ public:
 
     /*rendering related functions*/
     const Pointfs& get_shape() const { return m_shape; }
+    const Pointfs& get_exclude_shape() const { return m_exclude_area; }
+    void           capture_bed_textures(PreviewCapture& capture);
+
+    void render_capture(const Camera&                                       camera,
+                        GLShaderProgram*                                    flat,
+                        GLShaderProgram*                                    lines,
+                        GLShaderProgram*                                    printbed,
+                        GLTexture*                                          texture,
+                        bool                                                dark,
+                        bool                                                grid,
+                        const std::vector<std::pair<GLTexture*, GLModel*>>& texture_parts = {});
+
     bool set_shape(const Pointfs& shape, const Pointfs& exclude_areas, const std::vector<Pointfs>& extruder_areas, const std::vector<double>& extruder_heights, Vec2d position, float height_to_lid, float height_to_rod);
     const std::vector<Pointfs>& get_extruder_areas() const { return m_extruder_areas; }
     const std::vector<double>& get_extruder_heights() const { return m_extruder_heights; }
@@ -446,6 +468,9 @@ public:
     {
         m_apply_invalid = invalid;
     }
+
+    unsigned int last_logged_slice_result_id() const { return m_last_logged_slice_result_id; }
+    void set_last_logged_slice_result_id(unsigned int result_id) { m_last_logged_slice_result_id = result_id; }
 
     //is slice result valid or not
     bool is_slice_result_valid() const
@@ -525,7 +550,9 @@ public:
         std::vector<std::pair<int, int>>	objects_and_instances;
         std::vector<std::pair<int, int>>	instances_outside;
 
-        ar(m_plate_index, m_name, m_print_index, m_origin, m_width, m_depth, m_height, m_locked, m_selected, m_ready_for_slice, m_slice_result_valid, m_apply_invalid, m_printable, m_tmp_gcode_path, objects_and_instances, instances_outside, m_config);
+        ar(m_plate_index, m_name, m_print_index, m_origin, m_width, m_depth, m_height, m_locked, m_selected, m_ready_for_slice,
+           m_slice_result_valid, m_apply_invalid, m_printable, m_tmp_gcode_path, objects_and_instances, instances_outside, m_config,
+           m_preview_capture);
 
         for (std::vector<std::pair<int, int>>::iterator it = objects_and_instances.begin(); it != objects_and_instances.end(); ++it)
             obj_to_instance_set.insert(std::pair(it->first, it->second));
@@ -543,7 +570,9 @@ public:
         for (std::set<std::pair<int, int>>::iterator it = obj_to_instance_set.begin(); it != obj_to_instance_set.end(); ++it)
             objects_and_instances.emplace_back(it->first, it->second);
 
-        ar(m_plate_index, m_name, m_print_index, m_origin, m_width, m_depth, m_height, m_locked, m_selected, m_ready_for_slice, m_slice_result_valid, m_apply_invalid, m_printable, m_tmp_gcode_path, objects_and_instances, instances_outside, m_config);
+        ar(m_plate_index, m_name, m_print_index, m_origin, m_width, m_depth, m_height, m_locked, m_selected, m_ready_for_slice,
+           m_slice_result_valid, m_apply_invalid, m_printable, m_tmp_gcode_path, objects_and_instances, instances_outside, m_config,
+           m_preview_capture);
     }
     /*template<class Archive> void serialize(Archive& ar)
     {
@@ -677,6 +706,8 @@ public:
         void                     reset();
     };
 
+    std::vector<BedTextureInfo::TexturePart*> preview_texture_parts(PartPlate& plate, bool calibration);
+
     static constexpr unsigned int MAX_PLATES_COUNT = MAX_PLATE_COUNT;
     static GLTexture bed_textures[(unsigned int)btCount];
     static bool is_load_bedtype_textures;
@@ -730,7 +761,7 @@ public:
 
     bool check_all_plate_local_bed_type(const std::vector<BedType>& cur_bed_types);
     //get a plate pointer by index
-    PartPlate* get_plate(int index);
+    PartPlate* get_plate(int index) const;
 
     void get_height_limits(float& height_to_lid, float& height_to_rod)
     {

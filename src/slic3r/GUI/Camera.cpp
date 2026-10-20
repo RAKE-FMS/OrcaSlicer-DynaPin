@@ -274,12 +274,12 @@ void Camera::apply_viewport() const
     glsafe(::glViewport(m_viewport[0], m_viewport[1], m_viewport[2], m_viewport[3]));
 }
 
-void Camera::apply_projection(const BoundingBoxf3& box, double near_z, double far_z)
+void Camera::apply_projection(const BoundingBoxf3& box, double near_z, double far_z, bool preserve_view)
 {
     double w = 0.0;
     double h = 0.0;
 
-    m_frustrum_zs = calc_tight_frustrum_zs_around(box);
+    m_frustrum_zs = calc_tight_frustrum_zs_around(box, preserve_view);
 
     if (near_z > 0.0)
         m_frustrum_zs.first = std::max(std::min(m_frustrum_zs.first, near_z), FrustrumMinNearZ);
@@ -502,7 +502,7 @@ void Camera::set_rotation(const Transform3d& rotation)
     update_zenit();
 }
 
-std::pair<double, double> Camera::calc_tight_frustrum_zs_around(const BoundingBoxf3& box)
+std::pair<double, double> Camera::calc_tight_frustrum_zs_around(const BoundingBoxf3& box, bool preserve_view)
 {
     std::pair<double, double> ret;
     auto& [near_z, far_z] = ret;
@@ -525,10 +525,16 @@ std::pair<double, double> Camera::calc_tight_frustrum_zs_around(const BoundingBo
     }
 
     if (near_z < FrustrumMinNearZ) {
-        const double delta = FrustrumMinNearZ - near_z;
-        set_distance(m_distance + delta);
-        near_z += delta;
-        far_z += delta;
+        if (preserve_view) {
+            // Captures keep their recorded camera, even when scene bounds extend behind it.
+            near_z = FrustrumMinNearZ;
+            far_z  = std::max(far_z, near_z + FrustrumMinZRange);
+        } else {
+            const double delta = FrustrumMinNearZ - near_z;
+            set_distance(m_distance + delta);
+            near_z += delta;
+            far_z += delta;
+        }
     }
 // The following is commented out because it causes flickering of the 3D scene GUI
 // when the bounding box of the scene gets large enough
@@ -719,6 +725,37 @@ void Camera::look_at(const Vec3d& position, const Vec3d& target, const Vec3d& up
     m_view_rotation.normalize();
 
     update_zenit();
+}
+
+PreviewCapture Camera::capture_view(const Vec3d& plate_origin)
+{
+    PreviewCapture capture;
+    const Vec3d    position = get_position() - plate_origin;
+    const Vec3d    target   = get_target() - plate_origin;
+    const Vec3d    up       = get_dir_up();
+    for (size_t i = 0; i < 3; ++i) {
+        capture.position[i] = position[i];
+        capture.target[i]   = target[i];
+        capture.up[i]       = up[i];
+    }
+    capture.zoom        = m_zoom;
+    capture.perspective = m_type == EType::Perspective;
+    capture.width       = m_viewport[2];
+    capture.height      = m_viewport[3];
+    return capture;
+}
+
+void Camera::restore_view(const PreviewCapture& capture, const Vec3d& plate_origin)
+{
+    capture.validate();
+    // Display metadata must neither update printer preferences nor clamp the saved framing.
+    m_type              = capture.perspective ? EType::Perspective : EType::Ortho;
+    m_prevent_auto_type = true;
+    look_at(Vec3d(capture.position.data()) + plate_origin, Vec3d(capture.target.data()) + plate_origin, Vec3d(capture.up.data()));
+    m_zoom = capture.zoom;
+    set_viewport(0, 0, capture.width, capture.height);
+    requires_zoom_to_bed = requires_zoom_to_volumes = false;
+    requires_zoom_to_plate                          = REQUIRES_ZOOM_TO_PLATE_IDLE;
 }
 
 void Camera::set_default_orientation()
