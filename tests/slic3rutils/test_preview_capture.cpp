@@ -41,6 +41,44 @@ TEST_CASE("Capture camera preserves plate-relative framing", "[preview_capture]"
     REQUIRE(restored.get_target().isApprox(target));
 }
 
+TEST_CASE("Capture resizing preserves vertical framing", "[preview_capture]")
+{
+    PreviewCapture original;
+    original.width    = 1600;
+    original.height   = 900;
+    original.position = {150, -180, 180};
+    original.target   = {50, 50, 0};
+    original.zoom     = 2.0;
+    const BoundingBoxf3 bounds(Vec3d::Zero(), Vec3d(100, 100, 100));
+    for (bool perspective : {false, true}) {
+        original.perspective = perspective;
+        Camera before;
+        before.restore_view(original, Vec3d::Zero());
+        before.apply_projection(bounds, -1, -1, true);
+        for (const auto& size : {std::pair<unsigned, unsigned>{800, 450}, {900, 900}, {450, 800}, {1600, 1200}}) {
+            const auto resized = original.resized(size.first, size.second);
+            Camera     after;
+            after.restore_view(resized, Vec3d::Zero());
+            after.apply_projection(bounds, -1, -1, true);
+            REQUIRE(after.get_position().isApprox(before.get_position()));
+            REQUIRE(after.get_target().isApprox(before.get_target()));
+            REQUIRE(resized.zoom == Catch::Approx(original.zoom * size.second / original.height));
+            const Vec4d point(50, 40, 10, 1);
+            const Vec4d a = before.get_projection_matrix().matrix() * before.get_view_matrix().matrix() * point;
+            const Vec4d b = after.get_projection_matrix().matrix() * after.get_view_matrix().matrix() * point;
+            REQUIRE(b.y() / b.w() == Catch::Approx(a.y() / a.w()));
+            const double aspect_before = double(original.width) / original.height;
+            const double aspect_after  = double(resized.width) / resized.height;
+            REQUIRE(b.x() / b.w() * aspect_after == Catch::Approx(a.x() / a.w() * aspect_before));
+        }
+    }
+    REQUIRE_THROWS(original.resized(0, 900));
+    REQUIRE_THROWS(original.resized(16385, 900));
+    REQUIRE_THROWS(original.resized(10000, 10000));
+    REQUIRE(original.width == 1600);
+    REQUIRE(original.height == 900);
+}
+
 // Explicit opt-in: this integration test requires a working desktop OpenGL context.
 TEST_CASE("Render preview PNG through hidden CLI context", "[.preview_capture_render]")
 {

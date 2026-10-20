@@ -120,6 +120,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/FileArchiveDialog.cpp
     GUI/FileArchiveDialog.hpp
     GUI/format.hpp
+    GUI/PreviewCaptureDialog.cpp
+    GUI/PreviewCaptureDialog.hpp
     GUI/PreviewCaptureRenderer.cpp
     GUI/PreviewCaptureRenderer.hpp
     GUI/GCodeViewer.cpp

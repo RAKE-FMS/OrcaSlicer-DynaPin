@@ -33,6 +33,7 @@
 #include "2DBed.hpp"
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
+#include "PreviewCaptureDialog.hpp"
 #include "Camera.hpp"
 #include "GUI_Colors.hpp"
 #include "GUI_ObjectList.hpp"
@@ -4196,6 +4197,7 @@ void PartPlateList::reset_size(int width, int depth, int height, bool reload_obj
 //clear all the instances in the plate, but keep the plates
 void PartPlateList::clear(bool delete_plates, bool release_print_list, bool except_locked, int plate_index)
 {
+    close_preview_capture_dialog();
 	for (unsigned int i = 0; i < (unsigned int)m_plate_list.size(); ++i)
 	{
 		PartPlate* plate = m_plate_list[i];
@@ -4441,6 +4443,7 @@ int PartPlateList::destroy_print(int print_index)
 //update the plate index and position after it
 int PartPlateList::delete_plate(int index)
 {
+    close_preview_capture_dialog();
 	int ret = 0;
 	PartPlate* plate = NULL;
 
@@ -4782,6 +4785,7 @@ void PartPlateList::update_all_plates_pos_and_size(bool adjust_position, bool wi
 //move the plate to position index
 int PartPlateList::move_plate_to_index(int old_index, int new_index)
 {
+    close_preview_capture_dialog();
 	int ret = 0, delta;
 	Vec3d origin;
 
@@ -5875,6 +5879,7 @@ void PartPlateList::get_sliced_result(std::vector<bool>& sliced_result, std::vec
 //rebuild data which are not serialized after de-serialize
 int PartPlateList::rebuild_plates_after_deserialize(std::vector<bool>& previous_sliced_result, std::vector<std::string>& previous_gcode_paths)
 {
+    close_preview_capture_dialog();
 	int ret = 0;
 
 	BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": plates count %1%") % m_plate_list.size();
@@ -5983,6 +5988,7 @@ int PartPlateList::rebuild_plates_after_deserialize(std::vector<bool>& previous_
 //retruct plates structures after auto-arrangement
 int PartPlateList::rebuild_plates_after_arrangement(bool recycle_plates, bool except_locked, int plate_index)
 {
+    close_preview_capture_dialog();
 	int ret = 0;
 
 	BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(":before rebuild, plates count %1%, recycle_plates %2%") % m_plate_list.size() % recycle_plates;

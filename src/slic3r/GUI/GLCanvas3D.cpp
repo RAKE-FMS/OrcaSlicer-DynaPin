@@ -1,7 +1,7 @@
 #include "libslic3r/libslic3r.h"
 #include "GLCanvas3D.hpp"
 #include "PreviewCaptureRenderer.hpp"
-#include <wx/filedlg.h>
+#include "PreviewCaptureDialog.hpp"
 
 #include <igl/unproject.h>
 
@@ -8636,39 +8636,16 @@ void GLCanvas3D::_restore_preview_capture()
     }
 }
 
-void GLCanvas3D::_delete_preview_capture()
-{
-    auto* plater = wxGetApp().plater();
-    auto* plate  = plater->get_partplate_list().get_curr_plate();
-    if (plate && plate->preview_capture()) {
-        plater->take_snapshot(_u8L("Delete preview capture view"), UndoRedo::SnapshotType::PreviewCapture);
-        plate->set_preview_capture(std::nullopt);
-        plater->set_plater_dirty(true);
-        set_as_dirty();
-    }
-}
-
-void GLCanvas3D::_export_preview_capture()
-{
-    auto* plater = wxGetApp().plater();
-    auto* plate  = plater->get_partplate_list().get_curr_plate();
-    if (!plate || !plate->preview_capture() || !plate->is_slice_result_valid() || plater->is_background_process_slicing())
-        return;
-    wxFileDialog dialog(m_canvas, _L("Save preview image"), wxEmptyString, "preview.png", "PNG (*.png)|*.png",
-                        wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
-    if (dialog.ShowModal() != wxID_OK || !_set_current() || plater->is_background_process_slicing() || !plate->is_slice_result_valid())
-        return;
-    try {
-        export_preview_capture(into_u8(dialog.GetPath()), *plate);
-    } catch (const std::exception& e) {
-        wxMessageBox(from_u8(e.what()), _L("Preview capture failed"), wxOK | wxICON_WARNING, m_canvas);
-    }
-}
-
 void GLCanvas3D::export_preview_capture(const std::string& path, PartPlate& plate)
 {
-    if (!plate.preview_capture())
-        return;
+    if (plate.preview_capture())
+        save_preview_image(path, render_preview_capture(*plate.preview_capture(), plate));
+}
+
+ThumbnailData GLCanvas3D::render_preview_capture(const PreviewCapture& capture, PartPlate& plate)
+{
+    if (wxGetApp().plater()->is_background_process_running())
+        throw std::runtime_error("Preview capture is waiting for background processing");
     if (!_set_current())
         throw std::runtime_error("Cannot activate the preview OpenGL context");
     PrintBase*   base   = nullptr;
@@ -8680,7 +8657,7 @@ void GLCanvas3D::export_preview_capture(const std::string& path, PartPlate& plat
     result->lock();
     ScopeGuard unlock_result([result] { result->unlock(); });
     ScopeGuard redraw([this] { set_as_dirty(); });
-    export_preview_image(path, *plate.preview_capture(), *print, *result, plate, wxGetApp().get_opengl_manager());
+    return render_preview_image(capture, *print, *result, plate, wxGetApp().get_opengl_manager());
 }
 
 void GLCanvas3D::_render_canvas_toolbar()
@@ -8751,7 +8728,7 @@ void GLCanvas3D::_render_canvas_toolbar()
         }
     }
 
-    if (m_canvas_type == ECanvasType::CanvasPreview) {
+    if (m_canvas_type == ECanvasType::CanvasPreview && wxGetApp().show_canvas_capture_button()) {
         ImGui::Dummy({0, spacing.y});
         const ImVec2 top_left  = ImGui::GetCursorScreenPos();
         const bool   available = m_gcode_viewer.has_data();
@@ -8760,24 +8737,30 @@ void GLCanvas3D::_render_canvas_toolbar()
         auto*        draw     = ImGui::GetWindowDrawList();
         const auto*  plate    = wxGetApp().plater()->get_partplate_list().get_curr_plate();
         const bool   recorded = plate && plate->preview_capture().has_value();
-        const ImU32  color = ImGui::GetColorU32(available ? (recorded ? ImGuiWrapper::COL_ORCA : ImGui::GetStyleColorVec4(ImGuiCol_Text)) :
-                                                            ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-        const ImVec2 a     = top_left + ImVec2(7, 11) * sc;
-        draw->AddRect(a, top_left + ImVec2(29, 28) * sc, color, 3 * sc, 0, 1.5f * sc);
-        draw->AddCircle(top_left + ImVec2(18, 19) * sc, 5 * sc, color, 16, 1.5f * sc);
-        draw->AddLine(top_left + ImVec2(12, 10) * sc, top_left + ImVec2(24, 10) * sc, color, 3 * sc);
-        if (ImGui::IsItemHovered())
-            imgui.tooltip(_u8L("Record preview capture view. Right-click to restore, delete or export."), imgui.scaled(300.0f));
-        if (ImGui::BeginPopupContextItem("PreviewCaptureMenu")) {
-            if (ImGui::MenuItem(_u8L("Restore recorded view").c_str(), nullptr, false, recorded))
-                wxGetApp().CallAfter([this] { _restore_preview_capture(); });
-            if (ImGui::MenuItem(_u8L("Delete recorded view").c_str(), nullptr, false, recorded))
-                wxGetApp().CallAfter([this] { _delete_preview_capture(); });
-            const bool can_export = recorded && plate->is_slice_result_valid() && !wxGetApp().plater()->is_background_process_slicing();
-            if (ImGui::MenuItem(_u8L("Export preview PNG").c_str(), nullptr, false, can_export))
-                wxGetApp().CallAfter([this] { _export_preview_capture(); });
-            ImGui::EndPopup();
-        }
+        const bool   hovered  = ImGui::IsItemHovered();
+        const ImU32  color    = ImGui::GetColorU32(
+            available ? (m_is_dark ? ImVec4(182 / 255.f, 182 / 255.f, 182 / 255.f, 1) : ImVec4(43 / 255.f, 52 / 255.f, 54 / 255.f, 1)) :
+                        ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        draw->AddCircleFilled(top_left + ImVec2(17.5f, 17.5f) * sc, 17.5f * sc,
+                              ImGui::GetColorU32(hovered ? (m_is_dark ? ImVec4(40 / 255.f, 50 / 255.f, 50 / 255.f, 1) :
+                                                                        ImVec4(229 / 255.f, 240 / 255.f, 238 / 255.f, 1)) :
+                                                           (m_is_dark ? ImGuiWrapper::COL_TOOLBAR_BG_DARK : ImGuiWrapper::COL_TOOLBAR_BG)));
+        const ImVec2 a = top_left + ImVec2(7, 11) * sc;
+        draw->AddRect(a, top_left + ImVec2(29, 28) * sc, color, 3 * sc, 0, 1.f * sc);
+        draw->AddCircle(top_left + ImVec2(18, 19) * sc, 5 * sc, color, 16, 1.f * sc);
+        draw->AddLine(top_left + ImVec2(12, 10) * sc, top_left + ImVec2(24, 10) * sc, color, 2 * sc);
+        if (recorded)
+            draw->AddCircleFilled(top_left + ImVec2(29, 7) * sc, 3 * sc, ImGui::GetColorU32(ImGuiWrapper::COL_ORCA));
+        if (hovered)
+            imgui.tooltip(recorded ? _u8L("View recorded. Left-click to overwrite; right-click for capture settings.") :
+                                     _u8L("Record preview capture view. Right-click for capture settings."),
+                          imgui.scaled(300.0f));
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
+            wxGetApp().CallAfter([this] {
+                auto* plate = wxGetApp().plater()->get_partplate_list().get_curr_plate();
+                if (plate)
+                    show_preview_capture_dialog(*this, *plate);
+            });
     }
 
     ImGui::PopStyleVar(4); // Window
@@ -8823,6 +8806,12 @@ void GLCanvas3D::_render_canvas_toolbar()
                          wxGetApp().show_canvas_zoom_button(), [this] {
                              wxGetApp().toggle_canvas_zoom_button();
                              ImGui::CloseCurrentPopup(); // Close popup to show changes on UI
+                         });
+
+        create_menu_item(_utf8(L("Capture button")), m_canvas_type == ECanvasType::CanvasPreview, wxGetApp().show_canvas_capture_button(),
+                         [this] {
+                             wxGetApp().toggle_canvas_capture_button();
+                             ImGui::CloseCurrentPopup();
                          });
 
         ImGui::Separator();

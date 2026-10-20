@@ -1,4 +1,5 @@
 #include "Plater.hpp"
+#include "PreviewCaptureDialog.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r_version.h"
 
@@ -11420,6 +11421,7 @@ bool Plater::priv::up_to_date(bool saved, bool backup)
 
 void Plater::priv::undo_redo_to(std::vector<UndoRedo::Snapshot>::const_iterator it_snapshot)
 {
+    close_preview_capture_dialog();
     // Make sure that no updating function calls take_snapshot until we are done.
     SuppressSnapshots snapshot_supressor(q);
 
@@ -17893,6 +17895,8 @@ bool Plater::is_background_process_slicing() const
 {
     return p->m_is_slicing;
 }
+
+bool Plater::is_background_process_running() const { return p->background_process.running(); }
 
 //BBS: update slicing context
 void Plater::update_slicing_context_to_current_partplate()

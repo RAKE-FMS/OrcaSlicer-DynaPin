@@ -33,6 +33,16 @@ void PreviewCapture::validate() const
             throw std::runtime_error("Invalid preview capture background");
 }
 
+PreviewCapture PreviewCapture::resized(unsigned int new_width, unsigned int new_height) const
+{
+    auto capture = *this;
+    capture.zoom *= double(new_height) / height;
+    capture.width  = new_width;
+    capture.height = new_height;
+    capture.validate();
+    return capture;
+}
+
 void to_json(nlohmann::json& j, const PreviewCaptureTexture& texture) { j = {{"rectangle", texture.rectangle}, {"file", texture.file}}; }
 void from_json(const nlohmann::json& j, PreviewCaptureTexture& texture)
 {

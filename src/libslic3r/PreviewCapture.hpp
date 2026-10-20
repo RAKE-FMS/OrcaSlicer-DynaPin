@@ -41,6 +41,7 @@ struct PreviewCapture
     float                                     shell_opacity = 0.15f;
 
     void                         validate() const;
+    PreviewCapture               resized(unsigned int width, unsigned int height) const;
     template<class Archive> void serialize(Archive& ar)
     {
         ar(position, target, up, zoom, perspective, width, height, background, role_colors, dark, bed, axes, grid, dynapin, bed_model,

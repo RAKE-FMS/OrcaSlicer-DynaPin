@@ -177,12 +177,8 @@ std::string preview_capture_asset_path(const std::string& path)
     return path;
 }
 
-void export_preview_image(const std::string&          path,
-                          const PreviewCapture&       capture,
-                          const Print&                print,
-                          const GCodeProcessorResult& result,
-                          PartPlate&                  source_plate,
-                          OpenGLManager&              gl)
+ThumbnailData render_preview_image(
+    const PreviewCapture& capture, const Print& print, const GCodeProcessorResult& result, PartPlate& source_plate, OpenGLManager& gl)
 {
     capture.validate();
     if (result.moves.empty())
@@ -298,6 +294,11 @@ void export_preview_image(const std::string&          path,
     glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glReadPixels(0, 0, capture.width, capture.height, GL_RGBA, GL_UNSIGNED_BYTE, image.pixels.data());
+    return image;
+}
+
+void save_preview_image(const std::string& path, const ThumbnailData& image)
+{
     // The existing thumbnail encoder flips OpenGL's bottom-up rows.
     const auto png = GCodeThumbnails::compress_thumbnail(image, GCodeThumbnailsFormat::PNG);
     if (!png || !png->data)
@@ -317,6 +318,14 @@ void export_preview_image(const std::string&          path,
         throw std::runtime_error("Cannot replace preview PNG: " + path);
     }
 }
+
+void export_preview_image(const std::string&          path,
+                          const PreviewCapture&       capture,
+                          const Print&                print,
+                          const GCodeProcessorResult& result,
+                          PartPlate&                  plate,
+                          OpenGLManager&              gl)
+{ save_preview_image(path, render_preview_image(capture, print, result, plate, gl)); }
 
 void export_preview_image_cli(
     const std::string& path, const PreviewCapture& capture, const Print& print, const GCodeProcessorResult& result, PartPlate& plate)

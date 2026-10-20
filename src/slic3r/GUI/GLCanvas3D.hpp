@@ -732,6 +732,8 @@ public:
 
     void set_context(wxGLContext* context) { m_context = context; }
     // UI thread only; the caller must wait for slicing/export to finish.
+    friend class PreviewCaptureDialog;
+    ThumbnailData render_preview_capture(const PreviewCapture& capture, PartPlate& plate);
     void        export_preview_capture(const std::string& path, PartPlate& plate);
     void set_type(ECanvasType type) { m_canvas_type = type; }
     ECanvasType get_canvas_type() { return m_canvas_type; }
@@ -1261,8 +1263,6 @@ private:
     void _render_canvas_toolbar();
     void _record_preview_capture();
     void _restore_preview_capture();
-    void _delete_preview_capture();
-    void _export_preview_capture();
 
     void _render_separator_toolbar_right() const;
     void _render_separator_toolbar_left() const;

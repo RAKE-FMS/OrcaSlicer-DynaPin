@@ -2,6 +2,7 @@
 #define slic3r_PreviewCaptureRenderer_hpp_
 
 #include "libslic3r/PreviewCapture.hpp"
+#include "libslic3r/GCode/ThumbnailData.hpp"
 #include <string>
 
 namespace Slic3r {
@@ -11,6 +12,10 @@ namespace GUI {
 class PartPlate;
 class OpenGLManager;
 
+// Requires a current GL context; pixels use OpenGL's bottom-up RGBA row order.
+ThumbnailData render_preview_image(
+    const PreviewCapture& capture, const Print& print, const GCodeProcessorResult& result, PartPlate& plate, OpenGLManager& gl);
+void save_preview_image(const std::string& path, const ThumbnailData& image);
 // Requires a current GL context. All capture GPU resources are released before returning.
 void export_preview_image(const std::string&          path,
                           const PreviewCapture&       capture,

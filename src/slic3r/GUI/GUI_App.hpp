@@ -366,6 +366,8 @@ public:
     bool show_plate_gridlines() const { return app_config->get_bool("show_plate_gridlines"); }
     void toggle_show_plate_gridlines() const { app_config->set_bool("show_plate_gridlines", !show_plate_gridlines()); }
 
+    bool show_canvas_capture_button() const { return app_config->get_bool("show_canvas_capture_button"); }
+    void toggle_canvas_capture_button() const { app_config->set_bool("show_canvas_capture_button", !show_canvas_capture_button()); }
     bool show_canvas_zoom_button() const { return app_config->get_bool("show_canvas_zoom_button"); }
     void toggle_canvas_zoom_button() const { app_config->set_bool("show_canvas_zoom_button", !show_canvas_zoom_button()); }
 
