@@ -6712,6 +6712,9 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
         }
     };
 
+    if (m_enable_cooling_markers && path.is_dynapin_landing)
+        gcode += std::string(DynaPin::LANDING_FAN_START) + "\n";
+
     std::string comment;
     if (m_enable_cooling_markers) {
         comment = ";_EXTRUDE_SET_SPEED";
@@ -7022,6 +7025,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     }
     if (m_enable_cooling_markers) {
         gcode += ";_EXTRUDE_END\n";
+        if (path.is_dynapin_landing)
+            gcode += std::string(DynaPin::LANDING_FAN_END) + "\n";
     }
 
     if (path.role() != ExtrusionRole::erGapFill) {

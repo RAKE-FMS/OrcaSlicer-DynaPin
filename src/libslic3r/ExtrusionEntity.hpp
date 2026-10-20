@@ -157,43 +157,48 @@ public:
     float width;
     // Height of the extrusion, used for visualization purposes.
     float height;
+    bool  is_dynapin_landing = false;
 
     ExtrusionPath() : mm3_per_mm(-1), width(-1), height(-1), m_role(erNone), m_no_extrusion(false) {}
     ExtrusionPath(ExtrusionRole role) : mm3_per_mm(-1), width(-1), height(-1), m_role(role), m_no_extrusion(false) {}
     ExtrusionPath(ExtrusionRole role, double mm3_per_mm, float width, float height, bool no_extrusion = false) : mm3_per_mm(mm3_per_mm), width(width), height(height), m_role(role), m_no_extrusion(no_extrusion) {}
 
-    ExtrusionPath(const ExtrusionPath &rhs)
+    ExtrusionPath(const ExtrusionPath& rhs)
         : polyline(rhs.polyline)
         , mm3_per_mm(rhs.mm3_per_mm)
         , width(rhs.width)
         , height(rhs.height)
+        , is_dynapin_landing(rhs.is_dynapin_landing)
         , m_can_reverse(rhs.m_can_reverse)
         , m_role(rhs.m_role)
         , m_no_extrusion(rhs.m_no_extrusion)
     {}
-    ExtrusionPath(ExtrusionPath &&rhs)
+    ExtrusionPath(ExtrusionPath&& rhs)
         : polyline(std::move(rhs.polyline))
         , mm3_per_mm(rhs.mm3_per_mm)
         , width(rhs.width)
         , height(rhs.height)
+        , is_dynapin_landing(rhs.is_dynapin_landing)
         , m_can_reverse(rhs.m_can_reverse)
         , m_role(rhs.m_role)
         , m_no_extrusion(rhs.m_no_extrusion)
     {}
-    ExtrusionPath(const Polyline &polyline, const ExtrusionPath &rhs)
+    ExtrusionPath(const Polyline& polyline, const ExtrusionPath& rhs)
         : polyline(polyline)
         , mm3_per_mm(rhs.mm3_per_mm)
         , width(rhs.width)
         , height(rhs.height)
+        , is_dynapin_landing(rhs.is_dynapin_landing)
         , m_can_reverse(rhs.m_can_reverse)
         , m_role(rhs.m_role)
         , m_no_extrusion(rhs.m_no_extrusion)
     {}
-    ExtrusionPath(Polyline &&polyline, const ExtrusionPath &rhs)
+    ExtrusionPath(Polyline&& polyline, const ExtrusionPath& rhs)
         : polyline(std::move(polyline))
         , mm3_per_mm(rhs.mm3_per_mm)
         , width(rhs.width)
         , height(rhs.height)
+        , is_dynapin_landing(rhs.is_dynapin_landing)
         , m_can_reverse(rhs.m_can_reverse)
         , m_role(rhs.m_role)
         , m_no_extrusion(rhs.m_no_extrusion)
@@ -206,6 +211,7 @@ public:
         this->mm3_per_mm = rhs.mm3_per_mm;
         this->width = rhs.width;
         this->height = rhs.height;
+        this->is_dynapin_landing = rhs.is_dynapin_landing;
         this->polyline = rhs.polyline;
         return *this;
     }
@@ -216,6 +222,7 @@ public:
         this->mm3_per_mm = rhs.mm3_per_mm;
         this->width = rhs.width;
         this->height = rhs.height;
+        this->is_dynapin_landing = rhs.is_dynapin_landing;
         this->polyline = std::move(rhs.polyline);
         return *this;
     }

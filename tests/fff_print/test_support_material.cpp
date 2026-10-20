@@ -3,6 +3,7 @@
 #include "libslic3r/DynaPin.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/utils.hpp"
@@ -14,6 +15,8 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <set>
+#include <fstream>
 
 using namespace Slic3r::Test;
 using namespace Slic3r;
@@ -541,3 +544,139 @@ SCENARIO("SupportMaterial: Checking bridge speed", "[SupportMaterial]")
 }
 
 #endif
+
+TEST_CASE("DynaPin landing interfaces follow bottom depth and reslicing", "[DynaPin][SupportMaterial][Cooling]")
+{
+    ResourcesDirGuard resources_guard(test_resources_dir());
+    DataDirGuard      data_dir_guard;
+    Print             print;
+    Model             model;
+    TriangleMesh      mesh = Test::mesh(TestMesh::cube_20x20x20);
+    TriangleMesh      slab = Test::mesh(TestMesh::cube_20x20x20);
+    slab.scale(Vec3f(10.f, 5.f, 0.1f));
+    slab.translate(0.f, 0.f, 50.f);
+    mesh.merge(slab);
+    ModelObject* object = model.add_object();
+    object->add_volume(std::move(mesh));
+    object->add_instance();
+    object->ensure_on_bed();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_support", true},
+        {"enable_dynapin_support_optimization", true},
+        {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+        {"dynapin_selected_pins", "5,0"},
+        {"dynapin_debug_stage", 2},
+        {"support_type", "normal(auto)"},
+        {"support_interface_top_layers", 2},
+        {"support_interface_bottom_layers", 2},
+    });
+    // Static enum-vector defaults lack the maps normally supplied by preset loading.
+    for (const std::string& key : config.keys()) {
+        ConfigOption* option = config.option(key);
+        if (option->type() == coEnums) {
+            const auto* definition = print_config_def.get(key);
+            REQUIRE(definition->enum_keys_map != nullptr);
+            if (option->nullable())
+                static_cast<ConfigOptionEnumsGenericNullable*>(option)->keys_map = definition->enum_keys_map;
+            else
+                static_cast<ConfigOptionEnumsGeneric*>(option)->keys_map = definition->enum_keys_map;
+        }
+    }
+    print.auto_assign_extruders(object);
+    auto landing_layers = [&]() {
+        size_t count = 0;
+        for (const SupportLayer* layer : print.objects().front()->support_layers()) {
+            bool       has_landing = false;
+            const auto flat        = layer->support_fills.flatten();
+            auto       check_path  = [&](const ExtrusionPath& path) {
+                if (path.is_dynapin_landing) {
+                    CHECK(path.role() == erSupportMaterialInterface);
+                    has_landing = true;
+                }
+            };
+            for (const ExtrusionEntity* entity : flat.entities) {
+                if (const auto* path = dynamic_cast<const ExtrusionPath*>(entity))
+                    check_path(*path);
+                else if (const auto* multipath = dynamic_cast<const ExtrusionMultiPath*>(entity))
+                    for (const auto& path : multipath->paths)
+                        check_path(path);
+                else if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(entity))
+                    for (const auto& path : loop->paths)
+                        check_path(path);
+            }
+            count += has_landing;
+        }
+        return count;
+    };
+    for (const int bottom_layers : {0, 1, 2, 3, -1}) {
+        CAPTURE(bottom_layers);
+        config.set_deserialize_strict({{"support_interface_bottom_layers", bottom_layers}});
+        print.apply(model, config);
+        print.set_status_silent();
+        print.process();
+        CHECK(landing_layers() == (bottom_layers < 0 ? 2 : bottom_layers));
+    }
+    // Object overrides take precedence over the selected process preset.
+    config.set_deserialize_strict({{"support_interface_bottom_layers", 0}});
+    object->config.set_key_value("support_interface_bottom_layers", new ConfigOptionInt(3));
+    print.apply(model, config);
+    print.process();
+    CHECK(landing_layers() == 3);
+    object->config.erase("support_interface_bottom_layers");
+    // Bottom depth remains meaningful even when ordinary top interfaces are disabled.
+    config.set_deserialize_strict({{"support_interface_top_layers", 0}, {"support_interface_bottom_layers", 3}});
+    print.apply(model, config);
+    print.process();
+    CHECK(landing_layers() == 3);
+    config.set_deserialize_strict({
+        {"support_material_interface_fan_speed", "100"},
+        {"fan_speedup_time", 0.5},
+        {"fan_kickstart", 0.3},
+    });
+    Print export_print;
+    export_print.set_plate_origin(Vec3d::Zero());
+    export_print.apply(model, config);
+    export_print.set_status_silent();
+    export_print.process();
+    const auto output_path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("dynapin-cooling-%%%%%%.gcode");
+    GCodeProcessorResult processor_result;
+    export_print.export_gcode(output_path.string(), &processor_result, nullptr);
+    std::ifstream     stream(output_path.string());
+    const std::string output((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    boost::filesystem::remove(output_path);
+    bool             protected_region = false;
+    bool             ordinary_cooling = false;
+    int              fan              = -1;
+    std::set<double> protected_layers;
+    GCodeReader      reader;
+    reader.apply_config(export_print.config());
+    reader.parse_buffer(output, [&](GCodeReader& state, const GCodeReader::GCodeLine& line) {
+        if (line.raw() == DynaPin::LANDING_FAN_START)
+            protected_region = true;
+        else if (line.raw() == DynaPin::LANDING_FAN_END)
+            protected_region = false;
+        float speed;
+        if (line.cmd_is("M106") && !line.has('P') && line.has_value('S', speed))
+            fan = int(speed);
+        if (line.extruding(state)) {
+            if (protected_region) {
+                CHECK(fan == 0);
+                protected_layers.insert(state.z());
+            } else if (fan > 0)
+                ordinary_cooling = true;
+        }
+    });
+    CHECK_FALSE(protected_region);
+    CHECK(protected_layers.size() == 3);
+    CHECK(ordinary_cooling);
+    config.set_deserialize_strict(
+        {{"support_interface_top_layers", 2}, {"support_interface_bottom_layers", 64}, {"support_interface_filament", 1}});
+    print.apply(model, config);
+    print.process();
+    double last_landing_z = 0.;
+    for (const SupportLayer* layer : print.objects().front()->support_layers())
+        if (!layer->dynapin_landing_regions.empty())
+            last_landing_z = std::max(last_landing_z, layer->print_z);
+    CHECK(last_landing_z > 49.6);
+}

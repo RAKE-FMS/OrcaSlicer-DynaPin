@@ -1061,50 +1061,81 @@ TEST_CASE("DynaPin Tree keeps all three Simple Bridge pins", "[DynaPin][Print]")
 TEST_CASE("DynaPin Tree uses a manually selected pin as a landing", "[DynaPin][Print]")
 {
     ResourcesDirGuard resources_guard(test_resources_dir());
+    const int         bottom_layers = GENERATE(0, 1, 2, 3, -1);
+    const float       top_z         = GENERATE(23.f, 28.f);
     for (const char* support_style : {"tree_slim", "tree_strong", "tree_hybrid"}) {
-    Print print;
-    Model model;
-    TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
-    mesh.scale(Vec3f(1.f, 1.f, 0.25f));
-    mesh.translate(30.f, 30.f, 0.f);
-    TriangleMesh top = Test::mesh(TestMesh::cube_20x20x20);
-    top.scale(Vec3f(0.1f, 0.1f, 0.1f));
-    top.translate(11.5f, 11.5f, 23.f);
-    mesh.merge(top);
-    ModelObject* object = model.add_object();
-    object->add_volume(std::move(mesh));
-    ModelInstance* instance = object->add_instance();
-    instance->set_offset({100., 0., 0.});
-    object->ensure_on_bed();
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict({
-        {"enable_support", true},
-        {"enable_dynapin_support_optimization", true},
-        {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
-        {"dynapin_selected_pins", "2,0"},
-        {"support_type", "tree(auto)"},
-        {"support_style", support_style},
-    });
-    print.auto_assign_extruders(object);
-    print.apply(model, config);
-    print.validate();
-    print.set_status_silent();
-    print.process();
+        CAPTURE(support_style, bottom_layers, top_z);
+        Print        print;
+        Model        model;
+        TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
+        mesh.scale(Vec3f(1.f, 1.f, 0.25f));
+        mesh.translate(30.f, 30.f, 0.f);
+        TriangleMesh top = Test::mesh(TestMesh::cube_20x20x20);
+        top.scale(Vec3f(0.1f, 0.1f, 0.1f));
+        top.translate(11.5f, 11.5f, top_z);
+        mesh.merge(top);
+        ModelObject* object = model.add_object();
+        object->add_volume(std::move(mesh));
+        ModelInstance* instance = object->add_instance();
+        instance->set_offset({100., 0., 0.});
+        object->ensure_on_bed();
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            {"enable_support", true},
+            {"enable_dynapin_support_optimization", true},
+            {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+            {"dynapin_selected_pins", "2,0"},
+            {"support_type", "tree(auto)"},
+            {"support_style", support_style},
+            {"support_interface_top_layers", 2},
+            {"support_interface_bottom_layers", bottom_layers},
+        });
+        print.auto_assign_extruders(object);
+        print.apply(model, config);
+        print.validate();
+        print.set_status_silent();
+        print.process();
 
-    CHECK(print.dynapin_selection().source == DynaPin::SelectionSource::Manual);
-    const std::vector<DynaPin::Pin> expected_pins{{2, 0}};
-    REQUIRE(print.dynapin_selection().pins == expected_pins);
-    const DynaPin::TreePinLandingPlan& plan = print.objects().front()->dynapin_tree_landing_plan();
-    CHECK_FALSE(plan.landings.empty());
-    CHECK(plan.used_pins == print.dynapin_selection().pins);
+        CHECK(print.dynapin_selection().source == DynaPin::SelectionSource::Manual);
+        const std::vector<DynaPin::Pin> expected_pins{{2, 0}};
+        REQUIRE(print.dynapin_selection().pins == expected_pins);
+        const DynaPin::TreePinLandingPlan& plan = print.objects().front()->dynapin_tree_landing_plan();
+        CHECK_FALSE(plan.landings.empty());
+        CHECK(plan.used_pins == print.dynapin_selection().pins);
+        size_t              landing_layers = 0;
+        std::vector<double> available_z;
+        for (const SupportLayer* layer : print.objects().front()->support_layers()) {
+            if (layer->print_z > 22.1 && layer->has_extrusions())
+                available_z.push_back(layer->print_z);
+            bool       has_landing = false;
+            const auto flat        = layer->support_fills.flatten();
+            for (const ExtrusionEntity* entity : flat.entities) {
+                if (const auto* path = dynamic_cast<const ExtrusionPath*>(entity))
+                    has_landing |= path->is_dynapin_landing;
+                else if (const auto* multipath = dynamic_cast<const ExtrusionMultiPath*>(entity))
+                    has_landing |= std::any_of(multipath->paths.begin(), multipath->paths.end(),
+                                               [](const auto& path) { return path.is_dynapin_landing; });
+                else if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(entity))
+                    has_landing |= std::any_of(loop->paths.begin(), loop->paths.end(),
+                                               [](const auto& path) { return path.is_dynapin_landing; });
+            }
+            landing_layers += has_landing;
+        }
+        CAPTURE(available_z);
+        if (top_z == 23.f)
+            REQUIRE(available_z.size() == 2);
+        else
+            REQUIRE(available_z.size() >= 3);
+        const size_t requested = bottom_layers < 0 ? 2 : bottom_layers;
+        CHECK(landing_layers == std::min(requested, available_z.size()));
     }
 }
 
 TEST_CASE("DynaPin Tree landing targets the middle of a pin edge", "[DynaPin][Print]")
 {
     Polygon safe_region;
-    safe_region.points = {Point(scale_(0.), scale_(0.)), Point(scale_(40.), scale_(0.)),
-                          Point(scale_(40.), scale_(4.)), Point(scale_(0.), scale_(4.))};
+    safe_region.points                = {Point(scale_(0.), scale_(0.)), Point(scale_(40.), scale_(0.)), Point(scale_(40.), scale_(4.)),
+                                         Point(scale_(0.), scale_(4.))};
     const std::optional<Point> target = DynaPin::nearest_pin_landing_point(safe_region, Point(scale_(20.), scale_(8.)));
     REQUIRE(target);
     CHECK(std::abs(unscale_(target->x()) - 20.) < 0.01);

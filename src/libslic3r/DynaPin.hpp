@@ -12,8 +12,12 @@ namespace Slic3r {
 
 class Print;
 class PrintObject;
+class ExtrusionEntityCollection;
 
 namespace DynaPin {
+
+inline constexpr const char* LANDING_FAN_START = ";_DYNAPIN_LANDING_FAN_START";
+inline constexpr const char* LANDING_FAN_END   = ";_DYNAPIN_LANDING_FAN_END";
 
 struct Pin
 {
@@ -139,6 +143,19 @@ struct VirtualSupportSurface
     Polygon poly;         // ピン上面の XY 形状（object-local 座標）
     double  print_z = 0.; // ピン上面の Z 高さ (mm)
 };
+
+struct LandingLayer
+{
+    double   bottom_z;
+    double   print_z;
+    Polygons polygons;
+};
+
+// Result indices match layers; coincident Z slabs count as a single layer.
+std::vector<Polygons> landing_regions(const std::vector<LandingLayer>&          layers,
+                                      const std::vector<VirtualSupportSurface>& surfaces,
+                                      size_t                                    layer_count);
+void                  mark_landing_paths(ExtrusionEntityCollection& collection, const Polygons& regions);
 
 struct TreePinLanding
 {

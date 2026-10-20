@@ -72,72 +72,76 @@ namespace Slic3r {
 
 static constexpr bool support_with_sheath = false;
 
-// Add the portion of the first real support layer above each selected pin top to the
-// regular interface layers.  The pin top is a virtual support surface, not a printable
-// support layer, so this must not create a BottomContact at surface.print_z.
-static void add_dynapin_interface_layers(
-    const std::vector<DynaPin::VirtualSupportSurface> &dynapin_surfaces,
-    SupportGeneratorLayersPtr                         &intermediate_layers,
-    SupportGeneratorLayersPtr                         &interface_layers,
-    SupportGeneratorLayerStorage                      &layer_storage)
+// Promote the configured number of real support layers above each virtual pin
+// surface, retaining the landing mask separately from ordinary interfaces.
+static void add_dynapin_interface_layers(const std::vector<DynaPin::VirtualSupportSurface>& surfaces,
+                                         size_t                                             layer_count,
+                                         SupportGeneratorLayersPtr&                         intermediate_layers,
+                                         SupportGeneratorLayersPtr&                         interface_layers,
+                                         const SupportGeneratorLayersPtr&                   bottom_contacts,
+                                         const SupportGeneratorLayersPtr&                   top_contacts,
+                                         const SupportGeneratorLayersPtr&                   base_interfaces,
+                                         SupportGeneratorLayerStorage&                      storage)
 {
-    for (const DynaPin::VirtualSupportSurface &surface : dynapin_surfaces) {
-        for (SupportGeneratorLayer *intermediate_layer : intermediate_layers) {
-            if (intermediate_layer == nullptr || intermediate_layer->polygons.empty() ||
-                intermediate_layer->bottom_print_z() <= surface.print_z + EPSILON)
-                continue;
-
-            Polygons pin_interface = intersection(intermediate_layer->polygons, { surface.poly });
-            if (pin_interface.empty())
-                continue;
-
-            // The normal interface generator may already have produced an interface at
-            // this Z.  Merge into it so the support toolpath generator sees one layer.
-            SupportGeneratorLayer *interface_layer = nullptr;
-            for (SupportGeneratorLayer *candidate : interface_layers) {
-                if (candidate != nullptr && std::abs(candidate->print_z - intermediate_layer->print_z) < EPSILON) {
-                    interface_layer = candidate;
-                    break;
-                }
+    if (layer_count == 0 || surfaces.empty())
+        return;
+    SupportGeneratorLayersPtr candidates = intermediate_layers;
+    append(candidates, interface_layers);
+    append(candidates, bottom_contacts);
+    append(candidates, top_contacts);
+    append(candidates, base_interfaces);
+    const size_t first_base_interface = intermediate_layers.size() + interface_layers.size() + bottom_contacts.size() + top_contacts.size();
+    std::vector<DynaPin::LandingLayer> slabs;
+    slabs.reserve(candidates.size());
+    for (const SupportGeneratorLayer* layer : candidates)
+        slabs.push_back({layer->bottom_print_z(), layer->print_z, layer->polygons});
+    const auto masks = DynaPin::landing_regions(slabs, surfaces, layer_count);
+    for (size_t i = 0; i < candidates.size(); ++i)
+        candidates[i]->dynapin_landing_regions = masks[i];
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        // Contacts retain their own height/bridging flow. Existing interfaces
+        // already have the correct role. Only intermediate/transition slabs
+        // need promotion; their interface peers share the same source slab.
+        if (i >= intermediate_layers.size() && i < first_base_interface)
+            continue;
+        SupportGeneratorLayer& layer = *candidates[i];
+        if (masks[i].empty())
+            continue;
+        layer.polygons = diff(layer.polygons, masks[i]);
+        layer.dynapin_landing_regions.clear();
+        SupportGeneratorLayer* landing = nullptr;
+        for (SupportGeneratorLayer* candidate : interface_layers)
+            if (std::abs(candidate->print_z - layer.print_z) < EPSILON) {
+                landing = candidate;
+                break;
             }
-
-            // Do not print the same material once more as base support.
-            intermediate_layer->polygons = diff(std::move(intermediate_layer->polygons), pin_interface);
-
-            if (interface_layer != nullptr)
-                interface_layer->polygons = union_(std::move(interface_layer->polygons), std::move(pin_interface));
-            else {
-                SupportGeneratorLayer &layer_new = layer_storage.allocate_unguarded(SupporLayerType::BottomInterface);
-                layer_new.print_z  = intermediate_layer->print_z;
-                layer_new.bottom_z = intermediate_layer->bottom_z;
-                layer_new.height   = intermediate_layer->height;
-                layer_new.bridging = intermediate_layer->bridging;
-                layer_new.polygons = std::move(pin_interface);
-                interface_layers.push_back(&layer_new);
-            }
-            break;
+        if (landing == nullptr) {
+            landing           = &storage.allocate_unguarded(SupporLayerType::BottomInterface);
+            landing->print_z  = layer.print_z;
+            landing->bottom_z = layer.bottom_z;
+            landing->height   = layer.height;
+            landing->bridging = layer.bridging;
+            interface_layers.push_back(landing);
         }
+        landing->polygons                = union_(landing->polygons, masks[i]);
+        landing->dynapin_landing_regions = union_(landing->dynapin_landing_regions, masks[i]);
     }
-
-    std::sort(interface_layers.begin(), interface_layers.end(),
-              [](const SupportGeneratorLayer *lhs, const SupportGeneratorLayer *rhs) {
-                  return lhs->print_z < rhs->print_z;
-              });
+    std::sort(interface_layers.begin(), interface_layers.end(), [](const auto* a, const auto* b) { return *a < *b; });
 }
 
 #ifdef SLIC3R_DEBUG
 const char* support_surface_type_to_color_name(const SupporLayerType surface_type)
 {
     switch (surface_type) {
-        case SupporLayerType::TopContact:     return "rgb(0,128,0)";    // Support Interface (#008000)
-        case SupporLayerType::TopInterface:   return "rgb(0,128,0)";    // Support Interface (#008000)
-        case SupporLayerType::Base:           return "rgb(0,255,0)";    // Base (#0F0)
-        case SupporLayerType::BottomInterface:return "rgb(0,128,0)";    // Support Interface (#008000)
-        case SupporLayerType::BottomContact:  return "rgb(0,128,0)";    // Support Interface (#008000)
-        case SupporLayerType::RaftInterface:  return "rgb(0,128,0)";    // Support Interface (#008000)
-        case SupporLayerType::RaftBase:       return "rgb(0,255,0)";    // Base (#0F0)
-        case SupporLayerType::Unknown:        return "rgb(128,0,0)"; // maroon
-        default:                                            return "rgb(64,64,64)";
+    case SupporLayerType::TopContact: return "rgb(0,128,0)";      // Support Interface (#008000)
+    case SupporLayerType::TopInterface: return "rgb(0,128,0)";    // Support Interface (#008000)
+    case SupporLayerType::Base: return "rgb(0,255,0)";            // Base (#0F0)
+    case SupporLayerType::BottomInterface: return "rgb(0,128,0)"; // Support Interface (#008000)
+    case SupporLayerType::BottomContact: return "rgb(0,128,0)";   // Support Interface (#008000)
+    case SupporLayerType::RaftInterface: return "rgb(0,128,0)";   // Support Interface (#008000)
+    case SupporLayerType::RaftBase: return "rgb(0,255,0)";        // Base (#0F0)
+    case SupporLayerType::Unknown: return "rgb(128,0,0)";         // maroon
+    default: return "rgb(64,64,64)";
     };
 }
 
@@ -1057,8 +1061,6 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     // and base interface layers (for soluble interface / non souble base only)
     SupportGeneratorLayersPtr empty_layers;
     auto [interface_layers, base_interface_layers] = generate_interface_layers(*m_object_config, m_support_params, bottom_contacts, top_contacts, empty_layers, empty_layers, intermediate_layers, layer_storage);
-    if (m_support_params.has_interfaces())
-        add_dynapin_interface_layers(dynapin_surfaces, intermediate_layers, interface_layers, layer_storage);
 
     BOOST_LOG_TRIVIAL(info) << "Support generator - Creating raft";
 
@@ -1128,6 +1130,11 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
         clip_layers(base_interface_layers);
         // Raft layers sit below the object; leave them so first-layer adhesion is kept.
     }
+
+    // Count only surviving slabs: a layer clipped by a pin blocker must not
+    // consume one of the requested landing interface layers.
+    add_dynapin_interface_layers(dynapin_surfaces, m_support_params.num_bottom_interface_layers, intermediate_layers, interface_layers,
+                                 bottom_contacts, top_contacts, base_interface_layers, layer_storage);
 
     BOOST_LOG_TRIVIAL(info) << "Support generator - Creating layers";
 

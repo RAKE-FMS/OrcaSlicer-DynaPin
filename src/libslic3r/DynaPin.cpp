@@ -1,5 +1,6 @@
 #include "DynaPin.hpp"
 #include "DynaPinGCode.hpp"
+#include "ExtrusionEntityCollection.hpp"
 
 #include "Layer.hpp"
 #include "Print.hpp"
@@ -19,6 +20,7 @@
 #include <initializer_list>
 #include <utility>
 #include <map>
+#include <numeric>
 #include <chrono>
 #include <cstdlib>
 #include <set>
@@ -27,6 +29,128 @@
 namespace fs = boost::filesystem;
 
 namespace Slic3r::DynaPin {
+
+std::vector<Polygons> landing_regions(const std::vector<LandingLayer>&          layers,
+                                      const std::vector<VirtualSupportSurface>& surfaces,
+                                      size_t                                    layer_count)
+{
+    std::vector<Polygons> result(layers.size());
+    if (layer_count == 0 || surfaces.empty())
+        return result;
+    double max_layer_height = 0.;
+    for (const LandingLayer& layer : layers)
+        max_layer_height = std::max(max_layer_height, layer.print_z - layer.bottom_z);
+    std::vector<size_t> order(layers.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return layers[a].print_z < layers[b].print_z; });
+    for (const VirtualSupportSurface& surface : surfaces) {
+        size_t count      = 0;
+        double previous_z = surface.print_z;
+        for (size_t i = 0; i < order.size() && count < layer_count;) {
+            size_t j = i + 1;
+            while (j < order.size() && layers[order[j]].print_z <= layers[order[i]].print_z + EPSILON)
+                ++j;
+            bool overlaps = false;
+            for (size_t k = i; k < j; ++k) {
+                const size_t id = order[k];
+                if (layers[id].bottom_z < surface.print_z - EPSILON)
+                    continue;
+                if (count > 0 && layers[id].bottom_z > previous_z + EPSILON)
+                    continue;
+                // A clipped slab can leave a gap of at most one layer above
+                // the pin. A remote column resting on a model is not a landing.
+                if (count == 0 && layers[id].bottom_z > surface.print_z + max_layer_height + EPSILON)
+                    continue;
+                Polygons region = intersection(layers[id].polygons, {surface.poly});
+                overlaps |= !region.empty();
+                polygons_append(result[id], std::move(region));
+            }
+            if (overlaps) {
+                ++count;
+                previous_z = layers[order[i]].print_z;
+            }
+            i = j;
+        }
+    }
+    for (Polygons& regions : result)
+        if (!regions.empty())
+            regions = union_(std::move(regions));
+    return result;
+}
+
+static ExtrusionPaths split_landing_path(const ExtrusionPath& path, const Polygons& regions)
+{
+    if (path.role() != erSupportMaterialInterface || intersection_pl(path.polyline, regions).empty())
+        return {path};
+    if (diff_pl(path.polyline, regions).empty()) {
+        ExtrusionPath landing(path);
+        landing.is_dynapin_landing = true;
+        return {std::move(landing)};
+    }
+
+    // Clip each segment to retain the original traversal order, including paths
+    // which enter the same landing region more than once.
+    ExtrusionPaths result;
+    for (size_t i = 1; i < path.polyline.points.size(); ++i) {
+        const Point&                           start = path.polyline.points[i - 1];
+        Polyline                               segment(Points{start, path.polyline.points[i]});
+        std::vector<std::pair<Polyline, bool>> fragments;
+        for (Polyline& fragment : intersection_pl(segment, regions))
+            fragments.emplace_back(std::move(fragment), true);
+        for (Polyline& fragment : diff_pl(segment, regions))
+            fragments.emplace_back(std::move(fragment), false);
+        auto distance = [&](const Point& point) { return (point - start).cast<double>().squaredNorm(); };
+        for (auto& fragment : fragments)
+            if (distance(fragment.first.last_point()) < distance(fragment.first.first_point()))
+                fragment.first.reverse();
+        std::sort(fragments.begin(), fragments.end(),
+                  [&](const auto& a, const auto& b) { return distance(a.first.first_point()) < distance(b.first.first_point()); });
+        for (auto& [polyline, landing] : fragments) {
+            if (!result.empty() && result.back().is_dynapin_landing == landing && result.back().last_point() == polyline.first_point())
+                append(result.back().polyline.points, Points(polyline.points.begin() + 1, polyline.points.end()));
+            else {
+                result.emplace_back(std::move(polyline), path);
+                result.back().is_dynapin_landing = landing;
+            }
+        }
+    }
+    return result;
+}
+
+void mark_landing_paths(ExtrusionEntityCollection& collection, const Polygons& regions)
+{
+    if (regions.empty())
+        return;
+    for (ExtrusionEntity*& entity : collection.entities) {
+        if (auto* nested = dynamic_cast<ExtrusionEntityCollection*>(entity))
+            mark_landing_paths(*nested, regions);
+        else if (auto* path = dynamic_cast<ExtrusionPath*>(entity)) {
+            ExtrusionPaths paths = split_landing_path(*path, regions);
+            if (paths.size() == 1)
+                *path = std::move(paths.front());
+            else {
+                auto* split  = new ExtrusionMultiPath();
+                split->paths = std::move(paths);
+                if (!path->can_reverse())
+                    split->set_reverse();
+                delete entity;
+                entity = split;
+            }
+        } else {
+            ExtrusionPaths* paths = nullptr;
+            if (auto* multipath = dynamic_cast<ExtrusionMultiPath*>(entity))
+                paths = &multipath->paths;
+            else if (auto* loop = dynamic_cast<ExtrusionLoop*>(entity))
+                paths = &loop->paths;
+            if (paths != nullptr) {
+                ExtrusionPaths split;
+                for (const ExtrusionPath& path : *paths)
+                    append(split, split_landing_path(path, regions));
+                *paths = std::move(split);
+            }
+        }
+    }
+}
 
 static double number_or(const nlohmann::json& j, const char* key, double fallback)
 {

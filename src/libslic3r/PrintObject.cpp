@@ -807,6 +807,8 @@ void PrintObject::generate_support_material()
             m_print->set_status(50, L("Generating support"));
 
             this->_generate_support_material();
+            for (SupportLayer* layer : m_support_layers)
+                DynaPin::mark_landing_paths(layer->support_fills, layer->dynapin_landing_regions);
             m_print->throw_if_canceled();
             if (is_tree(m_config.support_type.value) &&
                 m_print->dynapin_selection().source == DynaPin::SelectionSource::Manual &&
