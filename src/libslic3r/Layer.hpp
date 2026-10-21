@@ -280,7 +280,7 @@ public:
     ExPolygons                  support_islands;
     // Extrusion paths for the support base and for the support interface and contacts.
     ExtrusionEntityCollection   support_fills;
-    // Pin landing interfaces only, in object-local coordinates.
+    // Pin landing bases only, in object-local coordinates.
     Polygons                    dynapin_landing_regions;
     SupportInnerType            support_type = stInnerNormal;
 

@@ -636,7 +636,7 @@ SCENARIO("Print: Empty DynaPin selection is evaluated for Tree supports", "[Prin
                                 previous_x = point.x();
                             }
                     }
-                CHECK((ordered_count > 0) == (depth != 0));
+                CHECK(ordered_count > 0);
             }
         }
     }
@@ -1162,8 +1162,7 @@ TEST_CASE("DynaPin Tree uses a manually selected pin as a landing", "[DynaPin][P
             REQUIRE(available_z.size() >= 2);
         else
             REQUIRE(available_z.size() >= 3);
-        const size_t requested = bottom_layers < 0 ? 2 : bottom_layers;
-        CHECK(landing_layers == std::min(requested, available_z.size()));
+        CHECK(landing_layers == 1);
         CHECK(first_bottom == Catch::Approx(22.1).margin(EPSILON));
     }
 }
@@ -2159,6 +2158,8 @@ TEST_CASE("DynaPin shared front bounds support independently of pull offsets", "
     const DynaPin::Pin pin{0, 0};
     const auto         blocker = DynaPin::blocker_for_pin(object, config, pin);
     const auto         surface = DynaPin::surface_for_pin(object, config, pin);
+    CHECK(config.landing_edge_inset_y == 0.);
+    CHECK(surface.edge_inset_y == 0.);
     const Point        shift   = object.instances().front().shift_without_plate_offset();
     REQUIRE_FALSE(blocker.poly.points.empty());
     CHECK(unscale_(blocker.poly.points.front().x() + shift.x()) == Catch::Approx(30.));

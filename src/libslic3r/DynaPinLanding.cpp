@@ -45,7 +45,7 @@ static void extract_landing(ExtrusionEntityCollection& collection, ExtrusionPath
 }
 
 static bool same_flow(const ExtrusionPath& a, const ExtrusionPath& b)
-{ return a.height == b.height && a.width == b.width && a.mm3_per_mm == b.mm3_per_mm; }
+{ return a.role() == b.role() && a.height == b.height && a.width == b.width && a.mm3_per_mm == b.mm3_per_mm; }
 
 // Merge continuous flow fragments without losing their individual extrusion parameters.
 static void append_connected(ExtrusionEntityCollection& out, const ExtrusionPath& path)
@@ -155,7 +155,7 @@ void fill_landing_paths(ExtrusionEntitiesPtr& out, const Polygons& regions, cons
     if (regions.empty() || density <= 0.)
         return;
     const coord_t  pitch = std::max<coord_t>(1, coord_t(scale_(flow.spacing()) / density));
-    const Polygons inset = offset(regions, -0.5 * flow.scaled_spacing());
+    const Polygons inset = offset(regions, -0.5 * flow.scaled_width());
     if (inset.empty())
         return;
     const BoundingBox box   = get_extents(inset);
@@ -163,12 +163,24 @@ void fill_landing_paths(ExtrusionEntitiesPtr& out, const Polygons& regions, cons
     Polylines         lines;
     for (coord_t x = first; x <= box.max.x(); x += pitch)
         lines.emplace_back(Points{Point(x, box.min.y() - coord_t(SCALED_EPSILON)), Point(x, box.max.y() + coord_t(SCALED_EPSILON))});
+    Polylines tracks = intersection_pl(lines, inset);
+    // A printable island narrower than the raster pitch may fall between all
+    // grid columns. Give it one track without changing the traversal direction.
+    for (const auto& island : union_ex(inset)) {
+        const auto    bounds = get_extents(island);
+        const coord_t x      = origin_x + coord_t(std::ceil(double(bounds.min.x() - origin_x) / pitch)) * pitch;
+        if (x > bounds.max.x()) {
+            const coord_t  center = bounds.min.x() + (bounds.max.x() - bounds.min.x()) / 2;
+            const Polyline track(
+                Points{Point(center, bounds.min.y() - coord_t(SCALED_EPSILON)), Point(center, bounds.max.y() + coord_t(SCALED_EPSILON))});
+            append(tracks, intersection_pl(Polylines{track}, ExPolygons{island}));
+        }
+    }
     ExtrusionEntityCollection raw;
-    extrusion_entities_append_paths(raw.entities, intersection_pl(lines, inset), erSupportMaterialInterface, flow.mm3_per_mm(),
-                                    flow.width(), flow.height(), false);
+    extrusion_entities_append_paths(raw.entities, tracks, erSupportMaterial, flow.mm3_per_mm(), flow.width(), flow.height(), false);
     for (auto* entity : raw.entities)
         static_cast<ExtrusionPath*>(entity)->is_dynapin_landing = true;
-    assemble_landing(raw, regions, true, flow.scaled_spacing());
+    assemble_landing(raw, regions, true, flow.scaled_width());
     // The existing modulator accepts flat ExtrusionPaths, and preserves their traversal.
     auto flat = raw.flatten();
     append(out, std::move(flat.entities));

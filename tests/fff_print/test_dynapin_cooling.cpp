@@ -120,10 +120,96 @@ TEST_CASE("DynaPin landing layers start on each pin without moving their upper c
     CHECK(DynaPin::align_landing_layers(layers, {}, 0.08, 0.3).empty());
 }
 
+TEST_CASE("DynaPin base expansion stays on pins and separates different first heights", "[DynaPin][LandingBase]")
+{
+    const Polygon                            pin   = rectangle(0, 0, 8, 8);
+    const Polygon                            first = rectangle(1, 1, 2, 2);
+    const Polygon                            other = rectangle(5, 1, 2, 2);
+    const std::vector<DynaPin::LandingLayer> layers{{10., 10.2, {first}}, {10., 10.2, {first}}, {10., 10.3, {other}}, {10.3, 10.5, {pin}}};
+    const auto                               bases = DynaPin::landing_base_layers(layers, {{{0, 0}, pin, 10.}}, 2.);
+    REQUIRE(bases.size() == 2);
+    for (const auto& base : bases) {
+        CHECK(base.bottom_z == 10.);
+        CHECK(diff(base.polygons, {pin}).empty());
+    }
+    CHECK(intersection(bases[0].polygons, bases[1].polygons).empty());
+    CHECK(diff({first}, bases[0].polygons).empty());
+    CHECK(diff({other}, bases[1].polygons).empty());
+    const auto unexpanded = DynaPin::landing_base_layers(layers, {{{0, 0}, pin, 10.}}, 0.);
+    REQUIRE(unexpanded.size() == 2);
+    CHECK(area(unexpanded[0].polygons) == Catch::Approx(first.area()));
+    CHECK(DynaPin::landing_base_layers({{10.1, 10.3, {first}}}, {{{0, 0}, pin, 10.}}, 2.).empty());
+}
+
+TEST_CASE("DynaPin base fills a printable island between raster columns", "[DynaPin][LandingBase]")
+{
+    ExtrusionEntityCollection collection;
+    const Flow                flow(0.6, 0.2, 0.4);
+    const Polygon             island = rectangle(0.2, 0., 0.65, 1.5);
+    DynaPin::fill_landing_paths(collection.entities, {island}, flow, 0.45, 0);
+    REQUIRE_FALSE(collection.empty());
+    for (const auto* entity : collection.entities) {
+        CHECK(entity->role() == erSupportMaterial);
+        CHECK(diff_pl(entity->as_polyline(), offset(Polygons{island}, -0.5 * flow.scaled_width() + SCALED_EPSILON)).empty());
+    }
+}
+
+TEST_CASE("DynaPin base insets only exposed edges of contiguous pins", "[DynaPin][LandingBase][PinEdges]")
+{
+    const auto   columns = GENERATE(std::vector<int>{0}, std::vector<int>{0, 1}, std::vector<int>{0, 1, 2}, std::vector<int>{0, 2});
+    const double shift   = GENERATE(0., -31.25);
+    std::vector<DynaPin::VirtualSupportSurface> surfaces;
+    std::vector<DynaPin::LandingLayer>          layers;
+    Polygons                                    expected;
+    for (const int column : columns) {
+        const Polygon pin = rectangle(0., shift + 12.4 * column, 20., 12.4);
+        surfaces.push_back({{0, column}, pin, 10., 1.2});
+        layers.push_back({10., 10.2, {pin}});
+        const bool left  = std::find(columns.begin(), columns.end(), column - 1) == columns.end();
+        const bool right = std::find(columns.begin(), columns.end(), column + 1) == columns.end();
+        expected.push_back(rectangle(0., shift + 12.4 * column + (left ? 1.2 : 0.), 20., 12.4 - (left ? 1.2 : 0.) - (right ? 1.2 : 0.)));
+    }
+    const auto bases = DynaPin::landing_base_layers(layers, surfaces, 100.);
+    REQUIRE(bases.size() == 1);
+    CHECK(diff(bases.front().polygons, expected).empty());
+    CHECK(diff(expected, bases.front().polygons).empty());
+    CHECK(union_ex(bases.front().polygons).size() == (columns.back() == 2 && columns.size() == 2 ? 2 : 1));
+    const Flow                flow(0.6, 0.2, 0.4);
+    ExtrusionEntityCollection paths;
+    DynaPin::fill_landing_paths(paths.entities, bases.front().polygons, flow, 0.9, 0);
+    REQUIRE_FALSE(paths.empty());
+    const auto safe = offset(union_(expected), -0.5 * flow.scaled_width() + SCALED_EPSILON);
+    for (const auto* path : paths.entities)
+        CHECK(diff_pl(path->as_polyline(), safe).empty());
+    for (auto& surface : surfaces)
+        surface.edge_inset_y = 0.;
+    const auto legacy = DynaPin::landing_base_layers(layers, surfaces, 100.);
+    Polygons   nominal;
+    for (const auto& surface : surfaces)
+        nominal.push_back(surface.poly);
+    CHECK(diff(nominal, legacy.front().polygons).empty());
+}
+
+TEST_CASE("DynaPin base expands across shared pin edges but not different heights", "[DynaPin][LandingBase][PinEdges]")
+{
+    std::vector<DynaPin::VirtualSupportSurface> surfaces{{{0, 0}, rectangle(0., 0., 20., 12.4), 10., 1.2},
+                                                         {{0, 1}, rectangle(0., 12.4, 20., 12.4), 10., 1.2}};
+    const std::vector<DynaPin::LandingLayer>    layers{{10., 10.2, {rectangle(5., 11.5, 1., 0.5)}}};
+    const auto                                  joined = DynaPin::landing_base_layers(layers, surfaces, 2.);
+    REQUIRE(joined.size() == 1);
+    CHECK(unscale_(get_extents(joined.front().polygons).max.y()) > 12.4);
+    surfaces.back().pin.row = 1;
+    surfaces.back().print_z = 17.4;
+    const auto separated    = DynaPin::landing_base_layers(layers, surfaces, 2.);
+    REQUIRE(separated.size() == 1);
+    CHECK(unscale_(get_extents(separated.front().polygons).max.y()) == Catch::Approx(11.2));
+}
+
 TEST_CASE("DynaPin landing paths preserve traversal and extrusion volume", "[DynaPin][Cooling]")
 {
     const Polygon region = rectangle(2, -1, 2, 2);
-    ExtrusionPath original(erSupportMaterialInterface, 0.08, 0.4, 0.2);
+    const auto    role   = GENERATE(erSupportMaterial, erSupportMaterialInterface);
+    ExtrusionPath original(role, 0.08, 0.4, 0.2);
     original.polyline = Polyline(Points{Point(scale_(0), scale_(0)), Point(scale_(6), scale_(0)), Point(scale_(0), scale_(0))});
     ExtrusionEntityCollection collection;
     collection.append(original);
@@ -139,7 +225,7 @@ TEST_CASE("DynaPin landing paths preserve traversal and extrusion volume", "[Dyn
         const auto* path = &part;
         CHECK(path->first_point() == previous);
         previous = path->last_point();
-        CHECK(path->role() == erSupportMaterialInterface);
+        CHECK(path->role() == role);
         if (path->is_dynapin_landing)
             landing_length += unscale<double>(path->length());
         const ExtrusionPath copied(path->polyline, *path);

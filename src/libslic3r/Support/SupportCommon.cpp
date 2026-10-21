@@ -1714,21 +1714,9 @@ void generate_support_toolpaths(
                 auto extrude_interface = [&](SupportGeneratorLayerExtruded& layer_ex, InterfaceLayerType interface_layer_type) {
                     if (layer_ex.empty() || layer_ex.polygons_to_extrude().empty())
                         return;
-                    auto fill = [&](const Polygons& polygons, bool pin_landing) {
+                    auto fill = [&](const Polygons& polygons) {
                         if (polygons.empty())
                             return;
-                        if (pin_landing) {
-                            const Flow   flow    = support_material_interface_flow(support_layer.object(), float(layer_ex.layer->height));
-                            const double density = std::min(1.,
-                                                            flow.spacing() /
-                                                                (flow.spacing() +
-                                                                 (support_params.ironing ? 0. : config.support_interface_spacing.value)));
-                            const Flow   interface_flow = layer_ex.layer->bridging ?
-                                                              Flow::bridging_flow(layer_ex.layer->height, flow.nozzle_diameter()) :
-                                                              flow;
-                            DynaPin::fill_landing_paths(layer_ex.extrusions, polygons, interface_flow, density, bbox_object.min.x());
-                            return;
-                        }
                         bool interface_as_base = interface_layer_type == InterfaceLayerType::InterfaceAsBase;
                         bool raft_contact      = interface_layer_type == InterfaceLayerType::RaftContact;
                         // FIXME Bottom interfaces are extruded with the briding flow. Some bridging layers have its height slightly
@@ -1768,11 +1756,7 @@ void generate_support_toolpaths(
                             interface_flow);
                     };
                     const Polygons& polygons = layer_ex.polygons_to_extrude();
-                    if (interface_layer_type != InterfaceLayerType::RaftContact && !support_layer.dynapin_landing_regions.empty()) {
-                        fill(diff(polygons, support_layer.dynapin_landing_regions), false);
-                        fill(intersection(polygons, support_layer.dynapin_landing_regions), true);
-                    } else
-                        fill(polygons, false);
+                    fill(polygons);
                 };
                 const bool top_interfaces    = config.support_interface_top_layers.value != 0;
                 const bool bottom_interfaces = top_interfaces && config.support_interface_bottom_layers != 0;
@@ -1808,51 +1792,61 @@ void generate_support_toolpaths(
 
                 // Base support or flange.
                 if (!base_layer.empty() && !base_layer.polygons_to_extrude().empty()) {
-                    Fill* filler  = filler_support.get();
-                    filler->angle = angles[support_layer_id % angles.size()];
-                    // We don't use $base_flow->spacing because we need a constant spacing
-                    // value that guarantees that all layers are correctly aligned.
-                    assert(!base_layer.layer->bridging);
-                    auto flow               = support_params.support_material_flow.with_height(float(base_layer.layer->height));
-                    filler->spacing         = support_params.support_material_flow.spacing();
-                    filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / support_params.support_density));
-                    float density           = float(support_params.support_density);
-                    bool  sheath            = support_params.with_sheath;
-                    bool  no_sort           = false;
-                    bool  done              = false;
-                    if (base_layer.layer->bottom_z < EPSILON) {
-                        // Base flange (the 1st layer).
-                        filler        = filler_first_layer;
-                        filler->angle = Geometry::deg2rad(float(config.support_angle.value + 90.));
-                        density       = float(config.raft_first_layer_density.value * 0.01);
-                        flow          = support_params.first_layer_flow;
-                        // use the proper spacing for first layer as we don't need to align
-                        // its pattern to the other layers
-                        // FIXME When paralellizing, each thread shall have its own copy of the fillers.
-                        filler->spacing         = flow.spacing();
-                        filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / density));
-                        sheath                  = true;
-                        no_sort                 = true;
-                    } else if (support_params.support_style == SupportMaterialStyle::smsTreeOrganic &&
-                               (config.support_base_pattern == smpNone || config.support_base_pattern == smpDefault)) {
-                        // Orca: A special case for the hollow Organic supports
-                        // Orca: If the tree supports are too tall, use a double wall to make it stronger
-                        SupportParameters support_params2 = support_params;
-                        if (support_layer.print_z > 100.0)
-                            support_params2.tree_branch_diameter_double_wall_area_scaled = 0.1;
-                        tree_supports_generate_paths(base_layer.extrusions, base_layer.polygons_to_extrude(), flow, support_params2);
-                        done = true;
+                    Polygons       base_polygons = base_layer.polygons_to_extrude();
+                    const Polygons landing       = intersection(base_polygons, support_layer.dynapin_landing_regions);
+                    if (!landing.empty()) {
+                        const Flow flow = support_material_1st_layer_flow(support_layer.object(), float(base_layer.layer->height));
+                        DynaPin::fill_landing_paths(base_layer.extrusions, landing, flow, config.raft_first_layer_density.value * 0.01,
+                                                    bbox_object.min.x());
+                        base_polygons = diff(base_polygons, landing);
                     }
-                    if (!done)
-                        fill_expolygons_with_sheath_generate_paths(
-                            // Destination
-                            base_layer.extrusions,
-                            // Regions to fill
-                            base_layer.polygons_to_extrude(),
-                            // Filler and its parameters
-                            filler, density,
-                            // Extrusion parameters
-                            ExtrusionRole::erSupportMaterial, flow, support_params, sheath, no_sort);
+                    if (!base_polygons.empty()) {
+                        Fill* filler  = filler_support.get();
+                        filler->angle = angles[support_layer_id % angles.size()];
+                        // We don't use $base_flow->spacing because we need a constant spacing
+                        // value that guarantees that all layers are correctly aligned.
+                        assert(!base_layer.layer->bridging);
+                        auto flow       = support_params.support_material_flow.with_height(float(base_layer.layer->height));
+                        filler->spacing = support_params.support_material_flow.spacing();
+                        filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / support_params.support_density));
+                        float density = float(support_params.support_density);
+                        bool  sheath  = support_params.with_sheath;
+                        bool  no_sort = false;
+                        bool  done    = false;
+                        if (base_layer.layer->bottom_z < EPSILON) {
+                            // Base flange (the 1st layer).
+                            filler        = filler_first_layer;
+                            filler->angle = Geometry::deg2rad(float(config.support_angle.value + 90.));
+                            density       = float(config.raft_first_layer_density.value * 0.01);
+                            flow          = support_params.first_layer_flow;
+                            // use the proper spacing for first layer as we don't need to align
+                            // its pattern to the other layers
+                            // FIXME When paralellizing, each thread shall have its own copy of the fillers.
+                            filler->spacing         = flow.spacing();
+                            filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / density));
+                            sheath                  = true;
+                            no_sort                 = true;
+                        } else if (support_params.support_style == SupportMaterialStyle::smsTreeOrganic &&
+                                   (config.support_base_pattern == smpNone || config.support_base_pattern == smpDefault)) {
+                            // Orca: A special case for the hollow Organic supports
+                            // Orca: If the tree supports are too tall, use a double wall to make it stronger
+                            SupportParameters support_params2 = support_params;
+                            if (support_layer.print_z > 100.0)
+                                support_params2.tree_branch_diameter_double_wall_area_scaled = 0.1;
+                            tree_supports_generate_paths(base_layer.extrusions, base_polygons, flow, support_params2);
+                            done = true;
+                        }
+                        if (!done)
+                            fill_expolygons_with_sheath_generate_paths(
+                                // Destination
+                                base_layer.extrusions,
+                                // Regions to fill
+                                base_polygons,
+                                // Filler and its parameters
+                                filler, density,
+                                // Extrusion parameters
+                                ExtrusionRole::erSupportMaterial, flow, support_params, sheath, no_sort);
+                    }
                 }
 
                 // Merge base_interface_layers to base_layers to avoid unneccessary retractions

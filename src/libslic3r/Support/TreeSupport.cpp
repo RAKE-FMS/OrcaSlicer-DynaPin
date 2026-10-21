@@ -1448,12 +1448,13 @@ void TreeSupport::generate_toolpaths()
                     coordf_t     support_density = std::min(1., support_flow.spacing() / support_spacing);
                     ExPolygon& poly = *area_group.area;
                     ExPolygons polys;
-                    if (area_group.type == SupportLayer::FloorType && !ts_layer->dynapin_landing_regions.empty()) {
+                    if (area_group.type == SupportLayer::BaseType && !ts_layer->dynapin_landing_regions.empty()) {
                         const Polygons landing = intersection(to_polygons(poly), ts_layer->dynapin_landing_regions);
                         if (!landing.empty()) {
-                            DynaPin::fill_landing_paths(ts_layer->support_fills.entities, landing, interface_flow, bottom_interface_density,
-                                                        bbox_object.min.x());
-                            // draw_circles already separates landing floors from ordinary groups.
+                            const Flow first_flow = support_material_1st_layer_flow(m_object, float(height));
+                            DynaPin::fill_landing_paths(ts_layer->support_fills.entities, landing, first_flow,
+                                                        object_config.raft_first_layer_density.value * 0.01, bbox_object.min.x());
+                            // Landing bases are separated from ordinary groups before filling.
                             assert(diff(to_polygons(poly), ts_layer->dynapin_landing_regions).empty());
                             continue;
                         }
@@ -2151,7 +2152,6 @@ void TreeSupport::draw_circles()
                 ExPolygons& roof_1st_layer = ts_layer->roof_1st_layer;
                 ExPolygons& floor_areas = ts_layer->floor_areas;
                 ExPolygons& roof_gap_areas = ts_layer->roof_gap_areas;
-                ExPolygons dynapin_landing_areas;
                 coordf_t         max_layers_above_base = 0;
                 coordf_t         max_layers_above_roof = 0;
                 coordf_t         max_layers_above_roof1 = 0;
@@ -2250,19 +2250,7 @@ void TreeSupport::draw_circles()
                         }
                     }
 
-                    if (node.type == ePolygon && bottom_interface_layers > 0) {
-                        for (const DynaPin::TreePinLanding& landing : m_dynapin_polygon_landings) {
-                            if (landing.layer_id != layer_nr || landing.branch_id != node.branch_id)
-                                continue;
-                            ExPolygons supported = intersection_ex(area, {landing.footprint});
-                            append(dynapin_landing_areas, supported);
-                            area = diff_ex(area, supported);
-                        }
-                    }
-
-                    if (node.dynapin_landed && bottom_interface_layers > 0) {
-                        append(dynapin_landing_areas, area);
-                    } else if (obj_layer_nr>0 && node.distance_to_top < 0)
+                    if (obj_layer_nr > 0 && node.distance_to_top < 0)
                         append(roof_gap_areas, area);
                     else if (obj_layer_nr > 0 && node.support_roof_layers_below == 1 && node.is_sharp_tail==false)
                     {
@@ -2298,7 +2286,6 @@ void TreeSupport::draw_circles()
                     floor_areas             = diff_ex(floor_areas, active_dynapin_blockers);
                     roof_gap_areas          = diff_ex(roof_gap_areas, active_dynapin_blockers);
                 }
-                append(floor_areas, std::move(dynapin_landing_areas));
 
                 //m_object->print()->set_status(65, (boost::format( _u8L("Support: generate polygons at layer %d")) % layer_nr).str());
 
@@ -2616,13 +2603,12 @@ void TreeSupport::prepare_dynapin_landing_layers()
                                   }),
                    surfaces.end());
     const auto&  config = m_object->config();
-    const size_t depth  = config.support_interface_bottom_layers.value < 0 ? config.support_interface_top_layers.value :
-                                                                             config.support_interface_bottom_layers.value;
     struct Area
     {
         ExPolygon               polygon;
         SupportLayer::AreaGroup group;
         SupportLayer*           layer;
+        bool                    landing = false;
     };
     std::vector<Area>                  areas;
     std::vector<DynaPin::LandingLayer> slabs;
@@ -2671,7 +2657,44 @@ void TreeSupport::prepare_dynapin_landing_layers()
     slabs.clear();
     for (const Area& area : adjusted)
         slabs.push_back({area.layer->print_z - area.group.height, area.layer->print_z, to_polygons(area.polygon)});
-    const auto masks = DynaPin::landing_regions(slabs, surfaces, depth);
+    auto       bases    = DynaPin::landing_base_layers(slabs, surfaces, config.raft_first_layer_expansion.value);
+    const auto blockers = DynaPin::support_blocker_regions_local(*m_object);
+    for (auto& base : bases) {
+        base.polygons = intersection(base.polygons, to_polygons(m_machine_border));
+        for (const auto* layer : m_object->layers()) {
+            if (layer->print_z <= base.bottom_z - m_slicing_params.gap_object_support + EPSILON)
+                continue;
+            if (layer->bottom_z() >= base.print_z + m_slicing_params.gap_support_object - EPSILON)
+                break;
+            base.polygons = diff(base.polygons, offset(layer->lslices, scale_(m_support_params.gap_xy)));
+        }
+        for (const auto& blocker : blockers)
+            if (std::find(used_pins.begin(), used_pins.end(), blocker.pin) != used_pins.end() && base.bottom_z < blocker.z_max - EPSILON &&
+                base.print_z > blocker.z_min + EPSILON)
+                base.polygons = diff(base.polygons, {blocker.poly});
+    }
+    std::vector<Area> final_areas;
+    for (const auto& area : adjusted) {
+        Polygons polygons = to_polygons(area.polygon);
+        for (const auto& surface : surfaces)
+            if (std::abs(area.layer->print_z - area.group.height - surface.print_z) < EPSILON)
+                polygons = diff(polygons, {surface.poly});
+        for (const auto& base : bases)
+            if (std::abs(area.layer->print_z - base.print_z) < EPSILON)
+                polygons = diff(polygons, base.polygons);
+        for (auto& polygon : union_ex(polygons))
+            final_areas.push_back({std::move(polygon), area.group, area.layer});
+    }
+    for (const auto& base : bases) {
+        const auto source = std::find_if(adjusted.begin(), adjusted.end(),
+                                         [&](const Area& area) { return std::abs(area.layer->print_z - base.print_z) < EPSILON; });
+        assert(source != adjusted.end());
+        SupportLayer::AreaGroup group(nullptr, SupportLayer::BaseType, 10000.);
+        group.height = base.print_z - base.bottom_z;
+        for (auto& polygon : union_ex(base.polygons))
+            final_areas.push_back({std::move(polygon), group, source->layer, true});
+    }
+    adjusted = std::move(final_areas);
     // Keep one SupportLayer per Z; group metadata retains local thickness.
     for (SupportLayer* layer : m_object->support_layers()) {
         layer->area_groups.clear();
@@ -2707,9 +2730,9 @@ void TreeSupport::prepare_dynapin_landing_layers()
                 target.push_back(std::move(polygon));
             }
         };
-        add(diff_ex({area.polygon}, masks[i]), area.group.type);
-        add(union_ex(masks[i]), SupportLayer::FloorType);
-        polygons_append(area.layer->dynapin_landing_regions, masks[i]);
+        add({area.polygon}, area.group.type);
+        if (area.landing)
+            polygons_append(area.layer->dynapin_landing_regions, to_polygons(area.polygon));
     }
     for (auto& item : groups) {
         item.group.area = &areas_for_type(item.layer, item.group.type)[item.index];

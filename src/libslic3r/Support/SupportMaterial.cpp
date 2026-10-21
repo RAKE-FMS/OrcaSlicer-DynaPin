@@ -124,62 +124,26 @@ static SupportGeneratorLayersPtr align_dynapin_layers(const std::vector<DynaPin:
     return added;
 }
 
-// Promote the configured number of real support layers above each virtual pin
-// surface, retaining the landing mask separately from ordinary interfaces.
-static void add_dynapin_interface_layers(const std::vector<DynaPin::VirtualSupportSurface>& surfaces,
-                                         size_t                                             layer_count,
-                                         SupportGeneratorLayersPtr&                         intermediate_layers,
-                                         SupportGeneratorLayersPtr&                         interface_layers,
-                                         const SupportGeneratorLayersPtr&                   bottom_contacts,
-                                         const SupportGeneratorLayersPtr&                   top_contacts,
-                                         const SupportGeneratorLayersPtr&                   base_interfaces,
-                                         SupportGeneratorLayerStorage&                      storage)
+// Build one local bed-like support layer per pin; ordinary object interfaces
+// remain in their native generators and never determine the landing depth.
+static SupportGeneratorLayersPtr make_dynapin_base_layers(const std::vector<DynaPin::VirtualSupportSurface>& surfaces,
+                                                          double                                             expansion,
+                                                          const SupportGeneratorLayersPtr&                   candidates,
+                                                          SupportGeneratorLayerStorage&                      storage)
 {
-    if (layer_count == 0 || surfaces.empty())
-        return;
-    SupportGeneratorLayersPtr candidates = intermediate_layers;
-    append(candidates, interface_layers);
-    append(candidates, bottom_contacts);
-    append(candidates, top_contacts);
-    append(candidates, base_interfaces);
-    const size_t first_base_interface = intermediate_layers.size() + interface_layers.size() + bottom_contacts.size() + top_contacts.size();
     std::vector<DynaPin::LandingLayer> slabs;
-    slabs.reserve(candidates.size());
-    for (const SupportGeneratorLayer* layer : candidates)
+    for (const auto* layer : candidates)
         slabs.push_back({layer->bottom_print_z(), layer->print_z, layer->polygons});
-    const auto masks = DynaPin::landing_regions(slabs, surfaces, layer_count);
-    for (size_t i = 0; i < candidates.size(); ++i)
-        candidates[i]->dynapin_landing_regions = masks[i];
-    for (size_t i = 0; i < candidates.size(); ++i) {
-        // Contacts retain their own height/bridging flow. Existing interfaces
-        // already have the correct role. Only intermediate/transition slabs
-        // need promotion; their interface peers share the same source slab.
-        if (i >= intermediate_layers.size() && i < first_base_interface)
-            continue;
-        SupportGeneratorLayer& layer = *candidates[i];
-        if (masks[i].empty())
-            continue;
-        layer.polygons = diff(layer.polygons, masks[i]);
-        layer.dynapin_landing_regions.clear();
-        SupportGeneratorLayer* landing = nullptr;
-        for (SupportGeneratorLayer* candidate : interface_layers)
-            if (std::abs(candidate->print_z - layer.print_z) < EPSILON && std::abs(candidate->height - layer.height) < EPSILON &&
-                candidate->bridging == layer.bridging) {
-                landing = candidate;
-                break;
-            }
-        if (landing == nullptr) {
-            landing           = &storage.allocate_unguarded(SupporLayerType::BottomInterface);
-            landing->print_z  = layer.print_z;
-            landing->bottom_z = layer.bottom_z;
-            landing->height   = layer.height;
-            landing->bridging = layer.bridging;
-            interface_layers.push_back(landing);
-        }
-        landing->polygons                = union_(landing->polygons, masks[i]);
-        landing->dynapin_landing_regions = union_(landing->dynapin_landing_regions, masks[i]);
+    SupportGeneratorLayersPtr result;
+    for (auto& slab : DynaPin::landing_base_layers(slabs, surfaces, expansion)) {
+        auto& layer    = storage.allocate_unguarded(SupporLayerType::Base);
+        layer.print_z  = slab.print_z;
+        layer.bottom_z = slab.bottom_z;
+        layer.height   = slab.print_z - slab.bottom_z;
+        layer.polygons = std::move(slab.polygons);
+        result.push_back(&layer);
     }
-    std::sort(interface_layers.begin(), interface_layers.end(), [](const auto* a, const auto* b) { return *a < *b; });
+    return result;
 }
 
 #ifdef SLIC3R_DEBUG
@@ -1191,10 +1155,38 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
         this->trim_support_layers_by_object(object, aligned_layers, m_slicing_params.gap_support_object,
                                             m_slicing_params.gap_object_support, m_support_params.gap_xy);
 
-    // Count only surviving slabs: a layer clipped by a pin blocker must not
-    // consume one of the requested landing interface layers.
-    add_dynapin_interface_layers(dynapin_surfaces, m_support_params.num_bottom_interface_layers, intermediate_layers, interface_layers,
-                                 bottom_contacts, top_contacts, base_interface_layers, layer_storage);
+    SupportGeneratorLayersPtr landing_sources = intermediate_layers;
+    append(landing_sources, interface_layers);
+    append(landing_sources, bottom_contacts);
+    append(landing_sources, top_contacts);
+    append(landing_sources, base_interface_layers);
+    auto landing_layers = make_dynapin_base_layers(dynapin_surfaces, m_object_config->raft_first_layer_expansion.value, landing_sources,
+                                                   layer_storage);
+    // Replace the whole original first footprint, including the exposed edge
+    // strips trimmed from the new base. They must not survive as ordinary fill.
+    for (auto* source : landing_sources)
+        for (const auto& surface : dynapin_surfaces)
+            if (std::abs(source->bottom_print_z() - surface.print_z) < EPSILON)
+                source->polygons = diff(source->polygons, {surface.poly});
+    if (!landing_layers.empty()) {
+        const Polygons printable = DynaPin::landing_printable_region(object);
+        for (auto* layer : landing_layers) {
+            layer->polygons = intersection(layer->polygons, printable);
+            for (const auto& blocker : dynapin_blockers)
+                if (layer->bottom_print_z() < blocker.z_max - EPSILON && layer->print_z > blocker.z_min + EPSILON)
+                    layer->polygons = diff(layer->polygons, {blocker.poly});
+        }
+        this->trim_support_layers_by_object(object, landing_layers, m_slicing_params.gap_support_object,
+                                            m_slicing_params.gap_object_support, m_support_params.gap_xy);
+        for (auto* landing : landing_layers) {
+            landing->dynapin_landing_regions = landing->polygons;
+            for (auto* source : landing_sources)
+                if (std::abs(source->print_z - landing->print_z) < EPSILON)
+                    source->polygons = diff(source->polygons, landing->polygons);
+        }
+        append(intermediate_layers, landing_layers);
+        std::sort(intermediate_layers.begin(), intermediate_layers.end(), [](const auto* a, const auto* b) { return *a < *b; });
+    }
 
     BOOST_LOG_TRIVIAL(info) << "Support generator - Creating layers";
 

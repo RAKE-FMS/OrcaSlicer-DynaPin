@@ -17,7 +17,8 @@
   },
   "support_exclusion": {
     "blocker_width_y": 12.4,
-    "blocker_height_z": 5
+    "blocker_height_z": 5,
+    "landing_edge_inset_y": 1.2
   },
   "pull_gcode": {
     "type": "alternating",

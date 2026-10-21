@@ -6453,7 +6453,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
 
     if (speed == 0)
         speed = filament_max_volumetric_speed / _mm3_per_mm;
-    if (this->on_first_layer()) {
+    if (this->on_first_layer() || path.is_dynapin_landing) {
         // BBS: for solid infill of first layer, speed can be higher as long as
         // wall lines have be attached
         if (path.role() != erBottomSurface)
