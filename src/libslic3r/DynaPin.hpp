@@ -168,6 +168,8 @@ struct TreePinLandingPlan
     std::vector<TreePinRejection> rejections;
 };
 
+void validate_tree_pin_extrusions(const PrintObject& object, TreePinLandingPlan& plan);
+
 std::vector<Pin>        parse_pin_list(const std::string& pins);
 bool                    has_manual_selection(const Print& print);
 std::vector<Pin>        candidate_pins(const Config& config);

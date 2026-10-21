@@ -115,7 +115,7 @@ std::pair<SupportGeneratorLayersPtr, SupportGeneratorLayersPtr> generate_interfa
         };
         tbb::parallel_for(tbb::blocked_range<int>(0, int(intermediate_layers.size())),
             [&bottom_contacts, &top_contacts, &top_interface_layers, &top_base_interface_layers, &intermediate_layers, &insert_layer, &support_params,
-             snug_supports, &interface_layers, &base_interface_layers](const tbb::blocked_range<int>& range) {
+             snug_supports, &interface_layers, &base_interface_layers, &config](const tbb::blocked_range<int>& range) {
                 // Gather the top / bottom contact layers intersecting with num_interface_layers resp. num_interface_layers_only intermediate layers above / below
                 // this intermediate layer.
                 // Index of the first top contact layer intersecting the current intermediate layer.
@@ -143,6 +143,12 @@ std::pair<SupportGeneratorLayersPtr, SupportGeneratorLayersPtr> generate_interfa
                                 // Only base interface layers to generate.
                                 - std::numeric_limits<coordf_t>::max() :
                                 intermediate_layers[std::min(num_intermediate - 1, idx_intermediate_layer + int(support_params.num_top_interface_layers_only()) - 1)]->print_z;
+                        if (support_params.dynapin_independent_grid) {
+                            top_z = intermediate_layer.print_z + (support_params.num_top_interface_layers - 1) * config.layer_height.value;
+                            if (support_params.num_top_base_interface_layers > 0 && support_params.num_top_interface_layers_only() > 0)
+                                top_inteface_z = intermediate_layer.print_z +
+                                                 (support_params.num_top_interface_layers_only() - 1) * config.layer_height.value;
+                        }
                         // Move idx_top_contact_first up until above the current print_z.
                         idx_top_contact_first = idx_higher_or_equal(top_contacts, idx_top_contact_first, [&intermediate_layer](const SupportGeneratorLayer *layer){ return layer->print_z >= intermediate_layer.print_z; }); //  - EPSILON
                         // Collect the top contact areas above this intermediate layer, below top_z.
@@ -167,6 +173,13 @@ std::pair<SupportGeneratorLayersPtr, SupportGeneratorLayersPtr> generate_interfa
                                 // Only base interface layers to generate.
                                 std::numeric_limits<coordf_t>::max() :
                                 intermediate_layers[std::max(0, idx_intermediate_layer - int(support_params.num_bottom_interface_layers_only()))]->bottom_z;
+                        if (support_params.dynapin_independent_grid) {
+                            bottom_z = intermediate_layer.bottom_z -
+                                       (support_params.num_bottom_interface_layers - 1) * config.layer_height.value;
+                            if (support_params.num_bottom_base_interface_layers > 0 && support_params.num_bottom_interface_layers_only() > 0)
+                                bottom_interface_z = intermediate_layer.bottom_z -
+                                                     support_params.num_bottom_interface_layers_only() * config.layer_height.value;
+                        }
                         // Move idx_bottom_contact_first up until touching bottom_z.
                         idx_bottom_contact_first = idx_higher_or_equal(bottom_contacts, idx_bottom_contact_first, [bottom_z](const SupportGeneratorLayer *layer){ return layer->print_z >= bottom_z - EPSILON; });
                         // Collect the top contact areas above this intermediate layer, below top_z.

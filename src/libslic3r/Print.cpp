@@ -104,6 +104,22 @@ void Print::update_dynapin_selection(const ObjectID* tree_target_instance_id, st
         next.pins   = DynaPin::parse_pin_list(m_config.dynapin_selected_pins.value);
         DynaPin::sort_unique_pins(next.pins, dynapin_config);
         BOOST_LOG_TRIVIAL(debug) << "[DynaPin] manual selection parsed: pins=" << dynapin_pin_list_text(next.pins);
+        if (std::any_of(m_objects.begin(), m_objects.end(), [](const auto* object) {
+                return object->has_support() && is_tree_organic(object->config().support_type.value, object->config().support_style.value);
+            })) {
+            next.pins.erase(std::remove_if(next.pins.begin(), next.pins.end(),
+                                           [&](const auto& pin) {
+                                               if (!DynaPin::pin_collides_with_model(*this, dynapin_config, pin))
+                                                   return false;
+                                               next.rejected_collisions.push_back(pin);
+                                               return true;
+                                           }),
+                            next.pins.end());
+            if (!next.rejected_collisions.empty())
+                next.warning = (boost::format(L("DynaPin manual selection skipped pins that collide with a model: %1%")) %
+                                dynapin_pin_list_text(next.rejected_collisions))
+                                   .str();
+        }
     } else {
         next.source = DynaPin::SelectionSource::Automatic;
         const std::vector<DynaPin::Pin> candidates = DynaPin::candidate_pins(dynapin_config);
@@ -129,7 +145,6 @@ void Print::update_dynapin_selection(const ObjectID* tree_target_instance_id, st
             BOOST_LOG_TRIVIAL(debug) << "[DynaPin] automatic model collision scan: colliding=" << colliding_count
                                      << ", pins=" << colliding_pin_list;
 
-            bool skipped_organic = false;
             size_t object_index = 0;
             for (const PrintObject *object : m_objects) {
                 if (!object->has_support()) {
@@ -143,13 +158,6 @@ void Print::update_dynapin_selection(const ObjectID* tree_target_instance_id, st
                                          << ", name='" << object->model_object()->name << "', layers=" << object->layers().size()
                                          << ", instances=" << object->instances().size()
                                          << ", support_type=" << object->config().support_type.value;
-                if (is_tree_organic(object->config().support_type.value, object->config().support_style.value)) {
-                    skipped_organic = true;
-                    BOOST_LOG_TRIVIAL(debug) << "[DynaPin] object scan skipped: index=" << object_index
-                                             << ", reason=organic_support";
-                    ++object_index;
-                    continue;
-                }
                 std::vector<DynaPin::Pin> selected;
                 std::vector<DynaPin::Pin> rejected;
                 if (is_tree(object->config().support_type.value)) {
@@ -179,12 +187,6 @@ void Print::update_dynapin_selection(const ObjectID* tree_target_instance_id, st
             if (!next.rejected_collisions.empty())
                 next.warning = (boost::format(L("DynaPin automatic selection skipped pins that collide with a model: %1%")) %
                                 dynapin_pin_list_text(next.rejected_collisions)).str();
-            if (skipped_organic) {
-                if (!next.warning.empty())
-                    next.warning += "\n";
-                next.warning += L("DynaPin automatic pin selection is not available for Organic or default Tree support. Select Tree Slim, "
-                                  "Strong or Hybrid.");
-            }
         }
     }
 
@@ -223,10 +225,6 @@ void Print::finalize_dynapin_tree_selection()
         for (const PrintObject* object : m_objects) {
             if (!object->has_support())
                 continue;
-            if (is_tree_organic(object->config().support_type.value, object->config().support_style.value)) {
-                has_tree_object = true;
-                continue;
-            }
             if (is_tree(object->config().support_type.value)) {
                 has_tree_object = true;
                 append(used_pins, object->dynapin_tree_landing_plan().used_pins);

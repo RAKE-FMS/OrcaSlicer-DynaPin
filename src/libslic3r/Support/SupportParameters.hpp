@@ -181,6 +181,7 @@ struct SupportParameters {
     bool                    has_top_contacts;
     // Is there at least a bottom contact layer extruded below support base?
     bool                    has_bottom_contacts;
+    bool                    dynapin_independent_grid = false;
     // Number of top interface layers without counting the contact layer.
     size_t                  num_top_interface_layers;
     // Number of bottom interface layers without counting the contact layer.

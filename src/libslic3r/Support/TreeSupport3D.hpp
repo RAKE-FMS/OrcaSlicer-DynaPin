@@ -137,6 +137,8 @@ struct SupportElementStateBits {
 
 struct SupportElementState : public SupportElementStateBits
 {
+    int      dynapin_surface = -1;
+    double   dynapin_z       = 0.;
     int type = 0;
     coordf_t radius = 0;
     float print_z = 0;
@@ -292,23 +294,25 @@ using SupportElements = std::deque<SupportElement>;
     return support_element_collision_radius(settings, elem.state);
 }
 
+struct OrganicPinSupport;
+
 // Organic specific: Smooth branches and produce one cummulative mesh to be sliced.
-void organic_draw_branches(
-    PrintObject                     &print_object,
-    TreeModelVolumes                &volumes, 
-    const TreeSupportSettings       &config,
-    std::vector<SupportElements>    &move_bounds,
+void organic_draw_branches(PrintObject&                  print_object,
+                           TreeModelVolumes&             volumes,
+                           const TreeSupportSettings&    config,
+                           std::vector<SupportElements>& move_bounds,
 
-    // I/O:
-    SupportGeneratorLayersPtr       &bottom_contacts,
-    SupportGeneratorLayersPtr       &top_contacts,
-    InterfacePlacer                 &interface_placer,
+                           // I/O:
+                           SupportGeneratorLayersPtr& bottom_contacts,
+                           SupportGeneratorLayersPtr& top_contacts,
+                           InterfacePlacer&           interface_placer,
 
-    // Output:
-    SupportGeneratorLayersPtr       &intermediate_layers,
-    SupportGeneratorLayerStorage    &layer_storage,
+                           // Output:
+                           SupportGeneratorLayersPtr&    intermediate_layers,
+                           SupportGeneratorLayerStorage& layer_storage,
 
-    std::function<void()> throw_on_cancel);
+                           std::function<void()> throw_on_cancel,
+                           OrganicPinSupport*    pins = nullptr);
 
 } // namespace TreeSupport3D
 

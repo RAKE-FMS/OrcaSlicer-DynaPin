@@ -38,13 +38,17 @@ class TreeModelVolumes
 {
 public:
     TreeModelVolumes() = default;
-    explicit TreeModelVolumes(const PrintObject &print_object, const BuildVolume &build_volume,
-        coord_t max_move, coord_t max_move_slow, size_t current_mesh_idx, 
+    explicit TreeModelVolumes(const PrintObject& print_object,
+                              const BuildVolume& build_volume,
+                              coord_t            max_move,
+                              coord_t            max_move_slow,
+                              size_t             current_mesh_idx,
 #ifdef SLIC3R_TREESUPPORTS_PROGRESS
-        double progress_multiplier, 
-        double progress_offset, 
+                              double progress_multiplier,
+                              double progress_offset,
 #endif // SLIC3R_TREESUPPORTS_PROGRESS
-        const std::vector<Polygons> &additional_excluded_areas = {});
+                              const std::vector<Polygons>& additional_excluded_areas = {},
+                              const std::vector<Polygons>& pin_landing_areas         = {});
     TreeModelVolumes(TreeModelVolumes&&) = default;
     TreeModelVolumes& operator=(TreeModelVolumes&&) = default;
 
@@ -480,6 +484,8 @@ private:
      * \brief Storage for areas that should be avoided, like support blocker or previous generated trees.
      */
     std::vector<Polygons> m_anti_overhang;
+    std::vector<Polygons> m_pin_landing_areas;
+    std::vector<Polygons> m_pin_blockers;
     /*!
      * \brief Radii that can be ignored by ceilRadius as they will never be requested, sorted.
      */

@@ -391,6 +391,7 @@ public:
     void generate();
 
     void detect_overhangs(bool check_support_necessity = false);
+    const std::optional<std::vector<DynaPin::Pin>>& dynapin_allowed_pins() const { return m_dynapin_allowed_pins; }
 
     SupportNode* create_node(const Point  position,
         const int    distance_to_top,

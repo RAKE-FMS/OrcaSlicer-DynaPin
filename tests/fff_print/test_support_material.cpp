@@ -264,6 +264,8 @@ SCENARIO("SupportMaterial: DynaPin propagates a connected blocker cutout downwar
 
     Print baseline_print;
     Print print;
+    baseline_print.set_plate_origin(Vec3d::Zero());
+    print.set_plate_origin(Vec3d::Zero());
     Model model;
     ModelObject *object = model.add_object();
     object->add_volume(std::move(mesh));

@@ -1781,26 +1781,7 @@ void TreeSupport::validate_dynapin_landings()
     if (plan.landings.empty())
         return;
 
-    std::vector<DynaPin::Pin> colliding_pins;
-    for (const DynaPin::LocalBlocker& blocker : DynaPin::support_blocker_regions_local(*m_object)) {
-        if (std::find(plan.used_pins.begin(), plan.used_pins.end(), blocker.pin) == plan.used_pins.end())
-            continue;
-        bool intersects = false;
-        for (const SupportLayer* layer : m_object->support_layers()) {
-            if (layer == nullptr || layer->bottom_z() >= blocker.z_max - EPSILON || layer->print_z <= blocker.z_min + EPSILON)
-                continue;
-            for (const ExtrusionEntity* entity : layer->support_fills.flatten().entities) {
-                if (!intersection(entity->polygons_covered_by_width(), Polygons{blocker.poly}).empty()) {
-                    intersects = true;
-                    break;
-                }
-            }
-            if (intersects)
-                break;
-        }
-        if (intersects)
-            colliding_pins.push_back(blocker.pin);
-    }
+    DynaPin::validate_tree_pin_extrusions(*m_object, plan);
 
     const auto has_extrusion = [this](double print_z, const Polygon& footprint) {
         const SupportLayer* layer = m_object->get_support_layer_at_printz(print_z, EPSILON);
@@ -1815,19 +1796,6 @@ void TreeSupport::validate_dynapin_landings()
     plan.landings
         .erase(std::remove_if(plan.landings.begin(), plan.landings.end(),
                               [&](const DynaPin::TreePinLanding& landing) {
-                                  if (std::find(colliding_pins.begin(), colliding_pins.end(), landing.pin) != colliding_pins.end()) {
-                                      plan.rejections.push_back({landing.pin, DynaPin::TreePinRejectionReason::BlockerCollision});
-                                      return true;
-                                  }
-                                  const SupportLayer* layer = m_object->get_support_layer_at_printz(landing.support_print_z, EPSILON);
-                                  if (layer == nullptr || std::abs(layer->bottom_z() - landing.print_z) > EPSILON) {
-                                      plan.rejections.push_back({landing.pin, DynaPin::TreePinRejectionReason::LayerHeight});
-                                      return true;
-                                  }
-                                  if (!has_extrusion(landing.support_print_z, landing.footprint)) {
-                                      plan.rejections.push_back({landing.pin, DynaPin::TreePinRejectionReason::MissingExtrusion});
-                                      return true;
-                                  }
                                   if (landing.layer_id >= contact_nodes.size())
                                       return true;
                                   const auto&        nodes   = contact_nodes[landing.layer_id];

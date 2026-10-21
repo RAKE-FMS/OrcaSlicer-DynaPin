@@ -808,18 +808,20 @@ void PrintObject::generate_support_material()
 
             this->_generate_support_material();
             m_print->throw_if_canceled();
-            if (m_print->dynapin_selection().source == DynaPin::SelectionSource::Manual && DynaPin::effective_debug_stage(*m_print) >= 1 &&
-                is_tree_organic(m_config.support_type.value, m_config.support_style.value))
-                this->active_step_add_warning(
-                    PrintStateBase::WarningLevel::NON_CRITICAL,
-                    L("DynaPin landing is not supported by Organic or default Tree support. Select Tree Slim, Strong or Hybrid."));
             if (!dynapin_tree_landing_plan().rejections.empty()) {
                 std::string warning = L("DynaPin Tree support did not use these pins:");
+                std::map<DynaPin::TreePinRejectionReason, std::vector<DynaPin::Pin>> by_reason;
                 for (const auto& rejection : dynapin_tree_landing_plan().rejections) {
-                    warning += "\n" + std::to_string(rejection.pin.row) + "," + std::to_string(rejection.pin.col) + ": " +
-                               L(DynaPin::tree_pin_rejection_text(rejection.reason));
+                    by_reason[rejection.reason].push_back(rejection.pin);
                     BOOST_LOG_TRIVIAL(info) << "[DynaPin] Tree rejected pin " << rejection.pin.row << "," << rejection.pin.col << ": "
                                             << DynaPin::tree_pin_rejection_text(rejection.reason);
+                }
+                // The export dialog only displays the first line of a warning.
+                for (const auto& [reason, pins] : by_reason) {
+                    warning += " " + std::string(L(DynaPin::tree_pin_rejection_text(reason))) + " [";
+                    for (size_t i = 0; i < pins.size(); ++i)
+                        warning += (i ? " " : "") + std::to_string(pins[i].row) + "," + std::to_string(pins[i].col);
+                    warning += "];";
                 }
                 this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, warning);
             }
@@ -4029,8 +4031,7 @@ void PrintObject::_generate_support_material()
 
 void PrintObject::generate_tree_support_with_dynapin_retries()
 {
-    const bool                             retry        = m_print->dynapin_selection().source != DynaPin::SelectionSource::Unavailable &&
-                                                          !is_tree_organic(m_config.support_type.value, m_config.support_style.value);
+    const bool                             retry        = m_print->dynapin_selection().source != DynaPin::SelectionSource::Unavailable;
     std::vector<DynaPin::Pin> candidates = retry ? m_print->dynapin_selection().pins : std::vector<DynaPin::Pin>{};
     const size_t max_attempts = retry ? candidates.size() + 1 : 1;
     std::vector<DynaPin::TreePinRejection> rejections;
@@ -4085,11 +4086,6 @@ void PrintObject::generate_support_geometry_only(std::vector<DynaPin::SupportSla
         generated_tree_pins->clear();
 
     if (is_tree(m_config.support_type.value)) {
-        // Organic support uses the separate TreeSupport3D generator and is not
-        // supported by DynaPin placement optimization.
-        if (is_tree_organic(m_config.support_type.value, m_config.support_style.value))
-            return;
-
         struct SupportLayerRestore
         {
             PrintObject& object;
@@ -4109,10 +4105,15 @@ void PrintObject::generate_support_geometry_only(std::vector<DynaPin::SupportSla
             if (layer == nullptr || layer->height <= EPSILON)
                 continue;
             Polygons polygons;
-            polygons_append(polygons, to_polygons(layer->base_areas));
-            polygons_append(polygons, to_polygons(layer->roof_areas));
-            polygons_append(polygons, to_polygons(layer->roof_1st_layer));
-            polygons_append(polygons, to_polygons(layer->floor_areas));
+            if (is_tree_organic(m_config.support_type.value, m_config.support_style.value)) {
+                // The Organic generator stores its classified regions in support_islands.
+                polygons = to_polygons(layer->support_islands);
+            } else {
+                polygons_append(polygons, to_polygons(layer->base_areas));
+                polygons_append(polygons, to_polygons(layer->roof_areas));
+                polygons_append(polygons, to_polygons(layer->roof_1st_layer));
+                polygons_append(polygons, to_polygons(layer->floor_areas));
+            }
             if (!polygons.empty())
                 slabs.push_back({layer->bottom_z(), layer->print_z, union_(std::move(polygons))});
         }

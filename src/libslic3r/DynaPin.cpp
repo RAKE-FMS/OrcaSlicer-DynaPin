@@ -729,8 +729,6 @@ std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
 {
     std::vector<Polygons> out(object.layer_count());
     const Print&          print = *object.print();
-    if (is_tree_organic(object.config().support_type.value, object.config().support_style.value))
-        return out;
     if (!print.config().enable_dynapin_support_optimization.value || effective_debug_stage(print) < 2)
         return out;
 
@@ -765,8 +763,6 @@ std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject& objec
 {
     std::vector<LocalBlocker> out;
     const Print&              print = *object.print();
-    if (is_tree_organic(object.config().support_type.value, object.config().support_style.value))
-        return out;
     if (!print.config().enable_dynapin_support_optimization.value || effective_debug_stage(print) < 2)
         return out;
 
@@ -788,8 +784,6 @@ std::vector<VirtualSupportSurface> pin_top_surfaces_for_object(const PrintObject
 {
     std::vector<VirtualSupportSurface> out;
     const Print&                       print = *object.print();
-    if (is_tree_organic(object.config().support_type.value, object.config().support_style.value))
-        return out;
     if (!print.config().enable_dynapin_support_optimization.value || effective_debug_stage(print) < 1)
         return out;
 
@@ -805,6 +799,82 @@ std::vector<VirtualSupportSurface> pin_top_surfaces_for_object(const PrintObject
     for (const Pin& pin : pins)
         out.push_back(surface_for_pin(object, config, pin));
     return out;
+}
+
+void validate_tree_pin_extrusions(const PrintObject& object, TreePinLandingPlan& plan)
+{
+    if (plan.landings.empty())
+        return;
+    std::vector<Pin> invalid;
+    const auto       surfaces = pin_top_surfaces_for_object(object);
+    const auto       blockers = support_blocker_regions_local(object);
+    const bool       organic  = is_tree_organic(object.config().support_type.value, object.config().support_style.value);
+    // A pin may carry many roots. Check its blocker once, rather than scanning
+    // every support extrusion again for each root on that physical pin.
+    std::vector<Pin> colliding;
+    for (const auto& blocker : blockers) {
+        if (std::none_of(plan.landings.begin(), plan.landings.end(), [&](const auto& landing) { return landing.pin == blocker.pin; }))
+            continue;
+        bool collision = false;
+        for (const auto* support : object.support_layers()) {
+            if (support->bottom_z() >= blocker.z_max - EPSILON || support->print_z <= blocker.z_min + EPSILON)
+                continue;
+            for (const auto* entity : support->support_fills.flatten().entities)
+                if (!intersection(entity->polygons_covered_by_width(), Polygons{blocker.poly}).empty()) {
+                    collision = true;
+                    break;
+                }
+            if (collision)
+                break;
+        }
+        if (collision)
+            colliding.push_back(blocker.pin);
+    }
+    std::map<const SupportLayer*, std::vector<Polygons>> landing_extrusions;
+    plan.landings.erase(std::remove_if(plan.landings.begin(), plan.landings.end(),
+                                       [&](const TreePinLanding& landing) {
+                                           const auto reject = [&](TreePinRejectionReason reason) {
+                                               plan.rejections.push_back({landing.pin, reason});
+                                               invalid.push_back(landing.pin);
+                                               return true;
+                                           };
+                                           if (std::find(colliding.begin(), colliding.end(), landing.pin) != colliding.end())
+                                               return reject(TreePinRejectionReason::BlockerCollision);
+                                           const SupportLayer* layer = object.get_support_layer_at_printz(landing.support_print_z, EPSILON);
+                                           if (!layer || std::abs(layer->bottom_z() - landing.print_z) > EPSILON)
+                                               return reject(TreePinRejectionReason::LayerHeight);
+                                           const auto surface = std::find_if(surfaces.begin(), surfaces.end(),
+                                                                             [&](const auto& value) { return value.pin == landing.pin; });
+                                           if (surface == surfaces.end() ||
+                                               !diff(Polygons{landing.footprint}, offset(surface->poly, scaled<coord_t>(0.001))).empty())
+                                               return reject(TreePinRejectionReason::OutsideSurface);
+                                           bool extruded          = false;
+                                           auto [paths, inserted] = landing_extrusions.try_emplace(layer);
+                                           if (inserted)
+                                               for (const auto* entity : layer->support_fills.flatten().entities)
+                                                   paths->second.push_back(entity->polygons_covered_by_width());
+                                           for (const Polygons& covered : paths->second) {
+                                               if (intersection(covered, Polygons{landing.footprint}).empty())
+                                                   continue;
+                                               extruded = true;
+                                               // Slim's node footprint already includes half the extrusion width.
+                                               // Its paths may also serve adjacent bed-supported nodes. Organic
+                                               // has a mesh root disk, so check the complete first-slab paths too.
+                                               if (organic && !diff(covered, offset(surface->poly, scaled<coord_t>(0.001))).empty())
+                                                   return reject(TreePinRejectionReason::OutsideSurface);
+                                           }
+                                           if (!extruded)
+                                               return reject(TreePinRejectionReason::MissingExtrusion);
+                                           return false;
+                                       }),
+                        plan.landings.end());
+    // A physical pin cannot be retained for one root if another root on that
+    // same pin failed validation: the next retry must rebuild both branches.
+    plan.landings.erase(std::remove_if(plan.landings.begin(), plan.landings.end(),
+                                       [&](const auto& landing) {
+                                           return std::find(invalid.begin(), invalid.end(), landing.pin) != invalid.end();
+                                       }),
+                        plan.landings.end());
 }
 
 std::vector<BlockerBox> selected_blocker_boxes(const Print& print)

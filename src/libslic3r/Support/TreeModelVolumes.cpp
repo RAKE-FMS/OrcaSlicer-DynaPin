@@ -51,22 +51,31 @@ static Polygons calculateMachineBorderCollision(Polygon machine_border)
 #endif
 }
 
-TreeModelVolumes::TreeModelVolumes(
-    const PrintObject &print_object,
-    const BuildVolume &build_volume,
-    const coord_t max_move, const coord_t max_move_slow, size_t current_mesh_idx, 
+TreeModelVolumes::TreeModelVolumes(const PrintObject& print_object,
+                                   const BuildVolume& build_volume,
+                                   const coord_t      max_move,
+                                   const coord_t      max_move_slow,
+                                   size_t             current_mesh_idx,
 #ifdef SLIC3R_TREESUPPORTS_PROGRESS
-    double progress_multiplier, double progress_offset, 
+                                   double progress_multiplier,
+                                   double progress_offset,
 #endif // SLIC3R_TREESUPPORTS_PROGRESS
-    const std::vector<Polygons>& additional_excluded_areas) :
-    // -2 to avoid rounding errors
-    m_max_move{ std::max<coord_t>(max_move - 2, 0) }, m_max_move_slow{ std::max<coord_t>(max_move_slow - 2, 0) },
+                                   const std::vector<Polygons>& additional_excluded_areas,
+                                   const std::vector<Polygons>& pin_landing_areas)
+    : // -2 to avoid rounding errors
+    m_max_move{std::max<coord_t>(max_move - 2, 0)}
+    , m_max_move_slow{std::max<coord_t>(max_move_slow - 2, 0)}
+    ,
 #ifdef SLIC3R_TREESUPPORTS_PROGRESS
-    m_progress_multiplier{ progress_multiplier }, m_progress_offset{ progress_offset },
+    m_progress_multiplier{progress_multiplier}
+    , m_progress_offset{progress_offset}
+    ,
 #endif // SLIC3R_TREESUPPORTS_PROGRESS
-    m_machine_border{ calculateMachineBorderCollision(build_volume.polygon()) }
+    m_machine_border{calculateMachineBorderCollision(build_volume.polygon())}
 {
     m_bed_area = build_volume.polygon();
+    m_pin_landing_areas = pin_landing_areas;
+    m_pin_blockers      = additional_excluded_areas;
 #if 0
     std::unordered_map<size_t, size_t> mesh_to_layeroutline_idx;
     for (size_t mesh_idx = 0; mesh_idx < storage.meshes.size(); ++ mesh_idx) {
@@ -574,6 +583,9 @@ void TreeModelVolumes::calculateCollision(const coord_t radius, const LayerIndex
 #endif
     if (throw_on_cancel)
         throw_on_cancel();
+    for (LayerIndex i = data.begin(); i < data.end() && size_t(i) < m_pin_blockers.size(); ++i)
+        if (!m_pin_blockers[i].empty())
+            data[i] = union_(data[i], offset(m_pin_blockers[i], radius));
     m_collision_cache.insert(std::move(data), radius);
     if (calculate_placable)
         m_placeable_areas_cache.insert(std::move(data_placeable), radius);
@@ -692,6 +704,13 @@ void TreeModelVolumes::calculateAvoidance(const std::vector<RadiusLayerPair> &ke
                             ClipperLib::jtRound, m_min_resolution));
                 if (task.to_model)
                     latest_avoidance = diff(latest_avoidance, getPlaceableAreas(task.radius, layer_idx, throw_on_cancel));
+                // Pin tops are additional destinations, not model surfaces. Seed both
+                // reachability maps without changing the model collision geometry.
+                if (size_t(layer_idx) < m_pin_landing_areas.size() && !m_pin_landing_areas[layer_idx].empty()) {
+                    const Polygons safe = diff(offset(m_pin_landing_areas[layer_idx], -task.radius),
+                                               getCollision(task.radius, layer_idx, true));
+                    latest_avoidance    = diff(latest_avoidance, safe);
+                }
                 latest_avoidance = polygons_simplify(latest_avoidance, m_min_resolution, polygons_strictly_simple);
                 data.emplace_back(RadiusLayerPair{task.radius, layer_idx}, latest_avoidance);
                 if (throw_on_cancel)

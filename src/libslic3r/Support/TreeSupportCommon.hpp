@@ -498,6 +498,8 @@ public:
 
     // Extra raft layers below the object.
     std::vector<coordf_t> raft_layers;
+    // Used only by Organic mesh slicing; the influence graph keeps its original grid.
+    std::vector<coordf_t> output_layer_z;
 
 public:
     bool operator==(const TreeSupportSettings& other) const
@@ -609,6 +611,8 @@ inline void tree_supports_show_error(std::string_view message, bool critical)
 
 inline double layer_z(const SlicingParameters &slicing_params, const TreeSupportSettings &config, const size_t layer_idx)
 {
+    if (!config.output_layer_z.empty())
+        return config.output_layer_z.at(layer_idx);
     return layer_idx >= config.raft_layers.size() ? 
         slicing_params.object_print_z_min + slicing_params.first_object_layer_height + (layer_idx - config.raft_layers.size()) * slicing_params.layer_height :
         config.raft_layers[layer_idx];
@@ -616,6 +620,9 @@ inline double layer_z(const SlicingParameters &slicing_params, const TreeSupport
 // Lowest collision layer
 inline LayerIndex layer_idx_ceil(const SlicingParameters &slicing_params, const TreeSupportSettings &config, const double z)
 {
+    if (!config.output_layer_z.empty())
+        return LayerIndex(std::lower_bound(config.output_layer_z.begin(), config.output_layer_z.end(), z - EPSILON) -
+                          config.output_layer_z.begin());
     return 
         LayerIndex(config.raft_layers.size()) +
         std::max<LayerIndex>(0, ceil((z - slicing_params.object_print_z_min - slicing_params.first_object_layer_height) / slicing_params.layer_height));
@@ -623,6 +630,10 @@ inline LayerIndex layer_idx_ceil(const SlicingParameters &slicing_params, const 
 // Highest collision layer
 inline LayerIndex layer_idx_floor(const SlicingParameters &slicing_params, const TreeSupportSettings &config, const double z)
 {
+    if (!config.output_layer_z.empty())
+        return std::max<LayerIndex>(0, LayerIndex(std::upper_bound(config.output_layer_z.begin(), config.output_layer_z.end(), z + EPSILON) -
+                                                  config.output_layer_z.begin()) -
+                                           1);
     return 
         LayerIndex(config.raft_layers.size()) + 
         std::max<LayerIndex>(0, floor((z - slicing_params.object_print_z_min - slicing_params.first_object_layer_height) / slicing_params.layer_height));
