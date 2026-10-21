@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/DynaPin.hpp"
+#include "libslic3r/DynaPinLanding.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -17,6 +18,7 @@
 #include <string>
 #include <set>
 #include <fstream>
+#include <limits>
 
 using namespace Slic3r::Test;
 using namespace Slic3r;
@@ -267,6 +269,8 @@ SCENARIO("SupportMaterial: DynaPin propagates a connected blocker cutout downwar
 
     Print baseline_print;
     Print print;
+    baseline_print.set_plate_origin(Vec3d::Zero());
+    print.set_plate_origin(Vec3d::Zero());
     Model model;
     ModelObject *object = model.add_object();
     object->add_volume(std::move(mesh));
@@ -547,9 +551,11 @@ SCENARIO("SupportMaterial: Checking bridge speed", "[SupportMaterial]")
 
 TEST_CASE("DynaPin landing interfaces follow bottom depth and reslicing", "[DynaPin][SupportMaterial][Cooling]")
 {
+    const char*       pattern = GENERATE("rectilinear", "concentric", "grid", "rectilinear_interlaced");
     ResourcesDirGuard resources_guard(test_resources_dir());
     DataDirGuard      data_dir_guard;
     Print             print;
+    print.set_plate_origin(Vec3d::Zero());
     Model             model;
     TriangleMesh      mesh = Test::mesh(TestMesh::cube_20x20x20);
     TriangleMesh      slab = Test::mesh(TestMesh::cube_20x20x20);
@@ -568,6 +574,8 @@ TEST_CASE("DynaPin landing interfaces follow bottom depth and reslicing", "[Dyna
         {"dynapin_selected_pins", "5,0"},
         {"dynapin_debug_stage", 2},
         {"support_type", "normal(auto)"},
+        {"support_angle", 37.},
+        {"support_interface_pattern", pattern},
         {"support_interface_top_layers", 2},
         {"support_interface_bottom_layers", 2},
     });
@@ -588,6 +596,17 @@ TEST_CASE("DynaPin landing interfaces follow bottom depth and reslicing", "[Dyna
         size_t count = 0;
         for (const SupportLayer* layer : print.objects().front()->support_layers()) {
             bool       has_landing = false;
+            for (const auto* entity : layer->support_fills.entities) {
+                const auto* ordered = dynamic_cast<const ExtrusionEntityCollection*>(entity);
+                if (ordered == nullptr || !DynaPin::ordered_landing_collection(*ordered))
+                    continue;
+                coord_t previous_x = std::numeric_limits<coord_t>::lowest();
+                for (const auto& polyline : ordered->as_polylines())
+                    for (const Point& point : polyline.points) {
+                        CHECK(point.x() >= previous_x);
+                        previous_x = point.x();
+                    }
+            }
             const auto flat        = layer->support_fills.flatten();
             auto       check_path  = [&](const ExtrusionPath& path) {
                 if (path.is_dynapin_landing) {
@@ -617,6 +636,16 @@ TEST_CASE("DynaPin landing interfaces follow bottom depth and reslicing", "[Dyna
         print.process();
         CHECK(landing_layers() == (bottom_layers < 0 ? 2 : bottom_layers));
     }
+    // Rotating/translating the model must not rotate the machine-axis raster.
+    const Vec3d original_offset = object->instances.front()->get_offset();
+    const Vec3d original_rotation = object->instances.front()->get_rotation();
+    object->instances.front()->set_rotation(Vec3d(0., 0., PI / 2.));
+    object->instances.front()->set_offset(Vec3d(150., 0., 0.));
+    print.apply(model, config);
+    print.process();
+    CHECK(landing_layers() == 2);
+    object->instances.front()->set_rotation(original_rotation);
+    object->instances.front()->set_offset(original_offset);
     // Object overrides take precedence over the selected process preset.
     config.set_deserialize_strict({{"support_interface_bottom_layers", 0}});
     object->config.set_key_value("support_interface_bottom_layers", new ConfigOptionInt(3));
@@ -649,6 +678,8 @@ TEST_CASE("DynaPin landing interfaces follow bottom depth and reslicing", "[Dyna
     bool             ordinary_cooling = false;
     int              fan              = -1;
     std::set<double> protected_layers;
+    double           previous_landing_z = -1.;
+    double           previous_landing_x = -1.e20;
     GCodeReader      reader;
     reader.apply_config(export_print.config());
     reader.parse_buffer(output, [&](GCodeReader& state, const GCodeReader::GCodeLine& line) {
@@ -662,6 +693,13 @@ TEST_CASE("DynaPin landing interfaces follow bottom depth and reslicing", "[Dyna
         if (line.extruding(state)) {
             if (protected_region) {
                 CHECK(fan == 0);
+                if (std::abs(previous_landing_z - state.z()) > EPSILON) {
+                    previous_landing_z = state.z();
+                    previous_landing_x = -1.e20;
+                }
+                CHECK(state.x() >= previous_landing_x - 0.002);
+                CHECK(line.new_X(state) >= state.x() - 0.002);
+                previous_landing_x = line.new_X(state);
                 protected_layers.insert(state.z());
             } else if (fan > 0)
                 ordinary_cooling = true;

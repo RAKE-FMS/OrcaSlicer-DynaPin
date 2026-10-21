@@ -1,3 +1,4 @@
+#include "../DynaPinLanding.hpp"
 #include <chrono>
 #include <math.h>
 #include <unordered_map>
@@ -1441,6 +1442,16 @@ void TreeSupport::generate_toolpaths()
                 for (auto& area_group : ts_layer->area_groups) {
                     ExPolygon& poly = *area_group.area;
                     ExPolygons polys;
+                    if (area_group.type == SupportLayer::FloorType && !ts_layer->dynapin_landing_regions.empty()) {
+                        const Polygons landing = intersection(to_polygons(poly), ts_layer->dynapin_landing_regions);
+                        if (!landing.empty()) {
+                            DynaPin::fill_landing_paths(ts_layer->support_fills.entities, landing, interface_flow, bottom_interface_density,
+                                                        bbox_object.min.x());
+                            // draw_circles already separates landing floors from ordinary groups.
+                            assert(diff(to_polygons(poly), ts_layer->dynapin_landing_regions).empty());
+                            continue;
+                        }
+                    }
                     FillParams fill_params;
                     if (area_group.type != SupportLayer::BaseType) {
                         // interface

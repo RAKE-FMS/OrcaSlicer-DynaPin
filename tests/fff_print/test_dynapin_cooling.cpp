@@ -2,12 +2,16 @@
 
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/DynaPin.hpp"
+#include "libslic3r/DynaPinLanding.hpp"
+#include "libslic3r/ShortestPath.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/GCode/CoolingBuffer.hpp"
 #include "libslic3r/GCode/FanMover.hpp"
 
 #include <sstream>
+#include <map>
+#include <limits>
 
 using namespace Slic3r;
 
@@ -158,4 +162,146 @@ TEST_CASE("DynaPin cooling overrides role fans and survives fan look-ahead", "[D
         output += mover.process_gcode(processed.substr(boundary), true);
         check_fan(output, expected, false);
     }
+}
+
+TEST_CASE("DynaPin landing raster preserves columns, holes and flow fragments", "[DynaPin][LandingOrder]")
+{
+    const int  shape = GENERATE(0, 1, 2, 3);
+    const Flow flow(0.44, 0.3, 0.4);
+    Polygons   regions{rectangle(-4, -4, 8, 8)};
+    if (shape == 1)
+        regions = diff(regions, {rectangle(-1, -1, 2, 2)});
+    else if (shape == 2)
+        regions = diff(regions, {rectangle(-1, 0, 2, 5)});
+    else if (shape == 3)
+        regions = union_(regions, Polygons{rectangle(-2, -2, 6, 6)});
+    ExtrusionEntityCollection collection;
+    DynaPin::fill_landing_paths(collection.entities, regions, flow, 0.8, 0);
+    REQUIRE_FALSE(collection.empty());
+    const double raw_volume = collection.total_volume();
+    // Simulate source-slab ordering and split-height fragments before final assembly.
+    std::reverse(collection.entities.begin(), collection.entities.end());
+    DynaPin::mark_landing_paths(collection, regions);
+    DynaPin::order_landing_paths(collection, regions);
+    REQUIRE(collection.entities.size() == 1);
+    auto* ordered = dynamic_cast<ExtrusionEntityCollection*>(collection.entities.front());
+    REQUIRE(ordered != nullptr);
+    REQUIRE(DynaPin::ordered_landing_collection(*ordered));
+    CHECK_FALSE(ordered->can_reverse());
+    if (shape == 0 || shape == 3)
+        CHECK(ordered->entities.size() == 1);
+    CHECK(collection.total_volume() >= raw_volume);
+    coord_t                 previous_x = std::numeric_limits<coord_t>::lowest();
+    std::map<coord_t, bool> column_directions;
+    for (const auto* entity : ordered->entities) {
+        const auto* path = dynamic_cast<const ExtrusionPath*>(entity);
+        REQUIRE(path != nullptr);
+        CHECK(path->height == Catch::Approx(flow.height()));
+        CHECK(path->mm3_per_mm == Catch::Approx(flow.mm3_per_mm()));
+        CHECK(diff_pl(path->polyline, regions).empty());
+        for (size_t i = 1; i < path->polyline.points.size(); ++i) {
+            const Point a = path->polyline.points[i - 1], b = path->polyline.points[i];
+            CHECK(a.x() >= previous_x);
+            CHECK(b.x() >= a.x());
+            previous_x = b.x();
+            if (a.x() == b.x()) {
+                const bool forward  = b.y() > a.y();
+                auto       inserted = column_directions.emplace(a.x(), forward);
+                CHECK(inserted.first->second == forward);
+            }
+        }
+    }
+    bool forward = true;
+    for (const auto& column : column_directions) {
+        CHECK(column.second == forward);
+        forward = !forward;
+    }
+    const auto  original = ordered->as_polylines();
+    auto        copy     = collection.flatten(true);
+    const Point start(scale_(100), scale_(100));
+    chain_and_reorder_extrusion_entities(copy.entities, &start);
+    const auto* copied = dynamic_cast<const ExtrusionEntityCollection*>(copy.entities.front());
+    REQUIRE(copied != nullptr);
+    CHECK(copied->as_polylines() == original);
+}
+
+TEST_CASE("DynaPin landing order combines sources without changing ordinary paths", "[DynaPin][LandingOrder]")
+{
+    const Polygons            regions{rectangle(0, 0, 8, 8), rectangle(12, 0, 8, 8)};
+    ExtrusionEntityCollection collection;
+    const Flow                flow(0.44, 0.3, 0.4);
+    DynaPin::fill_landing_paths(collection.entities, regions, flow, 1., 0);
+    DynaPin::mark_landing_paths(collection, regions);
+    // Split one column in traversal order, retaining different extrusion heights.
+    auto* source = dynamic_cast<ExtrusionPath*>(collection.entities.front());
+    REQUIRE(source != nullptr);
+    const Point   mid(source->first_point().x(), (source->first_point().y() + source->polyline.points[1].y()) / 2);
+    ExtrusionPath fragment(*source);
+    fragment.polyline.points.front() = mid;
+    fragment.height                  = 0.1f;
+    fragment.mm3_per_mm /= 3.;
+    source->polyline.points = Points{source->first_point(), mid};
+    collection.append(fragment);
+    ExtrusionPath ordinary(erSupportMaterial, 0.08, 0.4, 0.2);
+    ordinary.polyline = Polyline(Points{Point::new_scale(-10, 0), Point::new_scale(-8, 0)});
+    collection.append(ordinary);
+    DynaPin::order_landing_paths(collection, regions);
+    REQUIRE(collection.entities.size() == 3);
+    CHECK(collection.entities.front()->as_polyline() == ordinary.polyline);
+    bool reduced_flow_found = false;
+    for (size_t i = 1; i < collection.entities.size(); ++i) {
+        const auto* ordered = dynamic_cast<const ExtrusionEntityCollection*>(collection.entities[i]);
+        REQUIRE(ordered != nullptr);
+        CHECK(DynaPin::ordered_landing_collection(*ordered));
+        coord_t previous = std::numeric_limits<coord_t>::lowest();
+        for (const auto* entity : ordered->entities) {
+            auto check = [&](const ExtrusionPath& path) {
+                CHECK(path.first_point().x() >= previous);
+                previous = path.last_point().x();
+                reduced_flow_found |= path.height == fragment.height;
+            };
+            if (const auto* path = dynamic_cast<const ExtrusionPath*>(entity))
+                check(*path);
+            else {
+                const auto* multi = dynamic_cast<const ExtrusionMultiPath*>(entity);
+                REQUIRE(multi != nullptr);
+                for (const auto& path : multi->paths)
+                    check(path);
+            }
+        }
+    }
+    CHECK(reduced_flow_found);
+}
+
+TEST_CASE("DynaPin retains modulated flow along column connectors", "[DynaPin][LandingOrder]")
+{
+    ExtrusionEntityCollection collection;
+    const Points              points{Point::new_scale(0, 0),   Point::new_scale(0, 4), Point::new_scale(0.4, 4),
+                                     Point::new_scale(0.6, 4), Point::new_scale(1, 4), Point::new_scale(1, 0)};
+    for (size_t i = 1; i < points.size(); ++i) {
+        const bool    reduced = i == 3;
+        ExtrusionPath path(erSupportMaterialInterface, reduced ? 0.02 : 0.08, 0.4, reduced ? 0.1 : 0.3);
+        path.polyline           = Polyline(Points{points[i - 1], points[i]});
+        path.is_dynapin_landing = true;
+        collection.append(path);
+    }
+    const double volume = collection.total_volume();
+    DynaPin::order_landing_paths(collection, {rectangle(-1, -1, 3, 6)});
+    REQUIRE(collection.entities.size() == 1);
+    const auto* ordered = dynamic_cast<const ExtrusionEntityCollection*>(collection.entities.front());
+    REQUIRE(ordered != nullptr);
+    REQUIRE(ordered->entities.size() == 1);
+    const auto* multi = dynamic_cast<const ExtrusionMultiPath*>(ordered->entities.front());
+    REQUIRE(multi != nullptr);
+    CHECK_FALSE(multi->can_reverse());
+    CHECK(collection.total_volume() == Catch::Approx(volume));
+    Point previous      = points.front();
+    bool  reduced_found = false;
+    for (const auto& path : multi->paths) {
+        CHECK(path.first_point() == previous);
+        previous = path.last_point();
+        reduced_found |= path.mm3_per_mm == 0.02;
+    }
+    CHECK(previous == points.back());
+    CHECK(reduced_found);
 }

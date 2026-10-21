@@ -1,3 +1,4 @@
+#include "../DynaPinLanding.hpp"
 #include "../ClipperUtils.hpp"
 // #include "../ClipperZUtils.hpp"
 #include "../ExtrusionEntityCollection.hpp"
@@ -857,7 +858,10 @@ void LoopInterfaceProcessor::generate(SupportGeneratorLayerExtruded &top_contact
 
     // Generate the outermost loop.
     // Find centerline of the external loop (or any other kind of extrusions should the loop be skipped)
-    ExPolygons top_contact_expolygons = offset_ex(union_ex(top_contact_layer.layer->polygons), - 0.5f * flow.scaled_width());
+    const Polygons loop_regions           = top_contact_layer.layer->dynapin_landing_regions.empty() ?
+                                                top_contact_layer.layer->polygons :
+                                                diff(top_contact_layer.layer->polygons, top_contact_layer.layer->dynapin_landing_regions);
+    ExPolygons     top_contact_expolygons = offset_ex(union_ex(loop_regions), -0.5f * flow.scaled_width());
 
     // Grid size and bit shifts for quick and exact to/from grid coordinates manipulation.
     coord_t circle_grid_resolution = 1;
@@ -1083,6 +1087,33 @@ static void modulate_extrusion_by_overlapping_layers(
     if (n_overlapping_layers == 0 || extrusions_in_out.empty())
         // The extrusions do not overlap with any other extrusion.
         return;
+
+    // Landing and ordinary paths may share a source slab but have different
+    // roles/flows. Modulate each path with its own template, then restore its tag.
+    if (std::any_of(extrusions_in_out.begin(), extrusions_in_out.end(), [](const ExtrusionEntity* entity) {
+            const auto* path = dynamic_cast<const ExtrusionPath*>(entity);
+            return path != nullptr && path->is_dynapin_landing;
+        })) {
+        ExtrusionEntitiesPtr result;
+        for (ExtrusionEntity* entity : extrusions_in_out) {
+            auto* path = dynamic_cast<ExtrusionPath*>(entity);
+            assert(path != nullptr);
+            const bool landing       = path->is_dynapin_landing;
+            path->is_dynapin_landing = false;
+            ExtrusionEntitiesPtr single{entity};
+            modulate_extrusion_by_overlapping_layers(single, this_layer, overlapping_layers);
+            for (ExtrusionEntity* fragment : single) {
+                if (auto* split_path = dynamic_cast<ExtrusionPath*>(fragment))
+                    split_path->is_dynapin_landing = landing;
+                else if (auto* multi = dynamic_cast<ExtrusionMultiPath*>(fragment))
+                    for (auto& split_path : multi->paths)
+                        split_path.is_dynapin_landing = landing;
+            }
+            append(result, std::move(single));
+        }
+        extrusions_in_out = std::move(result);
+        return;
+    }
 
     // Get the initial extrusion parameters.
     ExtrusionPath *extrusion_path_template = dynamic_cast<ExtrusionPath*>(extrusions_in_out.front());
@@ -1671,39 +1702,27 @@ void generate_support_toolpaths(
                 auto fill = [&](const Polygons& polygons, bool pin_landing) {
                     if (polygons.empty())
                         return;
-                    bool interface_as_base = interface_layer_type == InterfaceLayerType::InterfaceAsBase && !pin_landing;
+                    if (pin_landing) {
+                        const Flow   flow    = support_material_interface_flow(support_layer.object(), float(layer_ex.layer->height));
+                        const double density = std::min(1., flow.spacing() /
+                                                                (flow.spacing() +
+                                                                 (support_params.ironing ? 0. : config.support_interface_spacing.value)));
+                        const Flow   interface_flow = layer_ex.layer->bridging ?
+                                                          Flow::bridging_flow(layer_ex.layer->height, flow.nozzle_diameter()) :
+                                                          flow;
+                        DynaPin::fill_landing_paths(layer_ex.extrusions, polygons, interface_flow, density, bbox_object.min.x());
+                        return;
+                    }
+                    bool interface_as_base = interface_layer_type == InterfaceLayerType::InterfaceAsBase;
                     bool raft_contact      = interface_layer_type == InterfaceLayerType::RaftContact;
                     //FIXME Bottom interfaces are extruded with the briding flow. Some bridging layers have its height slightly reduced, therefore
                     // the bridging flow does not quite apply. Reduce the flow to area of an ellipse? (A = pi * a * b)
                     auto *filler = raft_contact ? filler_raft_contact : filler_interface.get();
-                    std::unique_ptr<Fill> pin_filler;
-                    double                pin_density = 0.;
-                    if (pin_landing) {
-                        const double spacing = support_material_interface_flow(support_layer.object(), float(layer_ex.layer->height))
-                                                   .spacing();
-                        pin_density = std::min(1., spacing /
-                                                       (spacing + (support_params.ironing ? 0. : config.support_interface_spacing.value)));
-                        const InfillPattern pattern = config.support_interface_pattern == smipGrid                  ? ipGrid :
-                                                      config.support_interface_pattern == smipRectilinearInterlaced ? ipRectilinear :
-                                                      (config.support_interface_pattern == smipAuto && support_params.soluble_interface) ||
-                                                              config.support_interface_pattern == smipConcentric ?
-                                                                                                                      ipConcentric :
-                                                      pin_density > 0.95 ? ipRectilinear :
-                                                                           ipSupportBase;
-                        pin_filler.reset(Fill::new_from_type(pattern));
-                        pin_filler->set_bounding_box(bbox_object);
-                        filler = pin_filler.get();
-                    }
                     auto interface_flow = layer_ex.layer->bridging ?
                         Flow::bridging_flow(layer_ex.layer->height, support_params.support_material_bottom_interface_flow.nozzle_diameter()) :
                         (raft_contact ? &support_params.raft_interface_flow :
                          interface_as_base ? &support_params.support_material_flow : &support_params.support_material_interface_flow)
                             ->with_height(float(layer_ex.layer->height));
-                    if (pin_landing) {
-                        const Flow flow = support_material_interface_flow(support_layer.object(), float(layer_ex.layer->height));
-                        interface_flow  = layer_ex.layer->bridging ? Flow::bridging_flow(layer_ex.layer->height, flow.nozzle_diameter()) :
-                                                                     flow;
-                    }
                     filler->angle = interface_as_base ?
                             // If zero interface layers are configured, use the same angle as for the base layers.
                             angles[support_layer_id % angles.size()] :
@@ -1712,12 +1731,8 @@ void generate_support_toolpaths(
                                 support_params.raft_interface_angle(support_layer.interface_id()) :
                                 support_interface_angle;
                     double density = raft_contact ? support_params.raft_interface_density : interface_as_base ? support_params.support_density : support_params.interface_density;
-                    if (pin_landing)
-                        density = pin_density;
                     filler->spacing = raft_contact ? support_params.raft_interface_flow.spacing() :
                         interface_as_base ? support_params.support_material_flow.spacing() : support_params.support_material_interface_flow.spacing();
-                    if (pin_landing)
-                        filler->spacing = interface_flow.spacing();
                     filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / density));
                     fill_expolygons_generate_paths(
                         // Destination
@@ -1730,7 +1745,7 @@ void generate_support_toolpaths(
                         interface_as_base ? ExtrusionRole::erSupportMaterial : ExtrusionRole::erSupportMaterialInterface, interface_flow);
                 };
                 const Polygons& polygons = layer_ex.polygons_to_extrude();
-                if (interface_layer_type == InterfaceLayerType::InterfaceAsBase && !support_layer.dynapin_landing_regions.empty()) {
+                if (interface_layer_type != InterfaceLayerType::RaftContact && !support_layer.dynapin_landing_regions.empty()) {
                     fill(diff(polygons, support_layer.dynapin_landing_regions), false);
                     fill(intersection(polygons, support_layer.dynapin_landing_regions), true);
                 } else

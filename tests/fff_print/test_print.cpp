@@ -3,6 +3,7 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/DynaPin.hpp"
+#include "libslic3r/DynaPinLanding.hpp"
 #include "libslic3r/DynaPinGCode.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -513,6 +514,7 @@ SCENARIO("Print: Empty DynaPin selection is evaluated for Tree supports", "[Prin
     {
         ResourcesDirGuard resources_guard(test_resources_dir());
         Print print;
+        print.set_plate_origin(Vec3d::Zero());
         Model model;
 
         TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
@@ -613,6 +615,29 @@ SCENARIO("Print: Empty DynaPin selection is evaluated for Tree supports", "[Prin
                                                            return false;
                                                        });
             CHECK(landing_interface);
+            for (const int depth : {0, 1, 2, 3, -1}) {
+                config.set_deserialize_strict({{"support_interface_bottom_layers", depth},
+                                               {"support_interface_top_layers", 2},
+                                               {"support_angle", 37.},
+                                               {"support_interface_pattern", "grid"}});
+                print.apply(model, config);
+                print.process();
+                size_t ordered_count = 0;
+                for (const SupportLayer* layer : print.objects().front()->support_layers())
+                    for (const auto* entity : layer->support_fills.entities) {
+                        const auto* ordered = dynamic_cast<const ExtrusionEntityCollection*>(entity);
+                        if (ordered == nullptr || !DynaPin::ordered_landing_collection(*ordered))
+                            continue;
+                        ++ordered_count;
+                        coord_t previous_x = std::numeric_limits<coord_t>::lowest();
+                        for (const auto& polyline : ordered->as_polylines())
+                            for (const Point& point : polyline.points) {
+                                CHECK(point.x() >= previous_x);
+                                previous_x = point.x();
+                            }
+                    }
+                CHECK((ordered_count > 0) == (depth != 0));
+            }
         }
     }
 }
