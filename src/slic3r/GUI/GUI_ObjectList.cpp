@@ -24,7 +24,7 @@
 #include "SingleChoiceDialog.hpp"
 #include "StepMeshDialog.hpp"
 
-
+#include <set>
 #include <vector>
 #include <unordered_map>
 #include <functional>
@@ -1503,7 +1503,8 @@ void ObjectList::list_manipulation(const wxPoint& mouse_pos, bool evt_context_me
             get_selected_item_indexes(obj_idx, vol_idx, item);
             if (obj_idx != -1) {
                 Plater::TakeSnapshot(plater, "Shift objects to bed");
-                (*m_objects)[obj_idx]->ensure_on_bed();
+                ModelObject* object = (*m_objects)[obj_idx];
+                object->translate_instances(-object->min_z() * Vec3d::UnitZ());
                 cnv->reload_scene(true, true);
                 update_info_items(obj_idx);
                 notify_instance_updated(obj_idx);
@@ -6128,7 +6129,8 @@ void ObjectList::OnEditingStarted(wxDataViewEvent &event)
         Plater::TakeSnapshot(plater, "Shift objects to bed");
         int obj_idx, vol_idx;
         get_selected_item_indexes(obj_idx, vol_idx, item);
-        (*m_objects)[obj_idx]->ensure_on_bed();
+        ModelObject* object = (*m_objects)[obj_idx];
+        object->translate_instances(-object->min_z() * Vec3d::UnitZ());
         cnv->reload_scene(true, true);
         update_info_items(obj_idx);
         notify_instance_updated(obj_idx);
@@ -6458,6 +6460,49 @@ void ObjectList::toggle_printable_state()
     wxGetApp().plater()->get_view3D_canvas3D()->update_instance_printable_state_for_objects(obj_idxs);
 
     // update scene
+    wxGetApp().plater()->update();
+    wxGetApp().plater()->reload_paint_after_background_process_apply();
+}
+
+void ObjectList::toggle_auto_drop()
+{
+    wxDataViewItemArray sels;
+    GetSelections(sels);
+    if (sels.IsEmpty())
+        return;
+
+    for (auto item : sels) {
+        ItemType type = m_objects_model->GetItemType(item);
+        if (!(type & (itObject | itInstance)))
+            return;
+    }
+
+    bool all_auto_drop_enabled = true;
+    for (auto item : sels) {
+        const int          obj_idx = m_objects_model->GetObjectIdByItem(item);
+        const ModelObject* obj     = object(obj_idx);
+        all_auto_drop_enabled &= obj != nullptr && obj->auto_drop;
+    }
+    const bool enabled = !all_auto_drop_enabled;
+
+    take_snapshot("");
+
+    std::set<int> object_idxs;
+    for (auto item : sels) {
+        const int obj_idx = m_objects_model->GetObjectIdByItem(item);
+        if (!object_idxs.insert(obj_idx).second)
+            continue;
+
+        ModelObject* obj = object(obj_idx);
+        if (obj == nullptr)
+            continue;
+
+        obj->auto_drop = enabled;
+        if (enabled)
+            obj->ensure_on_bed();
+        update_info_items(obj_idx);
+    }
+
     wxGetApp().plater()->update();
     wxGetApp().plater()->reload_paint_after_background_process_apply();
 }

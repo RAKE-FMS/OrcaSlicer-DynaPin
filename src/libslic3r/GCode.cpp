@@ -1775,11 +1775,12 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
 
         // Check that there are extrusions on the very first layer. The case with empty
         // first layer may result in skirt/brim in the air and maybe other issues.
-        if (layers_to_print.size() == 1u) {
-            if (!has_extrusions)
-                throw Slic3r::SlicingError(
-                    _(L("One object has an empty first layer and can't be printed. Please Cut the bottom or enable supports.")),
-                    object.id().id);
+        if (layers_to_print.size() == 1u && !has_extrusions) {
+            const std::string warning =
+                _(L("The first layer is empty. Printing will continue. Check that the first printed layer is supported.")) + "\n" +
+                Slic3r::format(_(L("Object: %1%")), object.model_object()->name);
+            const_cast<Print*>(object.print())
+                ->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, warning, PrintStateBase::SlicingEmptyGcodeLayers);
         }
 
         // In case there are extrusions on this layer, check there is a layer to lay it on.
