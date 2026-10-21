@@ -1,4 +1,5 @@
 #include "FanMover.hpp"
+#include "../DynaPin.hpp"
 
 #include "GCodeReader.hpp"
 
@@ -306,7 +307,7 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
                 fan_speed = 100 * fan_speed / fan_baseline;
                 //speed change: stop kickstart reverting if any
                 m_current_kickstart.time = -1;
-                if (!m_is_custom_gcode) {
+                if (!m_is_custom_gcode && !m_dynapin_fan_off) {
                     // if slow down => put in the queue. if not =>
                     if (m_back_buffer_fan_speed < fan_speed) {
                         if (nb_seconds_delay > 0 && (!only_overhangs || current_role == ExtrusionRole::erOverhangPerimeter)) {
@@ -407,6 +408,8 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
                 } else {
                     // have to flush the buffer to avoid erasing a fan command.
                     need_flush = true;
+                    if (m_dynapin_fan_off)
+                        m_back_buffer_fan_speed = fan_speed;
                 }
             }
             break;
@@ -415,6 +418,14 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
     } else {
         if(!line.raw().empty() && line.raw().front() == ';')
         {
+            if (line.raw() == DynaPin::LANDING_FAN_START || line.raw() == DynaPin::LANDING_FAN_END) {
+                // A hard buffer boundary prevents look-ahead and kickstart from
+                // re-enabling the fan during the protected extrusion.
+                need_flush               = true;
+                m_current_kickstart.time = -1;
+                m_dynapin_fan_off        = line.raw() == DynaPin::LANDING_FAN_START;
+            }
+
             if (line.raw().size() > 10 && line.raw().rfind(";TYPE:", 0) == 0) {
                 // get the type of the next extrusions
                 std::string extrusion_string = line.raw().substr(6, line.raw().size() - 6);
@@ -487,7 +498,8 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
     if (time >= 0) {
         while (!m_buffer.empty() && (need_flush || m_buffer_time_size - m_buffer.front().time > nb_seconds_delay - EPSILON) ){
             BufferData& frontdata = m_buffer.front();
-            if (frontdata.fan_speed < 0 || frontdata.fan_speed != m_front_buffer_fan_speed || frontdata.is_kickstart) {
+            if (frontdata.fan_speed < 0 || frontdata.fan_speed != m_front_buffer_fan_speed || frontdata.is_kickstart ||
+                (m_dynapin_fan_off && frontdata.fan_speed == 0)) {
                 if (frontdata.is_kickstart && frontdata.fan_speed < m_front_buffer_fan_speed) {
                     //you have to slow down! not kickstart! rewrite the fan speed.
                     m_process_output += _set_fan(frontdata.fan_speed);//m_writer.set_fan(frontdata.fan_speed,true); //FIXME extruder id (or use the gcode writer, but then you have to disable the multi-thread thing

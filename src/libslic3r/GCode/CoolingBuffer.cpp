@@ -1,5 +1,6 @@
 #include "../GCode.hpp"
 #include "CoolingBuffer.hpp"
+#include "../DynaPin.hpp"
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/log/trivial.hpp>
@@ -55,22 +56,24 @@ struct CoolingLine
         TYPE_ADJUSTABLE         = 1 << 6,
         TYPE_EXTERNAL_PERIMETER = 1 << 7,
         // The line sets a feedrate.
-        TYPE_HAS_F              = 1 << 8,
-        TYPE_WIPE               = 1 << 9,
-        TYPE_G4                 = 1 << 10,
-        TYPE_G92                = 1 << 11,
-        //BBS: add G2 G3 type
-        TYPE_G2                 = 1 << 12,
-        TYPE_G3                 = 1 << 13,
-        TYPE_FORCE_RESUME_FAN   = 1 << 14,
-        TYPE_SUPPORT_INTERFACE_FAN_START     = 1 << 15,
-        TYPE_SUPPORT_INTERFACE_FAN_END       = 1 << 16,
+        TYPE_HAS_F = 1 << 8,
+        TYPE_WIPE  = 1 << 9,
+        TYPE_G4    = 1 << 10,
+        TYPE_G92   = 1 << 11,
+        // BBS: add G2 G3 type
+        TYPE_G2                          = 1 << 12,
+        TYPE_G3                          = 1 << 13,
+        TYPE_FORCE_RESUME_FAN            = 1 << 14,
+        TYPE_SUPPORT_INTERFACE_FAN_START = 1 << 15,
+        TYPE_SUPPORT_INTERFACE_FAN_END   = 1 << 16,
         // ORCA: Add support for separate internal bridge fan speed control
         TYPE_INTERNAL_BRIDGE_FAN_START = 1 << 17,
         TYPE_INTERNAL_BRIDGE_FAN_END   = 1 << 18,
         // ORCA: Add support for ironing fan speed control
-        TYPE_IRONING_FAN_START         = 1 << 19,
-        TYPE_IRONING_FAN_END           = 1 << 20,
+        TYPE_IRONING_FAN_START = 1 << 19,
+        TYPE_IRONING_FAN_END   = 1 << 20,
+        TYPE_DYNAPIN_FAN_START = 1 << 21,
+        TYPE_DYNAPIN_FAN_END   = 1 << 22,
     };
 
     CoolingLine(unsigned int type, size_t  line_start, size_t  line_end) :
@@ -515,13 +518,19 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
                         BOOST_LOG_TRIVIAL(error) << "CoolingBuffer encountered an invalid toolchange, maybe from a custom gcode: " << sline;
                 }
             }
+        } else if (boost::starts_with(sline, DynaPin::LANDING_FAN_START)) {
+            line.type = CoolingLine::TYPE_DYNAPIN_FAN_START;
+        } else if (boost::starts_with(sline, DynaPin::LANDING_FAN_END)) {
+            line.type = CoolingLine::TYPE_DYNAPIN_FAN_END;
         } else if (boost::starts_with(sline, ";_OVERHANG_FAN_START")) {
             line.type = CoolingLine::TYPE_OVERHANG_FAN_START;
         } else if (boost::starts_with(sline, ";_OVERHANG_FAN_END")) {
             line.type = CoolingLine::TYPE_OVERHANG_FAN_END;
-        } else if (boost::starts_with(sline, ";_INTERNAL_BRIDGE_FAN_START")) { // ORCA: Add support for separate internal bridge fan speed control
+        } else if (boost::starts_with(sline,
+                                      ";_INTERNAL_BRIDGE_FAN_START")) { // ORCA: Add support for separate internal bridge fan speed control
             line.type = CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START;
-        } else if (boost::starts_with(sline, ";_INTERNAL_BRIDGE_FAN_END")) { // ORCA: Add support for separate internal bridge fan speed control
+        } else if (boost::starts_with(sline,
+                                      ";_INTERNAL_BRIDGE_FAN_END")) { // ORCA: Add support for separate internal bridge fan speed control
             line.type = CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_END;
         } else if (boost::starts_with(sline, ";_SUPP_INTERFACE_FAN_START")) {
             line.type = CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_START;
@@ -828,6 +837,8 @@ std::string CoolingBuffer::apply_layer_cooldown(
                                                                {CoolingLine::TYPE_IRONING_FAN_START, false}, // ORCA: Add support for ironing fan speed control
                                                                {CoolingLine::TYPE_FORCE_RESUME_FAN, false}};
     bool need_set_fan = false;
+    bool                          dynapin_fan_off           = false;
+    int                           fan_speed_before_landing  = -1;
 
     for (const CoolingLine *line : lines) {
         const char *line_start  = gcode.c_str() + line->line_start;
@@ -844,6 +855,16 @@ std::string CoolingBuffer::apply_layer_cooldown(
                 }
             }
             new_gcode.append(line_start, line_end - line_start);
+        } else if (line->type & (CoolingLine::TYPE_DYNAPIN_FAN_START | CoolingLine::TYPE_DYNAPIN_FAN_END)) {
+            dynapin_fan_off = (line->type & CoolingLine::TYPE_DYNAPIN_FAN_START) != 0;
+            if (dynapin_fan_off)
+                fan_speed_before_landing = m_current_fan_speed;
+            else
+                m_current_fan_speed = fan_speed_before_landing;
+            // Preserve the boundaries for FanMover, which must not move a fan
+            // restart (or its kickstart) backwards into a landing extrusion.
+            new_gcode.append(line_start, line_end - line_start);
+            need_set_fan = true;
         } else if (line->type & CoolingLine::TYPE_OVERHANG_FAN_START) {
             if (overhang_fan_control && !fan_speed_change_requests[CoolingLine::TYPE_OVERHANG_FAN_START]) {
                 need_set_fan = true;
@@ -854,12 +875,14 @@ std::string CoolingBuffer::apply_layer_cooldown(
                 fan_speed_change_requests[CoolingLine::TYPE_OVERHANG_FAN_START] = false;
             }
             need_set_fan = true;
-        } else if (line->type & CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START) { // ORCA: Add support for separate internal bridge fan speed control
+        } else if (line->type &
+                   CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START) { // ORCA: Add support for separate internal bridge fan speed control
             if (internal_bridge_fan_control && !fan_speed_change_requests[CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START]) {
                 need_set_fan = true;
                 fan_speed_change_requests[CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START] = true;
            }
-        } else if (line->type & CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_END) { // ORCA: Add support for separate internal bridge fan speed control
+        } else if (line->type &
+                   CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_END) { // ORCA: Add support for separate internal bridge fan speed control
             if (internal_bridge_fan_control && fan_speed_change_requests[CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START]) {
                 fan_speed_change_requests[CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START] = false;
             }
@@ -869,7 +892,8 @@ std::string CoolingBuffer::apply_layer_cooldown(
                 fan_speed_change_requests[CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_START] = true;
                 need_set_fan = true;
             }
-        } else if (line->type & CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_END && fan_speed_change_requests[CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_START]) {
+        } else if (line->type & CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_END &&
+                   fan_speed_change_requests[CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_START]) {
             if (supp_interface_fan_control) {
                 fan_speed_change_requests[CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_START] = false;
             }
@@ -892,10 +916,10 @@ std::string CoolingBuffer::apply_layer_cooldown(
             }
             if (m_additional_fan_speed != -1 && m_config.auxiliary_fan.value)
                 new_gcode += GCodeWriter::set_additional_fan(m_additional_fan_speed);
-        }
-        else if (line->type & CoolingLine::TYPE_EXTRUDE_END) {
+        } else if (line->type & CoolingLine::TYPE_EXTRUDE_END) {
             // Just remove this comment.
-        } else if (line->type & (CoolingLine::TYPE_ADJUSTABLE | CoolingLine::TYPE_EXTERNAL_PERIMETER | CoolingLine::TYPE_WIPE | CoolingLine::TYPE_HAS_F)) {
+        } else if (line->type & (CoolingLine::TYPE_ADJUSTABLE | CoolingLine::TYPE_EXTERNAL_PERIMETER | CoolingLine::TYPE_WIPE |
+                                 CoolingLine::TYPE_HAS_F)) {
             // Find the start of a comment, or roll to the end of line.
             const char *end = line_start;
             for (; end < line_end && *end != ';'; ++ end);
@@ -979,27 +1003,30 @@ std::string CoolingBuffer::apply_layer_cooldown(
         }
 
         if (need_set_fan) {
-            if (fan_speed_change_requests[CoolingLine::TYPE_OVERHANG_FAN_START]){
+            if (dynapin_fan_off) {
+                new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, 0);
+                m_current_fan_speed = 0;
+            } else if (fan_speed_change_requests[CoolingLine::TYPE_OVERHANG_FAN_START]) {
                 new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, overhang_fan_speed);
                 m_current_fan_speed = overhang_fan_speed;
-            } else if (fan_speed_change_requests[CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START]){ // ORCA: Add support for separate internal bridge fan speed control
+            } else if (fan_speed_change_requests[CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START]) { // ORCA: Add support for separate internal
+                                                                                                 // bridge fan speed control
                 new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, internal_bridge_fan_speed);
                 m_current_fan_speed = internal_bridge_fan_speed;
-            }
-            else if (fan_speed_change_requests[CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_START]){
+            } else if (fan_speed_change_requests[CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_START]) {
                 new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, supp_interface_fan_speed);
                 m_current_fan_speed = supp_interface_fan_speed;
-            }
-            else if (fan_speed_change_requests[CoolingLine::TYPE_IRONING_FAN_START]){
+            } else if (fan_speed_change_requests[CoolingLine::TYPE_IRONING_FAN_START]) {
                 new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, ironing_fan_speed);
                 m_current_fan_speed = ironing_fan_speed;
-            }
-            else if(fan_speed_change_requests[CoolingLine::TYPE_FORCE_RESUME_FAN] && m_current_fan_speed != -1){
+            } else if (fan_speed_change_requests[CoolingLine::TYPE_FORCE_RESUME_FAN] && m_current_fan_speed != -1) {
                 new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, m_current_fan_speed);
                 fan_speed_change_requests[CoolingLine::TYPE_FORCE_RESUME_FAN] = false;
-            }
-            else
+            } else {
                 new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, m_fan_speed);
+                if (line->type & CoolingLine::TYPE_DYNAPIN_FAN_END)
+                    m_current_fan_speed = m_fan_speed;
+            }
             need_set_fan = false;
         }
         pos = line_end;

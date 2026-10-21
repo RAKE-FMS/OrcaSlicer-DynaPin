@@ -105,7 +105,8 @@ public:
 
 	// Polygons to be filled by the support pattern.
 	Polygons polygons;
-	// Currently for the contact layers only.
+    Polygons dynapin_landing_regions;
+    // Currently for the contact layers only.
 	std::unique_ptr<Polygons> contact_polygons;
 	std::unique_ptr<Polygons> overhang_polygons;
 	// Enforcers need to be propagated independently in case the "support on build plate only" option is enabled.

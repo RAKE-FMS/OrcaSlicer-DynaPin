@@ -1,3 +1,4 @@
+#include "../DynaPinLanding.hpp"
 #include <chrono>
 #include <math.h>
 #include <unordered_map>
@@ -1441,6 +1442,16 @@ void TreeSupport::generate_toolpaths()
                 for (auto& area_group : ts_layer->area_groups) {
                     ExPolygon& poly = *area_group.area;
                     ExPolygons polys;
+                    if (area_group.type == SupportLayer::FloorType && !ts_layer->dynapin_landing_regions.empty()) {
+                        const Polygons landing = intersection(to_polygons(poly), ts_layer->dynapin_landing_regions);
+                        if (!landing.empty()) {
+                            DynaPin::fill_landing_paths(ts_layer->support_fills.entities, landing, interface_flow, bottom_interface_density,
+                                                        bbox_object.min.x());
+                            // draw_circles already separates landing floors from ordinary groups.
+                            assert(diff(to_polygons(poly), ts_layer->dynapin_landing_regions).empty());
+                            continue;
+                        }
+                    }
                     FillParams fill_params;
                     if (area_group.type != SupportLayer::BaseType) {
                         // interface
@@ -2379,6 +2390,64 @@ void TreeSupport::draw_circles()
             }
         });
 
+    // Use actual generated support slabs, not object layer numbers, for pin
+    // interface depth. Keep ordinary floors and roofs outside the landing mask.
+    if (bottom_interface_layers > 0 && !m_object->dynapin_tree_landing_plan().used_pins.empty()) {
+        auto        surfaces  = DynaPin::pin_top_surfaces_for_object(*m_object);
+        const auto& used_pins = m_object->dynapin_tree_landing_plan().used_pins;
+        surfaces.erase(std::remove_if(surfaces.begin(), surfaces.end(),
+                                      [&](const auto& surface) {
+                                          return std::find(used_pins.begin(), used_pins.end(), surface.pin) == used_pins.end();
+                                      }),
+                       surfaces.end());
+        std::vector<DynaPin::LandingLayer> slabs;
+        for (const SupportLayer* layer : m_object->support_layers()) {
+            Polygons areas;
+            for (const auto& group : layer->area_groups)
+                polygons_append(areas, to_polygons(*group.area));
+            slabs.push_back({layer->bottom_z(), layer->print_z, union_(std::move(areas))});
+        }
+        const auto masks = DynaPin::landing_regions(slabs, surfaces, bottom_interface_layers);
+        for (size_t i = 0; i < masks.size(); ++i) {
+            if (masks[i].empty())
+                continue;
+            SupportLayer& layer           = *m_object->get_support_layer(i);
+            layer.dynapin_landing_regions = masks[i];
+            std::vector<std::pair<ExPolygon, SupportLayer::AreaGroup>> groups;
+            for (const auto& group : layer.area_groups)
+                groups.emplace_back(*group.area, group);
+            layer.area_groups.clear();
+            layer.base_areas.clear();
+            layer.floor_areas.clear();
+            layer.roof_areas.clear();
+            layer.roof_1st_layer.clear();
+            auto areas_for_type = [&](int type) -> ExPolygons& {
+                switch (type) {
+                case SupportLayer::FloorType: return layer.floor_areas;
+                case SupportLayer::RoofType: return layer.roof_areas;
+                case SupportLayer::Roof1stLayer: return layer.roof_1st_layer;
+                default: return layer.base_areas;
+                }
+            };
+            std::vector<std::pair<size_t, SupportLayer::AreaGroup>> regular_groups;
+            for (const auto& [polygon, group] : groups) {
+                ExPolygons& areas = areas_for_type(group.type);
+                for (ExPolygon& remainder : diff_ex({polygon}, masks[i])) {
+                    regular_groups.emplace_back(areas.size(), group);
+                    areas.push_back(std::move(remainder));
+                }
+            }
+            const size_t first_landing = layer.floor_areas.size();
+            append(layer.floor_areas, union_ex(masks[i]));
+            // Rebuild pointers only after every polygon vector has finished growing.
+            for (auto& [index, group] : regular_groups) {
+                group.area = &areas_for_type(group.type)[index];
+                layer.area_groups.push_back(group);
+            }
+            for (size_t j = first_landing; j < layer.floor_areas.size(); ++j)
+                layer.area_groups.emplace_back(&layer.floor_areas[j], SupportLayer::FloorType, 10000);
+        }
+    }
 
         if (with_lightning_infill)
         {

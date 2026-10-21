@@ -255,6 +255,8 @@ set(lisbslic3r_sources
     GCode/WipeTower2.hpp
     GCode/WipeTower.cpp
     GCode/WipeTower.hpp
+    DynaPinLanding.cpp
+    DynaPinLanding.hpp
     DynaPin.cpp
     DynaPin.hpp
     DynaPinPlacement.cpp

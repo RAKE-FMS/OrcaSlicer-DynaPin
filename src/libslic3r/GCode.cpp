@@ -1,3 +1,4 @@
+#include "DynaPinLanding.hpp"
 #include "BoundingBox.hpp"
 #include "Config.hpp"
 #include "Polygon.hpp"
@@ -6126,7 +6127,8 @@ std::string GCode::extrude_support(const ExtrusionEntityCollection& support_fill
         if (extrusions.empty())
             return gcode;
 
-        chain_and_reorder_extrusion_entities(extrusions, &m_last_pos);
+        if (!DynaPin::ordered_landing_collection(support_fills))
+            chain_and_reorder_extrusion_entities(extrusions, &m_last_pos);
 
         const double support_speed           = m_config.support_speed.value;
         const double support_interface_speed = m_config.get_abs_value("support_interface_speed");
@@ -6712,6 +6714,9 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
         }
     };
 
+    if (m_enable_cooling_markers && path.is_dynapin_landing)
+        gcode += std::string(DynaPin::LANDING_FAN_START) + "\n";
+
     std::string comment;
     if (m_enable_cooling_markers) {
         comment = ";_EXTRUDE_SET_SPEED";
@@ -7022,6 +7027,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     }
     if (m_enable_cooling_markers) {
         gcode += ";_EXTRUDE_END\n";
+        if (path.is_dynapin_landing)
+            gcode += std::string(DynaPin::LANDING_FAN_END) + "\n";
     }
 
     if (path.role() != ExtrusionRole::erGapFill) {

@@ -1,3 +1,4 @@
+#include "../DynaPinLanding.hpp"
 #include "../ClipperUtils.hpp"
 // #include "../ClipperZUtils.hpp"
 #include "../ExtrusionEntityCollection.hpp"
@@ -857,7 +858,10 @@ void LoopInterfaceProcessor::generate(SupportGeneratorLayerExtruded &top_contact
 
     // Generate the outermost loop.
     // Find centerline of the external loop (or any other kind of extrusions should the loop be skipped)
-    ExPolygons top_contact_expolygons = offset_ex(union_ex(top_contact_layer.layer->polygons), - 0.5f * flow.scaled_width());
+    const Polygons loop_regions           = top_contact_layer.layer->dynapin_landing_regions.empty() ?
+                                                top_contact_layer.layer->polygons :
+                                                diff(top_contact_layer.layer->polygons, top_contact_layer.layer->dynapin_landing_regions);
+    ExPolygons     top_contact_expolygons = offset_ex(union_ex(loop_regions), -0.5f * flow.scaled_width());
 
     // Grid size and bit shifts for quick and exact to/from grid coordinates manipulation.
     coord_t circle_grid_resolution = 1;
@@ -1083,6 +1087,33 @@ static void modulate_extrusion_by_overlapping_layers(
     if (n_overlapping_layers == 0 || extrusions_in_out.empty())
         // The extrusions do not overlap with any other extrusion.
         return;
+
+    // Landing and ordinary paths may share a source slab but have different
+    // roles/flows. Modulate each path with its own template, then restore its tag.
+    if (std::any_of(extrusions_in_out.begin(), extrusions_in_out.end(), [](const ExtrusionEntity* entity) {
+            const auto* path = dynamic_cast<const ExtrusionPath*>(entity);
+            return path != nullptr && path->is_dynapin_landing;
+        })) {
+        ExtrusionEntitiesPtr result;
+        for (ExtrusionEntity* entity : extrusions_in_out) {
+            auto* path = dynamic_cast<ExtrusionPath*>(entity);
+            assert(path != nullptr);
+            const bool landing       = path->is_dynapin_landing;
+            path->is_dynapin_landing = false;
+            ExtrusionEntitiesPtr single{entity};
+            modulate_extrusion_by_overlapping_layers(single, this_layer, overlapping_layers);
+            for (ExtrusionEntity* fragment : single) {
+                if (auto* split_path = dynamic_cast<ExtrusionPath*>(fragment))
+                    split_path->is_dynapin_landing = landing;
+                else if (auto* multi = dynamic_cast<ExtrusionMultiPath*>(fragment))
+                    for (auto& split_path : multi->paths)
+                        split_path.is_dynapin_landing = landing;
+            }
+            append(result, std::move(single));
+        }
+        extrusions_in_out = std::move(result);
+        return;
+    }
 
     // Get the initial extrusion parameters.
     ExtrusionPath *extrusion_path_template = dynamic_cast<ExtrusionPath*>(extrusions_in_out.front());
@@ -1391,6 +1422,10 @@ SupportGeneratorLayersPtr generate_support_layers(
                     }
             }
             object.add_support_layer(layer_id ++, this_layer_id_interface, height_min, zavg);
+            Polygons landing_regions;
+            for (size_t u = i; u < j; ++u)
+                polygons_append(landing_regions, intersection(layers_sorted[u]->dynapin_landing_regions, layers_sorted[u]->polygons));
+            object.support_layers().back()->dynapin_landing_regions = union_(std::move(landing_regions));
             if (num_interfaces && ! this_layer_contacts_only)
                 ++ layer_id_interface;
         }
@@ -1604,15 +1639,18 @@ void generate_support_toolpaths(
                 interface_layer.layer = interface_layers[idx_layer_interface];
             if (idx_layer_base_interface < base_interface_layers.size() && base_interface_layers[idx_layer_base_interface]->print_z < support_layer.print_z + EPSILON)
                 base_interface_layer.layer = base_interface_layers[idx_layer_base_interface];
-            if (idx_layer_intermediate < intermediate_layers.size() && intermediate_layers[idx_layer_intermediate]->print_z < support_layer.print_z + EPSILON)
+            if (idx_layer_intermediate < intermediate_layers.size() &&
+                intermediate_layers[idx_layer_intermediate]->print_z < support_layer.print_z + EPSILON)
                 base_layer.layer = intermediate_layers[idx_layer_intermediate];
 
             // This layer is a raft contact layer. Any contact polygons at this layer are raft contacts.
-            bool raft_layer = slicing_params.interface_raft_layers && top_contact_layer.layer && is_approx(top_contact_layer.layer->print_z, slicing_params.raft_contact_top_z);
+            bool raft_layer = slicing_params.interface_raft_layers && top_contact_layer.layer &&
+                              is_approx(top_contact_layer.layer->print_z, slicing_params.raft_contact_top_z);
             if (config.support_interface_top_layers == 0) {
                 // If no top interface layers were requested, we treat the contact layer exactly as a generic base layer.
                 // Don't merge the raft contact layer though.
-                if (support_params.can_merge_support_regions && ! raft_layer) {
+                if (support_params.can_merge_support_regions && !raft_layer &&
+                    (top_contact_layer.empty() || top_contact_layer.layer->dynapin_landing_regions.empty())) {
                     if (base_layer.could_merge(top_contact_layer))
                         base_layer.merge(std::move(top_contact_layer));
                     else if (base_layer.empty())
@@ -1632,12 +1670,14 @@ void generate_support_toolpaths(
                 if (top_contact_layer.could_merge(interface_layer) && ! raft_layer)
                     top_contact_layer.merge(std::move(interface_layer));
             }
-            if ((config.support_interface_top_layers == 0 || config.support_interface_bottom_layers == 0) && support_params.can_merge_support_regions) {
+            if ((config.support_interface_top_layers == 0 || config.support_interface_bottom_layers == 0) &&
+                support_params.can_merge_support_regions &&
+                (bottom_contact_layer.empty() || bottom_contact_layer.layer->dynapin_landing_regions.empty())) {
                 if (base_layer.could_merge(bottom_contact_layer))
                     base_layer.merge(std::move(bottom_contact_layer));
-                else if (base_layer.empty() && ! bottom_contact_layer.empty() && ! bottom_contact_layer.layer->bridging)
+                else if (base_layer.empty() && !bottom_contact_layer.empty() && !bottom_contact_layer.layer->bridging)
                     base_layer = std::move(bottom_contact_layer);
-            } else if (bottom_contact_layer.could_merge(top_contact_layer) && ! raft_layer)
+            } else if (bottom_contact_layer.could_merge(top_contact_layer) && !raft_layer)
                 top_contact_layer.merge(std::move(bottom_contact_layer));
             else if (bottom_contact_layer.could_merge(interface_layer))
                 bottom_contact_layer.merge(std::move(interface_layer));
@@ -1656,8 +1696,23 @@ void generate_support_toolpaths(
 
             // Top and bottom contacts, interface layers.
             enum class InterfaceLayerType { TopContact, BottomContact, RaftContact, Interface, InterfaceAsBase };
-            auto extrude_interface = [&](SupportGeneratorLayerExtruded &layer_ex, InterfaceLayerType interface_layer_type) {
-                if (! layer_ex.empty() && ! layer_ex.polygons_to_extrude().empty()) {
+            auto extrude_interface = [&](SupportGeneratorLayerExtruded& layer_ex, InterfaceLayerType interface_layer_type) {
+                if (layer_ex.empty() || layer_ex.polygons_to_extrude().empty())
+                    return;
+                auto fill = [&](const Polygons& polygons, bool pin_landing) {
+                    if (polygons.empty())
+                        return;
+                    if (pin_landing) {
+                        const Flow   flow    = support_material_interface_flow(support_layer.object(), float(layer_ex.layer->height));
+                        const double density = std::min(1., flow.spacing() /
+                                                                (flow.spacing() +
+                                                                 (support_params.ironing ? 0. : config.support_interface_spacing.value)));
+                        const Flow   interface_flow = layer_ex.layer->bridging ?
+                                                          Flow::bridging_flow(layer_ex.layer->height, flow.nozzle_diameter()) :
+                                                          flow;
+                        DynaPin::fill_landing_paths(layer_ex.extrusions, polygons, interface_flow, density, bbox_object.min.x());
+                        return;
+                    }
                     bool interface_as_base = interface_layer_type == InterfaceLayerType::InterfaceAsBase;
                     bool raft_contact      = interface_layer_type == InterfaceLayerType::RaftContact;
                     //FIXME Bottom interfaces are extruded with the briding flow. Some bridging layers have its height slightly reduced, therefore
@@ -1683,18 +1738,24 @@ void generate_support_toolpaths(
                         // Destination
                         layer_ex.extrusions,
                         // Regions to fill
-                        union_safety_offset_ex(layer_ex.polygons_to_extrude()),
+                        union_safety_offset_ex(polygons),
                         // Filler and its parameters
                         filler, float(density),
                         // Extrusion parameters
                         interface_as_base ? ExtrusionRole::erSupportMaterial : ExtrusionRole::erSupportMaterialInterface, interface_flow);
-                }
+                };
+                const Polygons& polygons = layer_ex.polygons_to_extrude();
+                if (interface_layer_type != InterfaceLayerType::RaftContact && !support_layer.dynapin_landing_regions.empty()) {
+                    fill(diff(polygons, support_layer.dynapin_landing_regions), false);
+                    fill(intersection(polygons, support_layer.dynapin_landing_regions), true);
+                } else
+                    fill(polygons, false);
             };
             const bool top_interfaces = config.support_interface_top_layers.value != 0;
             const bool bottom_interfaces = top_interfaces && config.support_interface_bottom_layers != 0;
             extrude_interface(top_contact_layer,    raft_layer ? InterfaceLayerType::RaftContact : top_interfaces ? InterfaceLayerType::TopContact : InterfaceLayerType::InterfaceAsBase);
             extrude_interface(bottom_contact_layer, bottom_interfaces ? InterfaceLayerType::BottomContact : InterfaceLayerType::InterfaceAsBase);
-            extrude_interface(interface_layer,      top_interfaces ? InterfaceLayerType::Interface : InterfaceLayerType::InterfaceAsBase);
+            extrude_interface(interface_layer, top_interfaces ? InterfaceLayerType::Interface : InterfaceLayerType::InterfaceAsBase);
 
             // Base interface layers under soluble interfaces
             if ( ! base_interface_layer.empty() && ! base_interface_layer.polygons_to_extrude().empty()) {
