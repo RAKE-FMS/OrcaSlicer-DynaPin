@@ -448,6 +448,7 @@ private:
     std::vector<std::vector<MinimumSpanningTree>> m_spanning_trees;
     std::vector< std::unordered_map<Line, bool, LineHash>> m_mst_line_x_layer_contour_caches;
     std::vector<DynaPin::TreePinLanding> m_dynapin_polygon_landings;
+    std::vector<DynaPin::TreePinRejection>                 m_dynapin_rejections;
     std::optional<std::vector<DynaPin::Pin>> m_dynapin_allowed_pins;
     float    DO_NOT_MOVER_UNDER_MM = 0.0;
     coordf_t base_radius                        = 0.0;

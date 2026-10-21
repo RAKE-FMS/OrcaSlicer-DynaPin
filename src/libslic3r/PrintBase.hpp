@@ -656,6 +656,12 @@ protected:
         { return m_state.invalidate_all(PrintObjectBase::cancel_callback(m_print)); }
     bool            invalidate_all_steps_without_cancel()
         { return m_state.invalidate_all([](){}); }
+        // Worker-only retry after its parallel work has joined; do not cancel the worker itself.
+        bool invalidate_step_without_cancel(PrintObjectStepEnum step)
+        {
+            std::scoped_lock<std::mutex> lock(PrintObjectBase::state_mutex(m_print));
+            return m_state.invalidate(step, []() {});
+        }
 
     bool            is_step_started_unguarded(PrintObjectStepEnum step) const { return m_state.is_started_unguarded(step); }
     bool            is_step_done_unguarded(PrintObjectStepEnum step) const { return m_state.is_done_unguarded(step); }

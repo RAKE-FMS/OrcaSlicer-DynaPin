@@ -182,7 +182,8 @@ void Print::update_dynapin_selection(const ObjectID* tree_target_instance_id, st
             if (skipped_organic) {
                 if (!next.warning.empty())
                     next.warning += "\n";
-                next.warning += L("DynaPin automatic pin selection is not available for Organic support.");
+                next.warning += L("DynaPin automatic pin selection is not available for Organic or default Tree support. Select Tree Slim, "
+                                  "Strong or Hybrid.");
             }
         }
     }
@@ -213,41 +214,108 @@ void Print::finalize_dynapin_tree_selection()
     if (m_dynapin_selection.source == DynaPin::SelectionSource::Unavailable)
         return;
 
-    std::vector<DynaPin::Pin> used_pins;
-    bool has_tree_object = false;
-    DynaPin::Config dynapin_config;
-    if (!DynaPin::load_config_for_print(*this, dynapin_config))
-        return;
-    for (const PrintObject* object : m_objects) {
-        if (!object->has_support())
-            continue;
-        if (is_tree_organic(object->config().support_type.value, object->config().support_style.value))
-            continue;
-        if (is_tree(object->config().support_type.value)) {
-            has_tree_object = true;
-            append(used_pins, object->dynapin_tree_landing_plan().used_pins);
-        } else if (m_dynapin_selection.source == DynaPin::SelectionSource::Automatic) {
-            PrintObjectSupportMaterial selector(object, object->slicing_parameters());
-            auto normal_selection = selector.detect_dynapin_pins(*object, dynapin_config,
-                                                                  m_dynapin_selection.pins, m_dynapin_selection.rejected_collisions);
-            append(used_pins, std::move(normal_selection.first));
-        } else {
-            return; // Preserve manually selected pins used by Normal support.
+    for (;;) {
+        std::vector<DynaPin::Pin> used_pins;
+        bool                      has_tree_object = false;
+        DynaPin::Config           dynapin_config;
+        if (!DynaPin::load_config_for_print(*this, dynapin_config))
+            return;
+        for (const PrintObject* object : m_objects) {
+            if (!object->has_support())
+                continue;
+            if (is_tree_organic(object->config().support_type.value, object->config().support_style.value)) {
+                has_tree_object = true;
+                continue;
+            }
+            if (is_tree(object->config().support_type.value)) {
+                has_tree_object = true;
+                append(used_pins, object->dynapin_tree_landing_plan().used_pins);
+            } else if (m_dynapin_selection.source == DynaPin::SelectionSource::Automatic) {
+                PrintObjectSupportMaterial selector(object, object->slicing_parameters());
+                auto normal_selection = selector.detect_dynapin_pins(*object, dynapin_config, m_dynapin_selection.pins,
+                                                                     m_dynapin_selection.rejected_collisions);
+                append(used_pins, std::move(normal_selection.first));
+            } else {
+                append(used_pins, m_dynapin_selection.pins); // Preserve manual Normal support pins in mixed prints.
+            }
         }
-    }
-    if (!has_tree_object)
-        return;
+        if (!has_tree_object)
+            return;
 
-    std::sort(used_pins.begin(), used_pins.end(), [](const DynaPin::Pin& lhs, const DynaPin::Pin& rhs) {
-        return std::tie(lhs.row, lhs.col) < std::tie(rhs.row, rhs.col);
-    });
-    used_pins.erase(std::unique(used_pins.begin(), used_pins.end()), used_pins.end());
-    if (m_dynapin_selection.source == DynaPin::SelectionSource::Manual && used_pins != m_dynapin_selection.pins) {
+        std::sort(used_pins.begin(), used_pins.end(),
+                  [](const DynaPin::Pin& lhs, const DynaPin::Pin& rhs) { return std::tie(lhs.row, lhs.col) < std::tie(rhs.row, rhs.col); });
+        used_pins.erase(std::unique(used_pins.begin(), used_pins.end()), used_pins.end());
+        if (m_dynapin_selection.source == DynaPin::SelectionSource::Manual && used_pins != m_dynapin_selection.pins) {
+            if (!m_dynapin_selection.warning.empty())
+                m_dynapin_selection.warning += "\n";
+            m_dynapin_selection.warning += L("DynaPin manual pins without a valid Tree support landing were not used.");
+        }
+        m_dynapin_selection.pins = std::move(used_pins);
+        if (DynaPin::effective_debug_stage(*this) < 2)
+            return;
+
+        // A pin is a plate-wide obstacle, even for objects that did not land on it
+        // (including Organic). A union of independent landing plans is not sufficient.
+        std::vector<DynaPin::Pin> colliding_pins;
+        for (const auto& pin : m_dynapin_selection.pins) {
+            bool colliding = false;
+            for (const PrintObject* object : m_objects) {
+                for (const auto& blocker : DynaPin::blockers_for_pin_instances(*object, dynapin_config, pin)) {
+                    for (const SupportLayer* layer : object->support_layers()) {
+                        if (layer->bottom_z() >= blocker.z_max - EPSILON || layer->print_z <= blocker.z_min + EPSILON)
+                            continue;
+                        for (const ExtrusionEntity* entity : layer->support_fills.flatten().entities) {
+                            if (!intersection(entity->polygons_covered_by_width(), Polygons{blocker.poly}).empty()) {
+                                colliding = true;
+                                break;
+                            }
+                        }
+                        if (colliding)
+                            break;
+                    }
+                    if (colliding)
+                        break;
+                }
+                if (colliding)
+                    break;
+            }
+            if (colliding)
+                colliding_pins.push_back(pin);
+        }
+        if (colliding_pins.empty())
+            return;
         if (!m_dynapin_selection.warning.empty())
             m_dynapin_selection.warning += "\n";
-        m_dynapin_selection.warning += L("DynaPin manual pins without a valid Tree support landing were not used.");
+        m_dynapin_selection.warning += L("DynaPin pins were excluded because they intersect support on the plate:") + std::string(" ") +
+                                       dynapin_pin_list_text(colliding_pins);
+        BOOST_LOG_TRIVIAL(warning) << "[DynaPin] plate-wide support collision: pins=" << dynapin_pin_list_text(colliding_pins);
+        auto& pins = m_dynapin_selection.pins;
+        pins.erase(std::remove_if(pins.begin(), pins.end(),
+                                  [&](const auto& pin) {
+                                      return std::find(colliding_pins.begin(), colliding_pins.end(), pin) != colliding_pins.end();
+                                  }),
+                   pins.end());
+        // The selected set strictly shrinks. Regenerate every object's support before
+        // validating again, so no branch remains terminated on a removed pin.
+        for (PrintObject* object : m_objects) {
+            const auto& rejections = object->dynapin_tree_landing_plan().rejections;
+            if (!rejections.empty()) {
+                std::string message = L("Earlier Tree support attempts excluded pins:");
+                message += " " + object->model_object()->name;
+                for (const auto& rejection : rejections)
+                    message += "\n" + std::to_string(rejection.pin.row) + "," + std::to_string(rejection.pin.col) + ": " +
+                               L(DynaPin::tree_pin_rejection_text(rejection.reason));
+                if (m_dynapin_selection.warning.find(message) == std::string::npos)
+                    m_dynapin_selection.warning += "\n" + message;
+            }
+        }
+        for (PrintObject* object : m_objects) {
+            throw_if_canceled();
+            object->invalidate_step_without_cancel(posSupportMaterial);
+            object->clear_tree_support_preview_cache();
+            object->generate_support_material();
+        }
     }
-    m_dynapin_selection.pins = std::move(used_pins);
 }
 
 template class PrintState<PrintStep, psCount>;

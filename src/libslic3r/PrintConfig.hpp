@@ -223,10 +223,14 @@ enum SupportMaterialInterfacePattern { smipAuto, smipRectilinear, smipConcentric
 enum SupportType { stNormalAuto, stTreeAuto, stNormal, stTree };
 inline bool is_tree(SupportType stype) { return std::set<SupportType>{stTreeAuto, stTree}.count(stype) != 0; };
 inline bool is_tree_slim(SupportType type, SupportMaterialStyle style) { return is_tree(type) && style == smsTreeSlim; };
-inline bool is_tree_organic(SupportType type, SupportMaterialStyle style)
+inline SupportMaterialStyle effective_support_style(SupportType type, SupportMaterialStyle style)
 {
-    return is_tree(type) && style == smsTreeOrganic;
+    if (is_tree(type))
+        return style == smsTreeSlim || style == smsTreeStrong || style == smsTreeHybrid ? style : smsTreeOrganic;
+    return style == smsSnug ? smsSnug : smsGrid;
 }
+inline bool is_tree_organic(SupportType type, SupportMaterialStyle style)
+{ return is_tree(type) && effective_support_style(type, style) == smsTreeOrganic; }
 inline bool is_auto(SupportType stype) { return std::set<SupportType>{stNormalAuto, stTreeAuto}.count(stype) != 0; };
 
 enum SeamPosition { spNearest, spAligned, spAlignedBack, spRear, spRandom };

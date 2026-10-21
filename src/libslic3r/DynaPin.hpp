@@ -151,10 +151,21 @@ struct TreePinLanding
     double   support_print_z = 0.;
 };
 
+enum class TreePinRejectionReason { LayerHeight, NoLanding, BlockerCollision, OutsideSurface, MissingExtrusion, Disconnected };
+
+struct TreePinRejection
+{
+    Pin                    pin;
+    TreePinRejectionReason reason;
+};
+
+const char* tree_pin_rejection_text(TreePinRejectionReason reason);
+
 struct TreePinLandingPlan
 {
     std::vector<TreePinLanding> landings;
     std::vector<Pin>            used_pins;
+    std::vector<TreePinRejection> rejections;
 };
 
 std::vector<Pin>        parse_pin_list(const std::string& pins);
@@ -169,6 +180,7 @@ ProjectionSelection     select_tree_pins(const PrintObject&      object,
 const std::vector<Pin>& resolved_pins(const Print& print);
 bool                    load_config_for_print(const Print& print, Config& config, std::string* error = nullptr);
 LocalBlocker            blocker_for_pin(const PrintObject& object, const Config& config, const Pin& pin);
+std::vector<LocalBlocker> blockers_for_pin_instances(const PrintObject& object, const Config& config, const Pin& pin);
 VirtualSupportSurface   surface_for_pin(const PrintObject& object, const Config& config, const Pin& pin);
 std::optional<Point>    nearest_pin_landing_point(const Polygon& safe_region, const Point& from);
 bool                    pin_collides_with_model(const Print& print, const Config& config, const Pin& pin,

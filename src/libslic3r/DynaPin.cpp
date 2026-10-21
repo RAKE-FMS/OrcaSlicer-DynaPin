@@ -4,6 +4,7 @@
 #include "Layer.hpp"
 #include "Print.hpp"
 #include "PrintConfig.hpp"
+#include "I18N.hpp"
 #include "Utils.hpp"
 
 #include <boost/algorithm/string.hpp>
@@ -27,6 +28,19 @@
 namespace fs = boost::filesystem;
 
 namespace Slic3r::DynaPin {
+
+const char* tree_pin_rejection_text(TreePinRejectionReason reason)
+{
+    switch (reason) {
+    case TreePinRejectionReason::LayerHeight: return L("layer height cannot match pin top");
+    case TreePinRejectionReason::NoLanding: return L("no valid landing");
+    case TreePinRejectionReason::BlockerCollision: return L("support intersects pin blocker");
+    case TreePinRejectionReason::OutsideSurface: return L("landing footprint outside pin surface");
+    case TreePinRejectionReason::MissingExtrusion: return L("missing landing extrusion");
+    case TreePinRejectionReason::Disconnected: return L("landing disconnected from upper support");
+    }
+    return L("no valid landing");
+}
 
 static double number_or(const nlohmann::json& j, const char* key, double fallback)
 {
@@ -595,6 +609,16 @@ LocalBlocker blocker_for_pin(const PrintObject& object, const Config& config, co
     return blocker_for_pin_shift(config, pin, shift, *max_x_bed);
 }
 
+std::vector<LocalBlocker> blockers_for_pin_instances(const PrintObject& object, const Config& config, const Pin& pin)
+{
+    std::vector<LocalBlocker> blockers;
+    const auto                max_x = bed_max_x(*object.print());
+    if (max_x)
+        for (const auto& instance : object.instances())
+            blockers.push_back(blocker_for_pin_shift(config, pin, instance.shift_without_plate_offset(), *max_x));
+    return blockers;
+}
+
 static VirtualSupportSurface surface_for_pin_shift(const Config& config, const Pin& pin, const Point& shift, double max_x_bed)
 {
     const double block_y = pin_y(config, pin) + support_block_y_offset;
@@ -705,6 +729,8 @@ std::vector<Polygons> support_blockers_for_object(const PrintObject& object)
 {
     std::vector<Polygons> out(object.layer_count());
     const Print&          print = *object.print();
+    if (is_tree_organic(object.config().support_type.value, object.config().support_style.value))
+        return out;
     if (!print.config().enable_dynapin_support_optimization.value || effective_debug_stage(print) < 2)
         return out;
 
@@ -739,6 +765,8 @@ std::vector<LocalBlocker> support_blocker_regions_local(const PrintObject& objec
 {
     std::vector<LocalBlocker> out;
     const Print&              print = *object.print();
+    if (is_tree_organic(object.config().support_type.value, object.config().support_style.value))
+        return out;
     if (!print.config().enable_dynapin_support_optimization.value || effective_debug_stage(print) < 2)
         return out;
 
@@ -760,6 +788,8 @@ std::vector<VirtualSupportSurface> pin_top_surfaces_for_object(const PrintObject
 {
     std::vector<VirtualSupportSurface> out;
     const Print&                       print = *object.print();
+    if (is_tree_organic(object.config().support_type.value, object.config().support_style.value))
+        return out;
     if (!print.config().enable_dynapin_support_optimization.value || effective_debug_stage(print) < 1)
         return out;
 

@@ -808,6 +808,21 @@ void PrintObject::generate_support_material()
 
             this->_generate_support_material();
             m_print->throw_if_canceled();
+            if (m_print->dynapin_selection().source == DynaPin::SelectionSource::Manual && DynaPin::effective_debug_stage(*m_print) >= 1 &&
+                is_tree_organic(m_config.support_type.value, m_config.support_style.value))
+                this->active_step_add_warning(
+                    PrintStateBase::WarningLevel::NON_CRITICAL,
+                    L("DynaPin landing is not supported by Organic or default Tree support. Select Tree Slim, Strong or Hybrid."));
+            if (!dynapin_tree_landing_plan().rejections.empty()) {
+                std::string warning = L("DynaPin Tree support did not use these pins:");
+                for (const auto& rejection : dynapin_tree_landing_plan().rejections) {
+                    warning += "\n" + std::to_string(rejection.pin.row) + "," + std::to_string(rejection.pin.col) + ": " +
+                               L(DynaPin::tree_pin_rejection_text(rejection.reason));
+                    BOOST_LOG_TRIVIAL(info) << "[DynaPin] Tree rejected pin " << rejection.pin.row << "," << rejection.pin.col << ": "
+                                            << DynaPin::tree_pin_rejection_text(rejection.reason);
+                }
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, warning);
+            }
             if (is_tree(m_config.support_type.value) &&
                 m_print->dynapin_selection().source == DynaPin::SelectionSource::Manual &&
                 !m_print->dynapin_selection().pins.empty() && dynapin_tree_landing_plan().used_pins.empty())
@@ -4014,17 +4029,49 @@ void PrintObject::_generate_support_material()
 
 void PrintObject::generate_tree_support_with_dynapin_retries()
 {
-    const bool retry = m_print->dynapin_selection().source == DynaPin::SelectionSource::Automatic &&
-                       !is_tree_organic(m_config.support_type.value, m_config.support_style.value);
+    const bool                             retry        = m_print->dynapin_selection().source != DynaPin::SelectionSource::Unavailable &&
+                                                          !is_tree_organic(m_config.support_type.value, m_config.support_style.value);
     std::vector<DynaPin::Pin> candidates = retry ? m_print->dynapin_selection().pins : std::vector<DynaPin::Pin>{};
     const size_t max_attempts = retry ? candidates.size() + 1 : 1;
+    std::vector<DynaPin::TreePinRejection> rejections;
     for (size_t attempt = 0; attempt < max_attempts; ++attempt) {
         TreeSupport tree_support(*this, m_slicing_params, retry ? &candidates : nullptr);
         tree_support.throw_on_cancel = [this]() { this->throw_if_canceled(); };
         tree_support.generate();
-        if (!retry || dynapin_tree_landing_plan().used_pins == candidates)
+        auto plan = dynapin_tree_landing_plan();
+        append(rejections, plan.rejections);
+        for (const auto& pin : candidates) {
+            if (std::find(plan.used_pins.begin(), plan.used_pins.end(), pin) != plan.used_pins.end())
+                continue;
+            if (std::none_of(rejections.begin(), rejections.end(), [&](const auto& rejection) { return rejection.pin == pin; }))
+                rejections.push_back({pin, DynaPin::TreePinRejectionReason::NoLanding});
+        }
+        for (const auto& pin : candidates)
+            BOOST_LOG_TRIVIAL(debug) << "[DynaPin] Tree attempt " << attempt + 1 << ": pin=" << pin.row << "," << pin.col
+                                     << ", used=" << (std::find(plan.used_pins.begin(), plan.used_pins.end(), pin) != plan.used_pins.end());
+        BOOST_LOG_TRIVIAL(info) << "[DynaPin] Tree attempt " << attempt + 1 << ": candidates=" << candidates.size()
+                                << ", used=" << plan.used_pins.size();
+        if (!retry || plan.used_pins == candidates) {
+            std::sort(rejections.begin(), rejections.end(), [](const auto& a, const auto& b) {
+                return std::tie(a.pin.row, a.pin.col, a.reason) < std::tie(b.pin.row, b.pin.col, b.reason);
+            });
+            rejections.erase(std::unique(rejections.begin(), rejections.end(),
+                                         [](const auto& a, const auto& b) { return a.pin == b.pin && a.reason == b.reason; }),
+                             rejections.end());
+            rejections.erase(std::remove_if(rejections.begin(), rejections.end(),
+                                            [&](const auto& rejection) {
+                                                return std::find(plan.used_pins.begin(), plan.used_pins.end(), rejection.pin) !=
+                                                       plan.used_pins.end();
+                                            }),
+                             rejections.end());
+            plan.rejections = std::move(rejections);
+            set_dynapin_tree_landing_plan(std::move(plan));
             return;
-        candidates = dynapin_tree_landing_plan().used_pins;
+        }
+        for (const auto& rejection : plan.rejections)
+            BOOST_LOG_TRIVIAL(debug) << "[DynaPin] Tree pin " << rejection.pin.row << "," << rejection.pin.col << ": "
+                                     << DynaPin::tree_pin_rejection_text(rejection.reason);
+        candidates = plan.used_pins;
         clear_support_layers();
         clear_tree_support_preview_cache();
         throw_if_canceled();

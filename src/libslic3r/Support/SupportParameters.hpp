@@ -170,21 +170,7 @@ struct SupportParameters {
                                                        object_config.tree_support_wall_count.value == 0 ? 0.25 * sqr(scaled<double>(5.0)) * M_PI :
                                                                                                           std::numeric_limits<double>::max();
 
-        support_style = object_config.support_style;
-        if (support_style != smsDefault) {
-            if ((support_style == smsSnug || support_style == smsGrid) && is_tree(object_config.support_type)) support_style = smsDefault;
-            if ((support_style == smsTreeSlim || support_style == smsTreeStrong || support_style == smsTreeHybrid || support_style == smsTreeOrganic) &&
-                !is_tree(object_config.support_type))
-                support_style = smsDefault;
-        }
-        if (support_style == smsDefault) {
-            if (is_tree(object_config.support_type)) {
-                // Orca: use organic as default
-                support_style = object.print()->dynapin_selection().pins.empty() ? smsTreeOrganic : smsTreeSlim;
-            } else {
-                support_style = smsGrid;
-            }
-        }
+        support_style = effective_support_style(object_config.support_type.value, object_config.support_style.value);
     }
 	// Both top / bottom contacts and interfaces are soluble.
     bool                    soluble_interface;

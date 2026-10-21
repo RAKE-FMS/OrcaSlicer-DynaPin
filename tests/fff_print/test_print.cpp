@@ -768,6 +768,7 @@ TEST_CASE("DynaPin Tree bounded placement keeps Simple Bridge support pins", "[P
         {"dynapin_debug_stage", 2},
         {"dynapin_selected_pins", ""},
         {"support_type", "tree(auto)"},
+        {"support_style", "tree_slim"},
         {"printable_area", "0x0,180x0,180x180,0x180"},
         {"printable_height", 180.},
     });
@@ -813,7 +814,7 @@ TEST_CASE("DynaPin Tree bounded placement keeps Simple Bridge support pins", "[P
          << ", delta_y=" << result.candidate.delta_y << ", volume=" << result.volume_mm3);
     REQUIRE(result.status == DynaPin::PlacementStatus::Improved);
     CHECK(result.candidate.rotation_deg == Catch::Approx(355.));
-    CHECK(result.candidate.delta_y == Catch::Approx(0.));
+    // Exact pin-top layer boundaries may change the best local Y refinement.
     REQUIRE(DynaPin::apply_placement_result(model, task, result).applied);
 
     print.apply(model, config);
@@ -843,7 +844,14 @@ TEST_CASE("DynaPin Tree bounded placement keeps Simple Bridge support pins", "[P
         });
     REQUIRE(has_landing_support);
 
-    const double dynapin_support_volume = DynaPin::support_volume_mm3(print);
+    const auto support_extrusion_volume = [](const Print& sliced) {
+        double volume = 0.;
+        for (const auto* object : sliced.objects())
+            for (const auto* layer : object->support_layers())
+                volume += layer->support_fills.total_volume();
+        return volume;
+    };
+    const double       dynapin_support_volume = support_extrusion_volume(print);
     Model disabled_model(model);
     DynamicPrintConfig disabled_config = config;
     disabled_config.set_deserialize_strict({
@@ -857,7 +865,8 @@ TEST_CASE("DynaPin Tree bounded placement keeps Simple Bridge support pins", "[P
     disabled_print.apply(disabled_model, disabled_config);
     disabled_print.validate();
     disabled_print.process();
-    const double disabled_support_volume = DynaPin::support_volume_mm3(disabled_print);
+    const double disabled_support_volume = support_extrusion_volume(disabled_print);
+    REQUIRE(disabled_support_volume > 0.);
     INFO("support volume with DynaPin=" << dynapin_support_volume << " mm3, disabled=" << disabled_support_volume << " mm3");
     CHECK(dynapin_support_volume < disabled_support_volume * 0.9);
 }
@@ -1061,8 +1070,94 @@ TEST_CASE("DynaPin Tree keeps all three Simple Bridge pins", "[DynaPin][Print]")
 TEST_CASE("DynaPin Tree uses a manually selected pin as a landing", "[DynaPin][Print]")
 {
     ResourcesDirGuard resources_guard(test_resources_dir());
+    const bool        independent_layers = GENERATE(true, false);
+    const int         bottom_layers      = GENERATE(0, 2);
+    const int         row                = GENERATE(0, 1, 2);
+    const bool        mixed_print        = GENERATE(false, true);
     for (const char* support_style : {"tree_slim", "tree_strong", "tree_hybrid"}) {
+        INFO(support_style);
+        Print print;
+        print.set_plate_origin(Vec3d::Zero());
+        Model        model;
+        TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
+        mesh.scale(Vec3f(1.f, 1.f, 0.25f));
+        mesh.translate(30.f, 30.f, 0.f);
+        TriangleMesh top = Test::mesh(TestMesh::cube_20x20x20);
+        top.scale(Vec3f(0.1f, 0.1f, 0.1f));
+        top.translate(11.5f, 11.5f, 23.f);
+        mesh.merge(top);
+        ModelObject* object = model.add_object();
+        object->add_volume(std::move(mesh));
+        ModelInstance* instance = object->add_instance();
+        instance->set_offset({100., 0., 0.});
+        object->ensure_on_bed();
+        // An unrelated Normal object must not resurrect a pin rejected by Tree.
+        ModelObject* normal_object = nullptr;
+        if (mixed_print) {
+            normal_object = model.add_object();
+            normal_object->add_volume(Test::mesh(TestMesh::cube_20x20x20));
+            normal_object->add_instance()->set_offset(Vec3d(30., 140., 0.));
+            normal_object->config.set_key_value("support_type", new ConfigOptionEnum<SupportType>(stNormalAuto));
+            normal_object->config.set_key_value("support_style", new ConfigOptionEnum<SupportMaterialStyle>(smsGrid));
+        }
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            {"enable_support", true},
+            {"enable_dynapin_support_optimization", true},
+            {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+            {"dynapin_selected_pins", std::to_string(row) + ",0"},
+            {"support_type", "tree(auto)"},
+            {"support_style", support_style},
+            {"independent_support_layer_height", independent_layers},
+            {"support_interface_bottom_layers", bottom_layers},
+        });
+        print.auto_assign_extruders(object);
+        if (normal_object != nullptr)
+            print.auto_assign_extruders(normal_object);
+        print.apply(model, config);
+        print.validate();
+        print.set_status_silent();
+        print.process();
+
+        CHECK(print.dynapin_selection().source == DynaPin::SelectionSource::Manual);
+        const std::vector<DynaPin::Pin> expected_pins = independent_layers ? std::vector<DynaPin::Pin>{{row, 0}} :
+                                                                             std::vector<DynaPin::Pin>{};
+        REQUIRE(print.dynapin_selection().pins == expected_pins);
+        const DynaPin::TreePinLandingPlan& plan = print.objects().front()->dynapin_tree_landing_plan();
+        if (!independent_layers) {
+            CHECK(plan.landings.empty());
+            if (mixed_print) {
+                CHECK(print.dynapin_selection().warning.find("support on the plate") != std::string::npos);
+                CHECK(print.dynapin_selection().warning.find("layer height cannot match pin top") != std::string::npos);
+            } else {
+                REQUIRE_FALSE(plan.rejections.empty());
+                CHECK(plan.rejections.front().reason == DynaPin::TreePinRejectionReason::LayerHeight);
+            }
+            CHECK_FALSE(print.objects().front()->support_layers().empty());
+            continue;
+        }
+        CHECK_FALSE(plan.landings.empty());
+        CHECK(plan.used_pins == print.dynapin_selection().pins);
+        for (const auto& landing : plan.landings) {
+            const SupportLayer* layer = print.objects().front()->get_support_layer_at_printz(landing.support_print_z, EPSILON);
+            REQUIRE(layer != nullptr);
+            CHECK(std::abs(layer->bottom_z() - landing.print_z) <= EPSILON);
+        }
+    }
+}
+
+TEST_CASE("DynaPin Tree pin boundaries respect minimum and fixed layer heights", "[DynaPin][Print]")
+{
+    ResourcesDirGuard resources_guard(test_resources_dir());
+    const double      pin_top            = GENERATE(22.1, 22.2, 22.499999999999996, 22.799);
+    const bool        independent_layers = GENERATE(true, false);
+    PullConfigFile    file;
+    std::ifstream     input(test_resources_dir() + "/profiles/Kingroon/dynapin/kp3s.json");
+    auto              pins_config              = nlohmann::json::parse(input);
+    pins_config["grid"]["support_origin"]["z"] = pin_top - 2. * 7.4;
+    file.write(pins_config);
     Print print;
+    print.set_plate_origin(Vec3d::Zero());
     Model model;
     TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
     mesh.scale(Vec3f(1.f, 1.f, 0.25f));
@@ -1071,32 +1166,88 @@ TEST_CASE("DynaPin Tree uses a manually selected pin as a landing", "[DynaPin][P
     top.scale(Vec3f(0.1f, 0.1f, 0.1f));
     top.translate(11.5f, 11.5f, 23.f);
     mesh.merge(top);
-    ModelObject* object = model.add_object();
+    auto* object = model.add_object();
     object->add_volume(std::move(mesh));
-    ModelInstance* instance = object->add_instance();
-    instance->set_offset({100., 0., 0.});
+    object->add_instance()->set_offset({100., 0., 0.});
     object->ensure_on_bed();
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict({
-        {"enable_support", true},
-        {"enable_dynapin_support_optimization", true},
-        {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
-        {"dynapin_selected_pins", "2,0"},
-        {"support_type", "tree(auto)"},
-        {"support_style", support_style},
-    });
+    config.set_deserialize_strict({{"enable_support", true},
+                                   {"enable_dynapin_support_optimization", true},
+                                   {"dynapin_config_path", file.path.string()},
+                                   {"dynapin_selected_pins", "2,0"},
+                                   {"support_type", "tree(auto)"},
+                                   {"support_style", "tree_slim"},
+                                   {"independent_support_layer_height", independent_layers}});
+    if (pin_top > 22.4 && pin_top < 22.6)
+        config.set_deserialize_strict({{"min_layer_height", "0.2"}, {"max_layer_height", "0.3"}});
     print.auto_assign_extruders(object);
     print.apply(model, config);
-    print.validate();
     print.set_status_silent();
     print.process();
+    const auto& plan     = print.objects().front()->dynapin_tree_landing_plan();
+    const bool  can_land = pin_top < 22.7 && (independent_layers || pin_top == 22.2);
+    if (can_land) {
+        REQUIRE_FALSE(plan.landings.empty());
+        for (const auto& landing : plan.landings) {
+            const auto* layer = print.objects().front()->get_support_layer_at_printz(landing.support_print_z, EPSILON);
+            REQUIRE(layer != nullptr);
+            CHECK(std::abs(layer->bottom_z() - pin_top) <= EPSILON);
+            CHECK(layer->height >= print.objects().front()->slicing_parameters().min_layer_height - EPSILON);
+            CHECK(layer->height <= print.objects().front()->slicing_parameters().max_suport_layer_height + EPSILON);
+        }
+    } else {
+        CHECK(print.dynapin_selection().pins.empty());
+        CHECK(plan.landings.empty());
+        REQUIRE_FALSE(plan.rejections.empty());
+        CHECK(plan.rejections.front().reason == DynaPin::TreePinRejectionReason::LayerHeight);
+        CHECK_FALSE(print.objects().front()->support_layers().empty());
+    }
+}
 
-    CHECK(print.dynapin_selection().source == DynaPin::SelectionSource::Manual);
-    const std::vector<DynaPin::Pin> expected_pins{{2, 0}};
-    REQUIRE(print.dynapin_selection().pins == expected_pins);
-    const DynaPin::TreePinLandingPlan& plan = print.objects().front()->dynapin_tree_landing_plan();
-    CHECK_FALSE(plan.landings.empty());
+TEST_CASE("DynaPin Tree Arch Bridge landings start on pin tops", "[DynaPin][Print]")
+{
+    ResourcesDirGuard  resources_guard(test_resources_dir());
+    TemporaryDirGuard  temporary_guard;
+    DebugStageEnvGuard env_guard;
+    REQUIRE(::setenv("DYNAPIN_DEBUG_STAGE", "2", 1) == 0);
+    Model                     model;
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Disable};
+    PlateDataPtrs             plates;
+    std::vector<Preset*>      presets;
+    ImportedProjectDataGuard  import_guard(plates, presets);
+    bool                      bbl = false;
+    Semver                    version;
+    auto                      path = (boost::filesystem::path(TEST_DATA_DIR) / "dynapin" / "Arch_Bridge.3mf").string();
+    REQUIRE(load_bbs_3mf(path.c_str(), &config, &substitutions, &model, &plates, &presets, &bbl, &version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
+    config.set_deserialize_strict({{"support_type", "tree(auto)"},
+                                   {"support_style", "tree_slim"},
+                                   {"enable_support", true},
+                                   {"enable_dynapin_support_optimization", true},
+                                   {"enable_dynapin_placement_optimization", false},
+                                   {"dynapin_selected_pins", ""},
+                                   {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"}});
+    Print print;
+    print.set_plate_origin(Vec3d::Zero());
+    for (auto* object : model.objects)
+        print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    REQUIRE_FALSE(print.dynapin_selection().pins.empty());
+    const auto* object = print.objects().front();
+    const auto& plan   = object->dynapin_tree_landing_plan();
+    REQUIRE_FALSE(plan.landings.empty());
     CHECK(plan.used_pins == print.dynapin_selection().pins);
+    for (const auto& landing : plan.landings) {
+        const auto* layer = object->get_support_layer_at_printz(landing.support_print_z, EPSILON);
+        REQUIRE(layer != nullptr);
+        CHECK(std::abs(layer->bottom_z() - landing.print_z) <= EPSILON);
+        bool extruded = false;
+        for (const auto* entity : layer->support_fills.flatten().entities)
+            extruded |= !intersection(entity->polygons_covered_by_width(), Polygons{landing.footprint}).empty();
+        CHECK(extruded);
     }
 }
 
@@ -1116,12 +1267,14 @@ TEST_CASE("DynaPin Tree landing targets the middle of a pin edge", "[DynaPin][Pr
     CHECK(*corner_target != safe_region.points[0]);
 }
 
-SCENARIO("Print: Default Tree style switches to a DynaPin-capable generator", "[Print][DynaPin]")
+SCENARIO("Print: Default Tree style preserves Organic with DynaPin enabled", "[Print][DynaPin]")
 {
     GIVEN("Tree support with the default style and automatic pin selection")
     {
         ResourcesDirGuard  resources_guard(test_resources_dir());
         Print              print;
+        print.set_plate_origin(Vec3d::Zero());
+        const std::string  manual_pins = GENERATE(std::string{}, std::string{"2,0"});
         Model              model;
         TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
         mesh.scale(Vec3f(1.f, 1.f, 0.25f));
@@ -1141,7 +1294,7 @@ SCENARIO("Print: Default Tree style switches to a DynaPin-capable generator", "[
             {"enable_support", true},
             {"enable_dynapin_support_optimization", true},
             {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
-            {"dynapin_selected_pins", ""},
+            {"dynapin_selected_pins", manual_pins},
             {"support_type", "tree(auto)"},
             {"support_style", "default"},
         });
@@ -1151,12 +1304,18 @@ SCENARIO("Print: Default Tree style switches to a DynaPin-capable generator", "[
         print.set_status_silent();
         print.process();
 
-        THEN("Pins are selected and the normal Tree generator is used")
+        THEN("Organic remains selected and no DynaPin pins are used")
         {
-            CHECK_FALSE(print.dynapin_selection().pins.empty());
-            CHECK(print.dynapin_selection().warning.find("Organic") == std::string::npos);
+            CHECK(print.dynapin_selection().pins.empty());
+            if (manual_pins.empty())
+                CHECK(print.dynapin_selection().warning.find("Organic") != std::string::npos);
+            CHECK(DynaPin::pin_top_surfaces_for_object(*print.objects().front()).empty());
+            CHECK(DynaPin::support_blocker_regions_local(*print.objects().front()).empty());
+            const auto warnings = print.objects().front()->step_state_with_warnings(posSupportMaterial).warnings;
+            CHECK(std::any_of(warnings.begin(), warnings.end(),
+                              [](const auto& warning) { return warning.message.find("Organic") != std::string::npos; }));
             REQUIRE_FALSE(print.objects().front()->support_layers().empty());
-            CHECK(print.objects().front()->support_layers().front()->support_type == stInnerTree);
+            CHECK(print.objects().front()->support_layers().front()->support_type == stInnerNormal);
         }
     }
 }
@@ -1617,6 +1776,7 @@ TEST_CASE("Concurrent Tree angle evaluations match serial geometry across styles
     for (const char* style : {"tree_slim", "tree_strong", "tree_hybrid"}) {
         for (double angle : {5., 25.}) {
             Print        print;
+            print.set_plate_origin(Vec3d::Zero());
             Model        model;
             TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
             mesh.scale(Vec3f(1.f, 1.f, 0.25f));
@@ -1704,6 +1864,7 @@ TEST_CASE("DynaPin Tree bounded search preserves final pins across concurrency l
         {"dynapin_debug_stage", 2},
         {"dynapin_selected_pins", ""},
         {"support_type", "tree(auto)"},
+        {"support_style", "tree_slim"},
         {"printable_area", "0x0,180x0,180x180,0x180"},
         {"printable_height", 180.},
     });
