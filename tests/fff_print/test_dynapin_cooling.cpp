@@ -97,6 +97,29 @@ TEST_CASE("DynaPin ignores support beginning far above an unused pin", "[DynaPin
     CHECK(masks.front().empty());
 }
 
+TEST_CASE("DynaPin landing layers start on each pin without moving their upper connection", "[DynaPin][LandingZ]")
+{
+    const Polygon                            left  = rectangle(0, 0, 5, 5);
+    const Polygon                            right = rectangle(10, 0, 5, 5);
+    const double                             pin_z = GENERATE(10., 10.05, 10.149, 10.299);
+    const std::vector<DynaPin::LandingLayer> layers{{10.3, 10.6, {left, right}}, {10.6, 10.8, {left, right}}};
+    const auto changes = DynaPin::align_landing_layers(layers, {{{0, 0}, left, pin_z}, {{0, 1}, right, 10.3}}, 0.08, 0.3);
+    REQUIRE(changes.size() == 1);
+    CHECK(changes.front().source == 0);
+    double bottom = pin_z;
+    for (const auto& layer : changes.front().layers) {
+        CHECK(layer.bottom_z == Catch::Approx(bottom));
+        CHECK(layer.print_z - layer.bottom_z >= 0.08 - EPSILON);
+        CHECK(layer.print_z - layer.bottom_z <= 0.3 + EPSILON);
+        CHECK(diff(layer.polygons, {left}).empty());
+        CHECK(intersection(layer.polygons, {right}).empty());
+        bottom = layer.print_z;
+    }
+    CHECK(bottom == Catch::Approx(layers.front().print_z));
+    CHECK(DynaPin::align_landing_layers(layers, {{{0, 0}, left, 1.}}, 0.08, 0.3).empty());
+    CHECK(DynaPin::align_landing_layers(layers, {}, 0.08, 0.3).empty());
+}
+
 TEST_CASE("DynaPin landing paths preserve traversal and extrusion volume", "[DynaPin][Cooling]")
 {
     const Polygon region = rectangle(2, -1, 2, 2);

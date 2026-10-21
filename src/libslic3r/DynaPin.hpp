@@ -151,6 +151,19 @@ struct LandingLayer
     Polygons polygons;
 };
 
+struct LandingLayerAdjustment
+{
+    size_t                    source;
+    std::vector<LandingLayer> layers;
+};
+
+// Replace only the first landing footprint, keeping its upper Z fixed. The
+// replacement starts on the pin and respects the support layer height limits.
+std::vector<LandingLayerAdjustment> align_landing_layers(const std::vector<LandingLayer>&          layers,
+                                                         const std::vector<VirtualSupportSurface>& surfaces,
+                                                         double                                    min_height,
+                                                         double                                    max_height);
+
 // Result indices match layers; coincident Z slabs count as a single layer.
 std::vector<Polygons> landing_regions(const std::vector<LandingLayer>&          layers,
                                       const std::vector<VirtualSupportSurface>& surfaces,

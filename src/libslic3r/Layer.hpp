@@ -322,6 +322,8 @@ protected:
         coordf_t   dist_to_top; // mm dist to top
         bool need_infill = false;
         bool need_extra_wall = false;
+        // Local thickness when a pin landing differs from the rest of this Z.
+        coordf_t height = 0.;
         AreaGroup(ExPolygon *a, int t, coordf_t d) : area(a), type(t), dist_to_top(d) {}
     };
     std::vector<AreaGroup>                    area_groups;

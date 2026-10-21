@@ -1128,31 +1128,43 @@ TEST_CASE("DynaPin Tree uses a manually selected pin as a landing", "[DynaPin][P
         CHECK_FALSE(plan.landings.empty());
         CHECK(plan.used_pins == print.dynapin_selection().pins);
         size_t              landing_layers = 0;
+        double              first_bottom   = std::numeric_limits<double>::max();
         std::vector<double> available_z;
         for (const SupportLayer* layer : print.objects().front()->support_layers()) {
             if (layer->print_z > 22.1 && layer->has_extrusions())
                 available_z.push_back(layer->print_z);
             bool       has_landing = false;
             const auto flat        = layer->support_fills.flatten();
+            auto       check_height = [&](const ExtrusionPath& path) {
+                if (layer->print_z > 22.1 + EPSILON)
+                    first_bottom = std::min(first_bottom, layer->print_z - path.height);
+            };
             for (const ExtrusionEntity* entity : flat.entities) {
-                if (const auto* path = dynamic_cast<const ExtrusionPath*>(entity))
+                if (const auto* path = dynamic_cast<const ExtrusionPath*>(entity)) {
                     has_landing |= path->is_dynapin_landing;
-                else if (const auto* multipath = dynamic_cast<const ExtrusionMultiPath*>(entity))
+                    check_height(*path);
+                } else if (const auto* multipath = dynamic_cast<const ExtrusionMultiPath*>(entity)) {
                     has_landing |= std::any_of(multipath->paths.begin(), multipath->paths.end(),
                                                [](const auto& path) { return path.is_dynapin_landing; });
-                else if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(entity))
+                    for (const auto& path : multipath->paths)
+                        check_height(path);
+                } else if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(entity)) {
                     has_landing |= std::any_of(loop->paths.begin(), loop->paths.end(),
                                                [](const auto& path) { return path.is_dynapin_landing; });
+                    for (const auto& path : loop->paths)
+                        check_height(path);
+                }
             }
             landing_layers += has_landing;
         }
         CAPTURE(available_z);
         if (top_z == 23.f)
-            REQUIRE(available_z.size() == 2);
+            REQUIRE(available_z.size() >= 2);
         else
             REQUIRE(available_z.size() >= 3);
         const size_t requested = bottom_layers < 0 ? 2 : bottom_layers;
         CHECK(landing_layers == std::min(requested, available_z.size()));
+        CHECK(first_bottom == Catch::Approx(22.1).margin(EPSILON));
     }
 }
 

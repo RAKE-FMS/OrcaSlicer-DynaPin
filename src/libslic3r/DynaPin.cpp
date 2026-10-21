@@ -30,6 +30,41 @@ namespace fs = boost::filesystem;
 
 namespace Slic3r::DynaPin {
 
+std::vector<LandingLayerAdjustment> align_landing_layers(const std::vector<LandingLayer>&          layers,
+                                                         const std::vector<VirtualSupportSurface>& surfaces,
+                                                         double                                    min_height,
+                                                         double                                    max_height)
+{
+    std::vector<LandingLayerAdjustment> result;
+    std::vector<Polygons>               assigned(layers.size());
+    for (const VirtualSupportSurface& surface : surfaces) {
+        const auto masks = landing_regions(layers, {surface}, 1);
+        for (size_t i = 0; i < layers.size(); ++i) {
+            if (masks[i].empty() || layers[i].bottom_z <= surface.print_z + EPSILON)
+                continue;
+            Polygons region = diff(masks[i], assigned[i]);
+            if (region.empty())
+                continue;
+            const double span   = layers[i].print_z - surface.print_z;
+            const size_t count  = size_t(std::ceil(span / max_height - EPSILON));
+            const double height = span / double(count);
+            // No printable layer fits between this pin and the upper contact.
+            if (height < min_height - EPSILON)
+                continue;
+            LandingLayerAdjustment adjustment{i, {}};
+            double                 bottom = surface.print_z;
+            for (size_t j = 0; j < count; ++j) {
+                const double top = j + 1 == count ? layers[i].print_z : surface.print_z + double(j + 1) * height;
+                adjustment.layers.push_back({bottom, top, region});
+                bottom = top;
+            }
+            assigned[i] = union_(assigned[i], region);
+            result.push_back(std::move(adjustment));
+        }
+    }
+    return result;
+}
+
 std::vector<Polygons> landing_regions(const std::vector<LandingLayer>&          layers,
                                       const std::vector<VirtualSupportSurface>& surfaces,
                                       size_t                                    layer_count)

@@ -477,6 +477,7 @@ private:
      * \param contact_nodes The nodes to draw as support.
      */
     void draw_circles();
+    void prepare_dynapin_landing_layers();
     void validate_dynapin_landings();
 
     /*!
