@@ -8,7 +8,7 @@
     "col_count": 14,
     "support_origin": {
       "y": "18.0",
-      "z": "7.3"
+      "z": "7.6"
     },
     "pitch": {
       "row_z": "7.4",
@@ -47,7 +47,7 @@
       "row_parity": 0,
       "normal": {
         "x_hook": 169,
-        "x_latch": 174,
+        "x_latch": 172,
         "x_front": 20,
         "fast_feed_rate": 5000,
         "feed_rate": 1500,
@@ -64,7 +64,7 @@
       },
       "reverted": {
         "x_hook": 169,
-        "x_latch": 174,
+        "x_latch": 172,
         "x_front": 20,
         "fast_feed_rate": 5000,
         "feed_rate": 1500,
@@ -82,7 +82,7 @@
     },
     "reverted": {
       "x_hook": 169,
-      "x_latch": 174,
+      "x_latch": 172,
       "x_front": 20,
       "fast_feed_rate": 5000,
       "feed_rate": 1500,
