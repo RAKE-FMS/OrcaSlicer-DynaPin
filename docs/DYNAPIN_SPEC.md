@@ -1,21 +1,21 @@
 # DynaPin 実装仕様と設計整理
 
-この文書は 2026-09-14 時点の実装を基準にする。既存の `docs/dynapin-*-plan.*.md` は個別の計画・検討記録であり、本書は現行コードの責務と変更時の境界を記録する。DynaPin 専用のソースディレクトリはまだないため、`src/libslic3r` の README ではなく本ファイルに置く。
+この文書は現行コードの責務と変更時の境界を記録する。2026-10-23時点のピン上初層・傾斜補正・G-code出力の詳細は[定着用初層の仕様](DYNAPIN_PIN_BASE.md)、確認済みの結果と未検証事項は[検証記録](DYNAPIN_PIN_BASE_VALIDATION.md)を参照する。既存の `docs/dynapin-*-plan.*.md` は個別の計画・検討記録である。DynaPin 専用のソースディレクトリはまだないため、`src/libslic3r` の README ではなく本ファイルに置く。
 
 ## 目的と処理の流れ
 
 DynaPin は、プリンタのヘッドで引き出す外付けピンを造形中の支持面として利用し、選択したピンに対応する通常サポートを減らす。プリンタプロファイルの `dynapin_config_path` が機械固有の JSON を指し、`enable_dynapin_support_optimization`、`dynapin_selected_pins`、`dynapin_debug_stage` がスライス時の動作を決める。`enable_dynapin_placement_optimization` は配置探索を別途有効にする。
 
-1. `Print::update_dynapin_selection()` が設定を読み、手動指定または通常サポートの投影を用いる自動選択を確定する。モデルと衝突する候補を除外する。Tree/Organic の自動選択は利用できず、手動指定が必要である。
-2. `DynaPin` の幾何関数が選択ピンから object-local の除外領域と仮想ピン上面を作る。`SupportMaterial` は通常サポートの投影・生成・クリップへこれらを適用し、`TreeSupport3D` はレイヤー単位のブロッカーを取り込む。
-3. `GCode::change_layer()` はピン上面の高さに達した未処理ピンをまとめ、writer の Z リフトを実体化してから引き出し G-code を挿入し、退避高さで元の XY に戻してから Z を復元する。
+1. `Print::update_dynapin_selection()` が設定を読み、手動指定またはサポート投影を用いる自動選択を確定する。モデルと衝突する候補を除外する。通常サポートと非Organic Treeの自動選択に対応し、Organicの自動選択には対応しない。
+2. `DynaPin` の幾何関数が選択ピンから object-local の除外領域と仮想ピン上面を作る。`SupportMaterial` は通常サポートの投影・生成・クリップへこれらを適用し、`TreeSupport3D` はレイヤー単位のブロッカーを取り込む。任意のX方向傾斜設定がある場合、ピン上面を水平な帯に分割して最初の実サポート層を着地させる。
+3. `GCode::change_layer()` は、最も低い着地押出より前に未処理ピンを引き出す。writer の Z リフトを実体化してから引き出し G-code を挿入し、退避高さで元の XY に戻してから Z を復元する。出力時には複数モデルの重複するサポートを整理し、ピン上初層の造形順・冷却・移動を制御する。
 4. `DynaPinPreviewState` は生成済み G-code のコメントを読み、ピン移動イベントをプレビューへ渡す。GUI は表示と配置探索ジョブを担当する。
 
 `dynapin_debug_stage` の実効値は `DynaPin::effective_debug_stage()` で統一する。0 は通常、1 は仮想上面、2 は除外と引き出しまでを有効にする。環境変数 `DYNAPIN_DEBUG_STAGE` で上書きできる。
 
 ## 座標と不変条件
 
-`Pin{row,col}` はゼロ始まりで、row が Z、col が Y に対応する。支持側の Y は `support_origin_y + col * col_pitch_y`、ピン上面 Z は `support_origin_z + row * row_pitch_z`。引き出し経路には独立した `pull_origin_y/z` を使う。ピンごとの blocker の Z 範囲は必ず `[z_max - blocker_height_z, z_max]` とし、上段ピンの blocker をビルドプレートまで延ばさない。上方オーバーハングの下方投影はピン上面で止め、下方に別のオーバーハングがある場合のサポートは残す。
+`Pin{row,col}` はゼロ始まりで、row が Z、col が Y に対応する。支持側の Y は `support_origin_y + col * col_pitch_y`、基準Xにおけるピン上面 Z は `support_origin_z + row * row_pitch_z`。傾斜時はこの高さに `slope_x × (X − reference_x)` を足す。引き出し経路には独立した `pull_origin_y/z` を使う。ピンごとの blocker の Z 範囲は必ず `[z_max - blocker_height_z, z_max]` とし、上段ピンの blocker をビルドプレートまで延ばさない。上方オーバーハングの下方投影はピン上面で止め、下方に別のオーバーハングがある場合のサポートは残す。
 
 JSON の主な区画は `grid`、`support_exclusion`、`pull_gcode`。機械座標のブロッカーやプレビュー位置をスライス座標に持ち込む際は、plate offset を含まない instance shift を引く。`LocalBlocker` と `VirtualSupportSurface` は object-local XY と print Z の組、`BlockerBox` は機械/ワールド座標である。この区別は型名だけでは保証されないため、呼び出し側で維持する。
 
@@ -25,11 +25,11 @@ JSON の主な区画は `grid`、`support_exclusion`、`pull_gcode`。機械座�
 
 | 所在 | 現在の責務 | 判定 |
 | --- | --- | --- |
-| `DynaPin.hpp/.cpp` | 設定読込、ピン選択補助、衝突・支持幾何、引き出し G-code | `Slic3r::DynaPin` というドメイン名前空間は適切。ただし 1 ファイルの変更理由が多い。 |
+| `DynaPin.hpp/.cpp`、`DynaPinLanding.*` | 設定読込、ピン選択補助、衝突・支持幾何、定着領域の共有走査・重複除去、引き出し G-code | 機械座標への変換とサポート出力の正規化はここに集約する。ただし `DynaPin.cpp` には複数の変更理由がある。 |
 | `DynaPinPlacement.hpp/.cpp` | 候補生成、スコア、通常サポート量評価、並列探索、GUI 再スライス判断 | 探索の中核は libslic3r に適切。`placement_reslice_action` と `placement_job_should_continue_reslice` は GUI 制御に近く、境界が曖昧。 |
 | `DynaPinPreview.hpp/.cpp` | G-code コメント解析、イベント状態、モデル名解析 | 描画から分けた点は適切。型が `Slic3r` 直下にあり、`DynaPin::Pin` と同義の `DynaPinAddress` が重複する。 |
 | `GUI/Jobs/DynaPinPlacementJob.*`、`Plater.cpp` | UI スナップショット、非同期ジョブ、結果の適用 | GUI 依存を GUI 側に置く構成は適切。 |
-| `Print.cpp`、`Support/SupportMaterial.cpp`、`GCode.cpp` | 選択の確定、サポート生成への統合、安全なレイヤー遷移 | 各パイプラインの状態を所有する場所に統合する必要がある。ロジックの抽出余地はあるが、全てを DynaPin 側に移すべきではない。 |
+| `Print.cpp`、`Support/SupportMaterial.cpp`、`GCode.cpp`、`GCode/ConflictChecker.cpp` | 選択の確定、サポート生成への統合、安全なレイヤー遷移、出力経路と整合した衝突判定 | 各パイプラインの状態を所有する場所に統合する必要がある。ロジックの抽出余地はあるが、全てを DynaPin 側に移すべきではない。 |
 
 `DynaPinGCode.hpp` は `return_gcode()` だけを宣言する一方、`pull_gcode_for_pin()` は `DynaPin.hpp` にある。両者は同じ責務なので宣言をまとめるか、G-code 専用ヘッダーへそろえるのが自然である。`DynaPinPreview` の公開型は、GUI を含む利用側を確認してから `Slic3r::DynaPin` に寄せるのが望ましい。名前空間変更は API 変更なので一括で行い、単なるドキュメント更新として扱わない。
 
@@ -53,6 +53,6 @@ JSON の主な区画は `grid`、`support_exclusion`、`pull_gcode`。機械座�
 
 ## 検証と未確定事項
 
-関連する自動テストは `tests/libslic3r/test_dynapin_placement.cpp` と `test_dynapin_preview.cpp`。変更時はピンの座標変換、上段/下段のサポート分離、衝突除外、G-code のリフト・復帰順、配置探索のキャンセル/同点判定を確認する。実機での衝突安全性、ピン上への定着、Tree/Organic の自動選択はテストだけで保証できない。
+関連する自動テストは `tests/libslic3r/test_dynapin_placement.cpp`、`test_dynapin_preview.cpp`、`tests/fff_print/test_print.cpp`。変更時はピンの座標変換、上段/下段のサポート分離、衝突除外、G-code のリフト・復帰順、配置探索のキャンセル/同点判定を確認する。実機での衝突安全性とピン上への定着はテストだけで保証できない。
 
 現時点で未確定なのは、`support_block_y_offset` の設定化、プレビューのモデル名選択を将来も残すか、通常サポート以外の自動選択範囲、専用 target のビルド上の価値である。これらは現行仕様に混ぜず、実測またはユーザー操作要件を得て決める。
