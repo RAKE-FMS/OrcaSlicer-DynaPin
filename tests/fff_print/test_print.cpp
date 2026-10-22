@@ -2108,6 +2108,71 @@ TEST_CASE("Tree pin selection preserves multi-stage overhang choices", "[Print][
     }
 }
 
+TEST_CASE("DynaPin stabilization includes the full pin width beyond the landing inset", "[DynaPin][SupportSpeed]")
+{
+    ResourcesDirGuard  resources_guard(test_resources_dir());
+    TemporaryDirGuard  temporary_guard;
+    DebugStageEnvGuard stage_guard;
+    PullConfigFile     file;
+    auto               json                           = pull_reference_fixtures()[0]["config"];
+    json["support_exclusion"]["blocker_width_y"]      = 12.4;
+    json["support_exclusion"]["landing_edge_inset_y"] = 1.2;
+    file.write(json);
+    Print print;
+    Model model;
+    auto  config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"enable_dynapin_support_optimization", true},
+                                   {"dynapin_debug_stage", 2},
+                                   {"dynapin_config_path", file.path.string()},
+                                   {"dynapin_selected_pins", "0,0"}});
+    for (const auto& key : config.keys()) {
+        auto* option = config.option(key);
+        if (option->type() == coEnums) {
+            const auto* definition = print_config_def.get(key);
+            if (option->nullable())
+                static_cast<ConfigOptionEnumsGenericNullable*>(option)->keys_map = definition->enum_keys_map;
+            else
+                static_cast<ConfigOptionEnumsGeneric*>(option)->keys_map = definition->enum_keys_map;
+        }
+    }
+    init_dynapin_print(print, model, config);
+    print.process();
+    auto* object = print.get_object(size_t(0));
+    REQUIRE(object->support_layers().empty());
+    const auto surfaces = DynaPin::landing_surfaces_for_object(*object);
+    REQUIRE_FALSE(surfaces.empty());
+    const auto&  surface   = surfaces.front();
+    auto         bounds    = get_extents(surface.poly);
+    const double x         = unscale<double>(bounds.center().x());
+    const double y         = unscale<double>(bounds.center().y());
+    const auto   rectangle = [&](double half_width) {
+        return Polygon(Points{Point::new_scale(x - 2., y - half_width), Point::new_scale(x + 2., y - half_width),
+                              Point::new_scale(x + 2., y + half_width), Point::new_scale(x - 2., y + half_width)});
+    };
+    for (int i = 0; i < 5; ++i) {
+        auto* layer = object->add_support_layer(i, i, 0.2, surface.print_z + 0.2 * (i + 1));
+        if (i == 0)
+            layer->dynapin_landing_regions = {rectangle(5.)};
+        for (double dy : {0., -5.8, 5.8, -6.5, 6.5}) {
+            ExtrusionPath path(erSupportMaterial, 0.1, 0.4f, 0.2f);
+            path.polyline           = Polyline(Points{Point::new_scale(x - 2., y + dy), Point::new_scale(x + 2., y + dy)});
+            path.is_dynapin_landing = i == 0;
+            layer->support_fills.append(path);
+        }
+    }
+    const auto regions = DynaPin::support_stabilization_regions(*object, 3);
+    REQUIRE(regions.size() == 5);
+    CHECK(regions[0].empty());
+    CHECK(regions[4].empty());
+    for (size_t i = 1; i <= 3; ++i) {
+        for (double dy : {-5.8, 5.8})
+            CHECK_FALSE(
+                intersection_ln(Lines{Line(Point::new_scale(x - 1., y + dy), Point::new_scale(x + 1., y + dy))}, regions[i]).empty());
+        for (double dy : {-6.5, 6.5})
+            CHECK(intersection_ln(Lines{Line(Point::new_scale(x - 1., y + dy), Point::new_scale(x + 1., y + dy))}, regions[i]).empty());
+    }
+}
+
 TEST_CASE("DynaPin final G-code slows X support extrusion for exactly three layers", "[DynaPin][SupportSpeed]")
 {
     ResourcesDirGuard   resources_guard(test_resources_dir());

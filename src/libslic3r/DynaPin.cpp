@@ -439,6 +439,7 @@ std::vector<Polygons> support_stabilization_regions(const PrintObject& object, s
     if (layer_count == 0 || std::none_of(support_layers.begin(), support_layers.end(),
                                          [](const SupportLayer* layer) { return !layer->dynapin_landing_regions.empty(); }))
         return result;
+    const auto                surfaces = landing_surfaces_for_object(object);
     std::vector<LandingLayer> slabs;
     std::vector<Polygons>     bases;
     std::vector<size_t>       sources;
@@ -466,7 +467,25 @@ std::vector<Polygons> support_stabilization_regions(const PrintObject& object, s
         }
         for (auto& [height, data] : by_height) {
             slabs.push_back({layer.print_z - height, layer.print_z, union_(std::move(data.first))});
-            bases.push_back(data.second ? layer.dynapin_landing_regions : Polygons{});
+            Polygons base;
+            if (data.second) {
+                base = layer.dynapin_landing_regions;
+                // The inset controls adhesion extrusion, not the physical pin width.
+                // Protect the full pin width while retaining this landing's X span.
+                for (const auto& surface : surfaces) {
+                    if (std::abs(layer.print_z - height - surface.print_z) > EPSILON)
+                        continue;
+                    for (const auto& contact : intersection(layer.dynapin_landing_regions, Polygons{surface.poly})) {
+                        BoundingBox bounds     = get_extents(contact);
+                        const auto  pin_bounds = get_extents(surface.poly);
+                        bounds.min.y()         = pin_bounds.min.y();
+                        bounds.max.y()         = pin_bounds.max.y();
+                        polygons_append(base, intersection(Polygons{bounds.polygon()}, Polygons{surface.poly}));
+                    }
+                }
+                base = union_(std::move(base));
+            }
+            bases.push_back(std::move(base));
             sources.push_back(i);
         }
     }
