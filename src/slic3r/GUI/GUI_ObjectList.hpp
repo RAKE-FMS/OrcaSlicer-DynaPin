@@ -447,6 +447,7 @@ public:
     //update printable state for item from objects model
     void update_printable_state(int obj_idx, int instance_idx);
     void toggle_printable_state();
+    void toggle_auto_drop();
     void enable_layers_editing();
 
     //BBS: remove const qualifier

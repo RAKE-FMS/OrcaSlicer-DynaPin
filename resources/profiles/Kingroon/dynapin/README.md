@@ -110,7 +110,7 @@ Z
 
 - **X範囲**: `x_front` ～ `bed_max_x`（引き出し経路およびサポートブロック全域）
   - `bed_max_x` はプリンタの `printable_area` に記載された最大X座標から自動取得します。KP3Sでは `x_front=20`、`bed_max_x=180` なので `20..180` です。
-- **Y範囲**: `pin_y ± blocker_width_y/2`（ブロッカーのY方向幅）
+- **Y範囲**: `blocker_y ± blocker_width_y/2`（ブロッカーのY方向幅）
 - **Z範囲**: `z_max - blocker_height_z`（ピン下面）から `z_max`（ピン上面）まで。
   - `blocker_height_z` が設定されていない、または0の場合は、Z方向の下側延長はありません。
 
@@ -118,8 +118,25 @@ Z
 
 ピンの上面（`z_max`）は「仮想ビルドプレート」として機能します。ピンの上にあるモデルのオーバーハングから生成されたサポート材は、ベッド（Z=0）まで降りる代わりにピンの上面で「着地」します。
 
-- **仮想サポート面のXY範囲**: サポートブロックと同じ `x_front..bed_max_x`、および `pin_y ± blocker_width_y/2` です。
+- **仮想サポート面のXY範囲**: サポートブロックと同じ `x_front..bed_max_x`、および `blocker_y ± blocker_width_y/2` です。
 - **引き出し経路の真上**: 引き出し経路全体を仮想支持面として扱い、上のサポート材がピン上面で着地できるようにします。
+
+### ピン上の定着用サポート初層（2026-10-22）
+
+最初の実サポート層の下端をピン上面に合わせ、その1層だけを通常サポートの初層として造形します。2層目以降は通常のサポート生成・冷却へ戻します。ピン専用インターフェースは生成せず、`support_interface_bottom_layers`との連動もありません。造形物との接触に必要な通常インターフェースは維持します。
+
+| 条件 | 既存の設定・動作 |
+| --- | --- |
+| 密度・拡張 | `raft_first_layer_density`・`raft_first_layer_expansion`。オブジェクトでの上書きも反映 |
+| 線幅 | 既存の初層線幅を解決する`support_material_1st_layer_flow` |
+| 層厚・押出量 | ピン上面からの実層厚を使用し、ベッド初層の層厚には置換しない |
+| 速度・材料 | `initial_layer_speed`・`support_filament`。種別は通常サポート |
+| 経路 | 機械X方向への一方向走査。通常初層の外周経路は追加しない |
+| 冷却 | 対象経路だけ造形物冷却ファン0%。退出後は通常制御。先行起動・キックスタートも停止区間を保護 |
+
+赤いボックスはサポート除外領域であり、定着用初層の外縁余白を設定しても縮小しません。実際に材料を置ける範囲は、下記の`landing_edge_inset_y`と押出線幅で別に制限します。
+
+インターフェース方式から変更した理由、Z整合、連続ピンの扱いは[現行仕様と変更理由](../../../../docs/DYNAPIN_PIN_BASE.md)、測定値とテスト結果は[検証記録](../../../../docs/DYNAPIN_PIN_BASE_VALIDATION.md)に記載しています。
 
 ---
 
@@ -171,10 +188,12 @@ pull_z = pull_origin.z + row × pitch.row_z
 
 サポートブロッカー上端の座標：
 ```
-blocker_y   = support_origin.y + col × pitch.col_y
+blocker_y   = support_origin.y + col × pitch.col_y − 7.2
 blocker_z_max = support_origin.z + row × pitch.row_z
 blocker_z_min = blocker_z_max - blocker_height_z
 ```
+
+現行実装では支持領域のY中心に固定補正`support_block_y_offset = −7.2 mm`を加えています。この補正は引き出しモードのY補正とは独立です。
 
 `dynapin_selected_pins` が空の場合は、この行数・列数で列挙したピンを自動選択候補として使用します。`row` はZ方向の高さ、`col` はY方向の位置を表します。
 
@@ -186,8 +205,9 @@ blocker_z_min = blocker_z_max - blocker_height_z
 
 ```json
 "support_exclusion": {
-  "blocker_width_y": 8,
-  "blocker_height_z": 5
+  "blocker_width_y": 12.4,
+  "blocker_height_z": 5,
+  "landing_edge_inset_y": 1.2
 }
 ```
 
@@ -195,8 +215,41 @@ blocker_z_min = blocker_z_max - blocker_height_z
 |---|---|---|---|
 | `blocker_width_y` | number | ○ | サポートブロッカーのY方向幅 [mm] |
 | `blocker_height_z` | number | – | サポートブロッカーの上端から下方向への高さ [mm]（省略時 0） |
+| `landing_edge_inset_y` | number | – | 定着用初層の造形範囲をY方向の外縁から縮める片側の余白 [mm]（省略時 0） |
+
+`kp3s.json`の`landing_edge_inset_y`は1.2 mmです。同じ高さで連続して選択・使用するピンはつながった面として扱い、ピン間の共有境界には余白を設けません。単独ピンや連続領域の両端には、それぞれ1.2 mmの余白を設けます。未使用ピンや高さの異なるピンとの間は共有境界として扱いません。初層の拡張はこの範囲内に制限し、押出経路はさらに線幅の半分だけ内側に配置します。
+
+KP3Sのピッチ12.4 mmに対して両端を1.2 mmずつ縮めるため、単独ピンの造形可能幅は10.0 mmです。実幅10.4 mmに対して片側0.2 mmの余裕を残します。連続するN本の造形可能幅は`12.4 × N − 2.4` mmになります。この余白は定着用初層の範囲に適用します。
 
 サポート除外領域・仮想支持面・プレビューのX範囲は、選択中の動作モードの `x_front` とプリンタの `printable_area` から自動計算されます。alternatingの場合はnested normal/revertedの小さい方の`x_front`を使い、両方の引き出し経路を含めます。引き出し用のY・Z補正はサポート座標に適用しません。
+
+---
+
+### `support_speed` セクション（任意）
+
+ピン上の接触面を造形した次のサポート層から、大きなX方向の押出し移動を減速します。
+
+```json
+"support_speed": {
+  "layers": 3,
+  "min_x_distance": 5,
+  "max_x_speed": 0
+}
+```
+
+| フィールド | 省略時 | 説明 |
+|---|---|---|
+| `layers` | 3 | 接触面の次から数える実サポート層数。0で減速を無効化 |
+| `min_x_distance` | 5 | 1本の直線押出し区間で減速対象となるX方向の最小移動量 [mm] |
+| `max_x_speed` | 0 | X方向の速度成分の上限 [mm/s]。0はプロセス設定の`initial_layer_speed`を使用 |
+
+各値は非負で、`layers`は整数です。各ピンの実際の定着用初層を基準に、直上につながるサポート層を数えます。同じZの層を重複して数えず、層間が途切れたサポートには引き継ぎません。対象領域は接触面のXY範囲を直上へ投影した範囲です。同じ高さに異なる層厚の経路が混在する場合も、最終的な各押出し経路の層厚・範囲から接続を判定します。層全体の代表層厚やサポート島だけには依存せず、接触面より下の経路は対象層数に含めません。接触面自体の既存の初層条件は維持します。
+
+通常サポート・インターフェースの押出しで、その領域に重なる直線区間だけに適用します。斜め移動では`経路速度 × |ΔX| / 経路長`を上限以下に抑えます。Y方向だけの区間、しきい値未満の区間、空走、モデルの押出し、ピン引き出し動作は変更しません。既に遅い押出しを加速することはありません。減速対象の区間を含むサポート経路は元の直線区間からG1で出力し、円弧フィッティングによる制限の迂回を防ぎます。
+
+対象経路では、流量平滑化（`max_volumetric_extrusion_rate_slope`）によって短いY方向の区間まで連動して減速されないように、方向別の速度指定を優先します。通常の冷却による減速は維持します。
+
+JSON変更後はG-codeを再生成してください。DynaPin無効時には適用しません。
 
 ---
 
@@ -345,6 +398,23 @@ OrcaSlicerとPythonで共通のピン引き出し動作を定義します。次�
 - `~/Library/Application Support/OrcaSlicer/system/Kingroon/dynapin/kp3s.json`
 
 ソース側やアプリ内のJSONを更新しても、これらの優先ファイルが古いままだと、スライス結果には古い設定値（例: `pull_gcode` の `y_origin_offset`）が使われます。設定ファイルと実際の結果が食い違う場合は、まずこの検索順で実際に読まれるファイルを確認してください。設定をそろえるには、優先ファイルも同じ内容に更新するか、不要な優先ファイルを退避してから再スライスします。
+
+### 開発環境のシンボリックリンク
+
+本家版とこのDynaPin版は、通常起動では同じ`~/Library/Application Support/OrcaSlicer`を使用します。`dynapin/kp3s.json`はDynaPin版が使う追加ファイルですが、プリンタ・材料・プロセス等の設定保存先は共有されます。データフォルダ全体を分ける場合は、DynaPin版を専用の`--datadir`で起動します。
+
+2026-10-22のGUIスライスでは、`system/Kingroon/dynapin/kp3s.json`の古いコピーが優先され、リポジトリに追加した`landing_edge_inset_y`が未設定（既定0 mm）になっていました。CLI検証で新しい設定が使われていても、GUIが同じファイルを使うとは限りません。
+
+この開発環境では元の通常ファイルを`kp3s.json.backup-<日時>`へバックアップし、次のシンボリックリンクに置き換えました。
+
+```text
+~/Library/Application Support/OrcaSlicer/system/Kingroon/dynapin/kp3s.json
+  → <リポジトリ>/resources/profiles/Kingroon/dynapin/kp3s.json
+```
+
+リンク自体はローカル環境の設定であり、Gitには保存されません。別の環境では同じ参照関係を設定するか、`dynapin_config_path`をリポジトリのJSONへの絶対パスにします。`user/`に同名のファイルがある場合は、そちらがさらに優先されます。
+
+確認には`readlink`で参照先を調べ、ログの`[DynaPin] config loaded`の`resolved`で実際の読み込み先を確認します。リンク先のJSONを変更すると、次に設定を読み込むスライスに反映されます。既に生成済みのG-codeは変わらず、JSONの外部編集だけで自動的に再スライスされることも保証しません。設定を変更した後は、サポートを再生成する再スライスを実行し、押出線幅を含めた経路を確認してください。
 
 ---
 

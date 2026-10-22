@@ -1775,11 +1775,12 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
 
         // Check that there are extrusions on the very first layer. The case with empty
         // first layer may result in skirt/brim in the air and maybe other issues.
-        if (layers_to_print.size() == 1u) {
-            if (!has_extrusions)
-                throw Slic3r::SlicingError(
-                    _(L("One object has an empty first layer and can't be printed. Please Cut the bottom or enable supports.")),
-                    object.id().id);
+        if (layers_to_print.size() == 1u && !has_extrusions) {
+            const std::string warning =
+                _(L("The first layer is empty. Printing will continue. Check that the first printed layer is supported.")) + "\n" +
+                Slic3r::format(_(L("Object: %1%")), object.model_object()->name);
+            const_cast<Print*>(object.print())
+                ->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, warning, PrintStateBase::SlicingEmptyGcodeLayers);
         }
 
         // In case there are extrusions on this layer, check there is a layer to lay it on.
@@ -2467,6 +2468,20 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     m_last_layer_z = 0.f;
     m_max_layer_z  = 0.f;
     m_dynapin_pulls_done.clear();
+    m_dynapin_stabilization_regions.clear();
+    m_dynapin_support_speed = {};
+    if (print.config().enable_dynapin_support_optimization.value && DynaPin::effective_debug_stage(print) >= 1) {
+        DynaPin::Config config;
+        if (DynaPin::load_config_for_print(print, config) && config.support_speed.layers > 0) {
+            m_dynapin_support_speed = config.support_speed;
+            for (const PrintObject* object : print.objects()) {
+                auto regions = DynaPin::support_stabilization_regions(*object, size_t(config.support_speed.layers));
+                for (size_t i = 0; i < regions.size(); ++i)
+                    if (!regions[i].empty())
+                        m_dynapin_stabilization_regions.emplace(object->support_layers()[i], std::move(regions[i]));
+            }
+        }
+    }
     m_last_width = 0.f;
     m_is_role_based_fan_on.fill(false);
 
@@ -5232,12 +5247,136 @@ LayerResult GCode::process_layer(const Print& print,
             }
         }
 
+        auto prepare_instance = [&](const InstanceToPrint& instance_to_print) {
+            const auto&         inst           = instance_to_print.print_object.instances()[instance_to_print.instance_id];
+            const LayerToPrint& layer_to_print = layers[instance_to_print.layer_id];
+            // To control print speed of the 1st object layer printed over raft interface.
+            bool object_layer_over_raft = layer_to_print.object_layer && layer_to_print.object_layer->id() > 0 &&
+                                          instance_to_print.print_object.slicing_parameters().raft_layers() ==
+                                              layer_to_print.object_layer->id();
+            m_config.apply(print.default_region_config());
+            m_config.apply(instance_to_print.print_object.config(), true);
+            m_layer                  = layer_to_print.layer();
+            m_object_layer_over_raft = object_layer_over_raft;
+            if (m_config.reduce_crossing_wall)
+                m_avoid_crossing_perimeters.init_layer(*m_layer);
+
+            if (this->config().gcode_label_objects) {
+                gcode += std::string("; printing object ") + instance_to_print.print_object.model_object()->name +
+                         " id:" + std::to_string(instance_to_print.print_object.get_id()) + " copy " + std::to_string(inst.id) + "\n";
+            }
+            // exclude objects
+            if (m_enable_exclude_object) {
+                if (is_BBL_Printer()) {
+                    m_writer.set_object_start_str(std::string("; start printing object, unique label id: ") +
+                                                  std::to_string(instance_to_print.label_object_id) + "\n" + "M624 " +
+                                                  _encode_label_ids_to_base64({instance_to_print.label_object_id}) + "\n");
+                } else {
+                    const auto gflavor = print.config().gcode_flavor.value;
+                    if (gflavor == gcfKlipper) {
+                        m_writer.set_object_start_str(std::string("EXCLUDE_OBJECT_START NAME=") +
+                                                      get_instance_name(&instance_to_print.print_object, inst.id) + "\n");
+                    } else if (gflavor == gcfMarlinLegacy || gflavor == gcfMarlinFirmware || gflavor == gcfRepRapFirmware) {
+                        std::string str = std::string("M486 S") + std::to_string(inst.unique_id) + "\n";
+                        m_writer.set_object_start_str(str);
+                    }
+                }
+            }
+
+            // Orca(#7946): set current obj regardless of the `enable_overhang_speed` value, because
+            // `enable_overhang_speed` is a PrintRegionConfig and here we don't have a region yet.
+            // And no side effect doing this even if `enable_overhang_speed` is off, so don't bother
+            // checking anything here.
+            m_extrusion_quality_estimator.set_current_object(&instance_to_print.print_object);
+
+            // When starting a new object, use the external motion planner for the first travel move.
+            const Point&                         offset = instance_to_print.print_object.instances()[instance_to_print.instance_id].shift;
+            std::pair<const PrintObject*, Point> this_object_copy(&instance_to_print.print_object, offset);
+            if (m_last_obj_copy != this_object_copy)
+                m_avoid_crossing_perimeters.use_external_mp_once();
+            m_last_obj_copy = this_object_copy;
+            this->set_origin(unscale(offset));
+        };
+
+        auto finish_instance = [&](const InstanceToPrint& instance_to_print) {
+            const auto& inst = instance_to_print.print_object.instances()[instance_to_print.instance_id];
+            if (this->config().gcode_label_objects) {
+                gcode += std::string("; stop printing object ") + instance_to_print.print_object.model_object()->name +
+                         " id:" + std::to_string(instance_to_print.print_object.get_id()) + " copy " + std::to_string(inst.id) + "\n";
+            }
+            // exclude objects
+            // Don't set m_gcode_label_objects_end if you don't had to write the m_gcode_label_objects_start.
+            if (!m_writer.is_object_start_str_empty()) {
+                m_writer.set_object_start_str("");
+            } else if (m_enable_exclude_object) {
+                if (is_BBL_Printer()) {
+                    m_writer.set_object_end_str(std::string("; stop printing object, unique label id: ") +
+                                                std::to_string(instance_to_print.label_object_id) + "\n" + "M625\n");
+                } else {
+                    const auto gflavor = print.config().gcode_flavor.value;
+                    if (gflavor == gcfKlipper) {
+                        m_writer.set_object_end_str(std::string("EXCLUDE_OBJECT_END NAME=") +
+                                                    get_instance_name(&instance_to_print.print_object, inst.id) + "\n");
+                    } else if (gflavor == gcfMarlinLegacy || gflavor == gcfMarlinFirmware || gflavor == gcfRepRapFirmware) {
+                        m_writer.set_object_end_str(std::string("M486 S-1\n"));
+                    }
+                }
+            }
+        };
+
         // We are almost ready to print. However, we must go through all the objects twice to print the the overridden extrusions first
         // (infill/perimeter wiping feature):
         std::vector<ObjectByExtruder::Island::Region> by_region_per_copy_cache;
         for (int print_wipe_extrusions = is_anything_overridden; print_wipe_extrusions >= 0; --print_wipe_extrusions) {
             if (is_anything_overridden && print_wipe_extrusions == 0)
                 gcode += "; PURGING FINISHED\n";
+
+            std::vector<DynaPin::LandingExtrusion> landing_paths;
+            size_t                                 landing_instances = 0;
+            if (print.config().enable_dynapin_support_optimization.value && DynaPin::effective_debug_stage(print) >= 1) {
+                for (size_t i = 0; i < instances_to_print.size(); ++i) {
+                    const auto& instance = instances_to_print[i];
+                    const auto* support  = instance.object_by_extruder.support;
+                    const auto  role     = instance.object_by_extruder.support_extrusion_role;
+                    if (support == nullptr || (role != erMixed && role != erSupportMaterial))
+                        continue;
+                    const auto& layer_to_print = layers[instance.layer_id];
+                    const bool  overridden =
+                        const_cast<LayerTools&>(layer_tools).wiping_extrusions().is_support_overridden(layer_to_print.original_object);
+                    if (overridden != (print_wipe_extrusions != 0))
+                        continue;
+                    ExtrusionPaths paths;
+                    DynaPin::collect_landing_paths(*support, paths);
+                    if (!paths.empty())
+                        ++landing_instances;
+                    const Point& offset = instance.print_object.instances()[instance.instance_id].shift;
+                    for (auto& path : paths) {
+                        path.polyline.translate(offset);
+                        landing_paths.push_back({i, std::move(path)});
+                    }
+                }
+            }
+            const bool shared_landing = landing_instances > 1;
+            if (shared_landing) {
+                const auto ordered         = DynaPin::schedule_landing_paths(std::move(landing_paths), false);
+                size_t     previous_source = size_t(-1);
+                for (const auto& item : ordered) {
+                    const auto& instance = instances_to_print[item.source];
+                    if (previous_source != item.source) {
+                        if (previous_source != size_t(-1))
+                            finish_instance(instances_to_print[previous_source]);
+                        prepare_instance(instance);
+                        m_layer                  = layers[instance.layer_id].support_layer;
+                        m_object_layer_over_raft = false;
+                        previous_source          = item.source;
+                    }
+                    ExtrusionPath local_path = item.path;
+                    local_path.polyline.translate(-instance.print_object.instances()[instance.instance_id].shift);
+                    gcode += this->extrude_path(std::move(local_path), "support material");
+                }
+                if (previous_source != size_t(-1))
+                    finish_instance(instances_to_print[previous_source]);
+            }
 
             for (InstanceToPrint& instance_to_print : instances_to_print) {
                 if (print.config().skirt_type == stPerObject && !instance_to_print.print_object.object_skirt().empty() &&
@@ -5252,54 +5391,11 @@ LayerResult GCode::process_layer(const Print& print,
                         m_skirt_done.pop_back();
                 }
 
-                const auto&         inst           = instance_to_print.print_object.instances()[instance_to_print.instance_id];
                 const LayerToPrint& layer_to_print = layers[instance_to_print.layer_id];
-                // To control print speed of the 1st object layer printed over raft interface.
-                bool object_layer_over_raft = layer_to_print.object_layer && layer_to_print.object_layer->id() > 0 &&
-                                              instance_to_print.print_object.slicing_parameters().raft_layers() ==
-                                                  layer_to_print.object_layer->id();
-                m_config.apply(print.default_region_config());
-                m_config.apply(instance_to_print.print_object.config(), true);
-                m_layer                  = layer_to_print.layer();
-                m_object_layer_over_raft = object_layer_over_raft;
-                if (m_config.reduce_crossing_wall)
-                    m_avoid_crossing_perimeters.init_layer(*m_layer);
-
-                if (this->config().gcode_label_objects) {
-                    gcode += std::string("; printing object ") + instance_to_print.print_object.model_object()->name +
-                             " id:" + std::to_string(instance_to_print.print_object.get_id()) + " copy " + std::to_string(inst.id) + "\n";
-                }
-                // exclude objects
-                if (m_enable_exclude_object) {
-                    if (is_BBL_Printer()) {
-                        m_writer.set_object_start_str(std::string("; start printing object, unique label id: ") +
-                                                      std::to_string(instance_to_print.label_object_id) + "\n" + "M624 " +
-                                                      _encode_label_ids_to_base64({instance_to_print.label_object_id}) + "\n");
-                    } else {
-                        const auto gflavor = print.config().gcode_flavor.value;
-                        if (gflavor == gcfKlipper) {
-                            m_writer.set_object_start_str(std::string("EXCLUDE_OBJECT_START NAME=") +
-                                                          get_instance_name(&instance_to_print.print_object, inst.id) + "\n");
-                        } else if (gflavor == gcfMarlinLegacy || gflavor == gcfMarlinFirmware || gflavor == gcfRepRapFirmware) {
-                            std::string str = std::string("M486 S") + std::to_string(inst.unique_id) + "\n";
-                            m_writer.set_object_start_str(str);
-                        }
-                    }
-                }
-
-                // Orca(#7946): set current obj regardless of the `enable_overhang_speed` value, because
-                // `enable_overhang_speed` is a PrintRegionConfig and here we don't have a region yet.
-                // And no side effect doing this even if `enable_overhang_speed` is off, so don't bother
-                // checking anything here.
-                m_extrusion_quality_estimator.set_current_object(&instance_to_print.print_object);
-
-                // When starting a new object, use the external motion planner for the first travel move.
-                const Point& offset = instance_to_print.print_object.instances()[instance_to_print.instance_id].shift;
-                std::pair<const PrintObject*, Point> this_object_copy(&instance_to_print.print_object, offset);
-                if (m_last_obj_copy != this_object_copy)
-                    m_avoid_crossing_perimeters.use_external_mp_once();
-                m_last_obj_copy = this_object_copy;
-                this->set_origin(unscale(offset));
+                const bool          object_layer_over_raft = layer_to_print.object_layer && layer_to_print.object_layer->id() > 0 &&
+                                                             instance_to_print.print_object.slicing_parameters().raft_layers() ==
+                                                                 layer_to_print.object_layer->id();
+                prepare_instance(instance_to_print);
                 if (instance_to_print.object_by_extruder.support != nullptr) {
                     m_layer                  = layers[instance_to_print.layer_id].support_layer;
                     m_object_layer_over_raft = false;
@@ -5338,7 +5434,7 @@ LayerResult GCode::process_layer(const Print& print,
                         gcode += this->extrude_support(
                             // support_extrusion_role is erSupportMaterial, erSupportTransition, erSupportMaterialInterface or erMixed for
                             // all extrusion paths.
-                            *instance_to_print.object_by_extruder.support, support_extrusion_role);
+                            *instance_to_print.object_by_extruder.support, support_extrusion_role, shared_landing);
 
                         // Make sure ironing is the last
                         if (support_extrusion_role == erMixed || support_extrusion_role == erSupportMaterialInterface) {
@@ -5407,28 +5503,7 @@ LayerResult GCode::process_layer(const Print& print,
                     gcode += this->extrude_infill(print, by_region_specific, true);
                 }
 
-                if (this->config().gcode_label_objects) {
-                    gcode += std::string("; stop printing object ") + instance_to_print.print_object.model_object()->name +
-                             " id:" + std::to_string(instance_to_print.print_object.get_id()) + " copy " + std::to_string(inst.id) + "\n";
-                }
-                // exclude objects
-                // Don't set m_gcode_label_objects_end if you don't had to write the m_gcode_label_objects_start.
-                if (!m_writer.is_object_start_str_empty()) {
-                    m_writer.set_object_start_str("");
-                } else if (m_enable_exclude_object) {
-                    if (is_BBL_Printer()) {
-                        m_writer.set_object_end_str(std::string("; stop printing object, unique label id: ") +
-                                                    std::to_string(instance_to_print.label_object_id) + "\n" + "M625\n");
-                    } else {
-                        const auto gflavor = print.config().gcode_flavor.value;
-                        if (gflavor == gcfKlipper) {
-                            m_writer.set_object_end_str(std::string("EXCLUDE_OBJECT_END NAME=") +
-                                                        get_instance_name(&instance_to_print.print_object, inst.id) + "\n");
-                        } else if (gflavor == gcfMarlinLegacy || gflavor == gcfMarlinFirmware || gflavor == gcfRepRapFirmware) {
-                            m_writer.set_object_end_str(std::string("M486 S-1\n"));
-                        }
-                    }
-                }
+                finish_instance(instance_to_print);
             }
         }
     }
@@ -6107,7 +6182,9 @@ std::string GCode::extrude_infill(const Print& print, const std::vector<ObjectBy
     return gcode;
 }
 
-std::string GCode::extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role)
+std::string GCode::extrude_support(const ExtrusionEntityCollection& support_fills,
+                                   const ExtrusionRole              support_extrusion_role,
+                                   bool                             skip_dynapin_landing)
 {
     static constexpr const char* support_label            = "support material";
     static constexpr const char* support_interface_label  = "support material interface";
@@ -6147,14 +6224,21 @@ std::string GCode::extrude_support(const ExtrusionEntityCollection& support_fill
             const ExtrusionMultiPath*        multipath  = dynamic_cast<const ExtrusionMultiPath*>(ee);
             const ExtrusionLoop*             loop       = dynamic_cast<const ExtrusionLoop*>(ee);
             const ExtrusionEntityCollection* collection = dynamic_cast<const ExtrusionEntityCollection*>(ee);
-            if (path)
-                gcode += this->extrude_path(*path, label, speed);
-            else if (multipath) {
-                gcode += this->extrude_multi_path(*multipath, label, speed);
+            if (path) {
+                if (!skip_dynapin_landing || !path->is_dynapin_landing)
+                    gcode += this->extrude_path(*path, label, speed);
+            } else if (multipath) {
+                if (skip_dynapin_landing && std::any_of(multipath->paths.begin(), multipath->paths.end(),
+                                                        [](const auto& part) { return part.is_dynapin_landing; })) {
+                    for (const auto& part : multipath->paths)
+                        if (!part.is_dynapin_landing)
+                            gcode += this->extrude_path(part, label, speed);
+                } else
+                    gcode += this->extrude_multi_path(*multipath, label, speed);
             } else if (loop) {
                 gcode += this->extrude_loop(*loop, label, speed);
             } else if (collection) {
-                gcode += extrude_support(*collection, support_extrusion_role);
+                gcode += extrude_support(*collection, support_extrusion_role, skip_dynapin_landing);
             } else {
                 throw Slic3r::InvalidArgument("Unknown extrusion type");
             }
@@ -6453,7 +6537,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
 
     if (speed == 0)
         speed = filament_max_volumetric_speed / _mm3_per_mm;
-    if (this->on_first_layer()) {
+    if (this->on_first_layer() || path.is_dynapin_landing) {
         // BBS: for solid infill of first layer, speed can be higher as long as
         // wall lines have be attached
         if (path.role() != erBottomSurface)
@@ -6752,6 +6836,24 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
         append_role_based_fan_marker(erIroning, "_IRONING"sv, ironing_fan_speed >= 0 && path.role() == erIroning);
     };
 
+    const auto   stabilization   = m_dynapin_stabilization_regions.find(m_layer);
+    const double max_x_speed     = m_dynapin_support_speed.max_x_speed > 0. ? m_dynapin_support_speed.max_x_speed :
+                                                                              m_config.get_abs_value("initial_layer_speed");
+    bool         protect_support = false;
+    if (stabilization != m_dynapin_stabilization_regions.end() &&
+        (path.role() == erSupportMaterial || path.role() == erSupportMaterialInterface || path.role() == erSupportTransition) &&
+        !path.is_dynapin_landing && !path.is_force_no_extrusion()) {
+        // Preserve arc output for paths that have no segment requiring a cap.
+        for (const Line& line : path.polyline.lines()) {
+            if (DynaPin::support_segment_speed(line, speed, m_dynapin_support_speed.min_x_distance, max_x_speed) < speed &&
+                !intersection_ln(Lines{line}, stabilization->second).empty()) {
+                protect_support = true;
+                break;
+            }
+        }
+    }
+    if (protect_support && m_enable_cooling_markers)
+        comment += DynaPin::SUPPORT_FIXED_SPEED;
     if (!variable_speed) {
         // F is mm per minute.
         if ((std::abs(writer().get_current_speed() - F) > EPSILON) || (std::abs(_mm3_per_mm - m_last_mm3_mm) > EPSILON)) {
@@ -6816,7 +6918,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             }
             // BBS: use G1 if not enable arc fitting or has no arc fitting result or in spiral_mode mode or we are doing sloped extrusion
             // Attention: G2 and G3 is not supported in spiral_mode mode
-            if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr) {
+            if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr ||
+                protect_support) {
                 double path_length  = 0.;
                 double total_length = sloped == nullptr ? 0. : path.polyline.length() * SCALING_FACTOR;
                 for (const Line& line : path.polyline.lines()) {
@@ -6825,6 +6928,15 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                     if (line_length < EPSILON)
                         continue;
                     path_length += line_length;
+                    if (protect_support) {
+                        double       segment_speed = speed;
+                        const double capped        = DynaPin::support_segment_speed(line, speed, m_dynapin_support_speed.min_x_distance,
+                                                                                    max_x_speed);
+                        if (capped < speed && !intersection_ln(Lines{line}, stabilization->second).empty())
+                            segment_speed = capped;
+                        if (std::abs(m_writer.get_current_speed() - segment_speed * 60.) > EPSILON)
+                            gcode += m_writer.set_speed(segment_speed * 60., "", comment);
+                    }
                     auto dE = e_per_mm * line_length;
                     if (_needSAFC(path)) {
                         auto oldE = dE;

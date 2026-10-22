@@ -8,7 +8,7 @@
     "col_count": 14,
     "support_origin": {
       "y": "18.0",
-      "z": "7.3"
+      "z": "7.6"
     },
     "pitch": {
       "row_z": "7.4",
@@ -17,7 +17,13 @@
   },
   "support_exclusion": {
     "blocker_width_y": 12.4,
-    "blocker_height_z": 5
+    "blocker_height_z": 5,
+    "landing_edge_inset_y": 1.2
+  },
+  "support_speed": {
+    "layers": 3,
+    "min_x_distance": 5,
+    "max_x_speed": 0
   },
   "pull_gcode": {
     "type": "alternating",
@@ -41,7 +47,7 @@
       "row_parity": 0,
       "normal": {
         "x_hook": 169,
-        "x_latch": 174,
+        "x_latch": 172,
         "x_front": 20,
         "fast_feed_rate": 5000,
         "feed_rate": 1500,
@@ -58,12 +64,12 @@
       },
       "reverted": {
         "x_hook": 169,
-        "x_latch": 174,
+        "x_latch": 172,
         "x_front": 20,
         "fast_feed_rate": 5000,
         "feed_rate": 1500,
         "pull_feedrate_fast": 3000,
-        "y_origin_offset":1.8,
+        "y_origin_offset":0,
         "alternating_y_offset": -1,
         "y_offset": -3.5,
         "approach_y_offset": -4,
@@ -76,7 +82,7 @@
     },
     "reverted": {
       "x_hook": 169,
-      "x_latch": 174,
+      "x_latch": 172,
       "x_front": 20,
       "fast_feed_rate": 5000,
       "feed_rate": 1500,

@@ -1,5 +1,6 @@
 #include "DynaPin.hpp"
 #include "DynaPinGCode.hpp"
+#include "DynaPinLanding.hpp"
 #include "ExtrusionEntityCollection.hpp"
 
 #include "Layer.hpp"
@@ -29,6 +30,41 @@
 namespace fs = boost::filesystem;
 
 namespace Slic3r::DynaPin {
+
+std::vector<LandingLayerAdjustment> align_landing_layers(const std::vector<LandingLayer>&          layers,
+                                                         const std::vector<VirtualSupportSurface>& surfaces,
+                                                         double                                    min_height,
+                                                         double                                    max_height)
+{
+    std::vector<LandingLayerAdjustment> result;
+    std::vector<Polygons>               assigned(layers.size());
+    for (const VirtualSupportSurface& surface : surfaces) {
+        const auto masks = landing_regions(layers, {surface}, 1);
+        for (size_t i = 0; i < layers.size(); ++i) {
+            if (masks[i].empty() || layers[i].bottom_z <= surface.print_z + EPSILON)
+                continue;
+            Polygons region = diff(masks[i], assigned[i]);
+            if (region.empty())
+                continue;
+            const double span   = layers[i].print_z - surface.print_z;
+            const size_t count  = size_t(std::ceil(span / max_height - EPSILON));
+            const double height = span / double(count);
+            // No printable layer fits between this pin and the upper contact.
+            if (height < min_height - EPSILON)
+                continue;
+            LandingLayerAdjustment adjustment{i, {}};
+            double                 bottom = surface.print_z;
+            for (size_t j = 0; j < count; ++j) {
+                const double top = j + 1 == count ? layers[i].print_z : surface.print_z + double(j + 1) * height;
+                adjustment.layers.push_back({bottom, top, region});
+                bottom = top;
+            }
+            assigned[i] = union_(assigned[i], region);
+            result.push_back(std::move(adjustment));
+        }
+    }
+    return result;
+}
 
 std::vector<Polygons> landing_regions(const std::vector<LandingLayer>&          layers,
                                       const std::vector<VirtualSupportSurface>& surfaces,
@@ -78,9 +114,192 @@ std::vector<Polygons> landing_regions(const std::vector<LandingLayer>&          
     return result;
 }
 
+std::vector<Polygons> stabilization_regions(const std::vector<LandingLayer>& layers, const std::vector<Polygons>& bases, size_t layer_count)
+{
+    assert(layers.size() == bases.size());
+    std::vector<Polygons> result(layers.size());
+    if (layer_count == 0)
+        return result;
+    std::vector<size_t> order(layers.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return layers[a].print_z < layers[b].print_z; });
+    for (size_t base = 0; base < layers.size(); ++base) {
+        if (bases[base].empty())
+            continue;
+        double previous_z = layers[base].print_z;
+        size_t count      = 0;
+        for (size_t i = 0; i < order.size() && count < layer_count;) {
+            size_t j = i + 1;
+            while (j < order.size() && layers[order[j]].print_z <= layers[order[i]].print_z + EPSILON)
+                ++j;
+            bool overlaps = false;
+            for (size_t k = i; k < j; ++k) {
+                const size_t id = order[k];
+                if (layers[id].print_z <= layers[base].print_z + EPSILON || layers[id].bottom_z > previous_z + EPSILON)
+                    continue;
+                Polygons region = diff(intersection(layers[id].polygons, bases[base]), bases[id]);
+                overlaps |= !region.empty();
+                polygons_append(result[id], std::move(region));
+            }
+            if (overlaps) {
+                ++count;
+                previous_z = layers[order[i]].print_z;
+            }
+            i = j;
+        }
+    }
+    for (Polygons& region : result)
+        if (!region.empty())
+            region = union_(std::move(region));
+    return result;
+}
+
+std::vector<Polygons> support_stabilization_regions(const PrintObject& object, size_t layer_count)
+{
+    const auto&           support_layers = object.support_layers();
+    std::vector<Polygons> result(support_layers.size());
+    if (layer_count == 0 || std::none_of(support_layers.begin(), support_layers.end(),
+                                         [](const SupportLayer* layer) { return !layer->dynapin_landing_regions.empty(); }))
+        return result;
+    std::vector<LandingLayer> slabs;
+    std::vector<Polygons>     bases;
+    std::vector<size_t>       sources;
+    for (size_t i = 0; i < support_layers.size(); ++i) {
+        const SupportLayer& layer = *support_layers[i];
+        // Final paths can have different heights even when their top Z is shared.
+        std::map<float, std::pair<Polygons, bool>> by_height;
+        auto                                       append = [&](const ExtrusionPath& path) {
+            if (path.is_force_no_extrusion() || path.height <= 0.)
+                return;
+            auto& slab = by_height[path.height];
+            path.polygons_covered_by_width(slab.first, SCALED_EPSILON);
+            slab.second |= path.is_dynapin_landing;
+        };
+        const auto flattened = layer.support_fills.flatten();
+        for (const ExtrusionEntity* entity : flattened.entities) {
+            if (const auto* path = dynamic_cast<const ExtrusionPath*>(entity))
+                append(*path);
+            else if (const auto* multi = dynamic_cast<const ExtrusionMultiPath*>(entity))
+                for (const auto& path : multi->paths)
+                    append(path);
+            else if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(entity))
+                for (const auto& path : loop->paths)
+                    append(path);
+        }
+        for (auto& [height, data] : by_height) {
+            slabs.push_back({layer.print_z - height, layer.print_z, union_(std::move(data.first))});
+            bases.push_back(data.second ? layer.dynapin_landing_regions : Polygons{});
+            sources.push_back(i);
+        }
+    }
+    auto regions = stabilization_regions(slabs, bases, layer_count);
+    for (size_t i = 0; i < slabs.size(); ++i)
+        polygons_append(result[sources[i]], std::move(regions[i]));
+    for (Polygons& region : result)
+        if (!region.empty())
+            region = union_(std::move(region));
+    return result;
+}
+
+std::vector<LandingLayer> landing_base_layers(const std::vector<LandingLayer>&          layers,
+                                              const std::vector<VirtualSupportSurface>& surfaces,
+                                              double                                    expansion)
+{
+    struct Footprint
+    {
+        double   print_z;
+        Polygons polygons;
+        Polygons source_polygons;
+    };
+    std::vector<Footprint> footprints;
+    for (const auto& surface : surfaces) {
+        BoundingBox bounds = get_extents(surface.poly);
+        for (const bool lower : {true, false}) {
+            const bool adjacent = std::any_of(surfaces.begin(), surfaces.end(), [&](const auto& other) {
+                if (other.pin.row != surface.pin.row || other.pin.col != surface.pin.col + (lower ? -1 : 1) ||
+                    std::abs(other.print_z - surface.print_z) > EPSILON)
+                    return false;
+                const auto neighbor = get_extents(other.poly);
+                return std::abs(double(lower ? neighbor.max.y() - bounds.min.y() : neighbor.min.y() - bounds.max.y())) <= SCALED_EPSILON;
+            });
+            if (!adjacent) {
+                if (lower)
+                    bounds.min.y() += scale_(surface.edge_inset_y);
+                else
+                    bounds.max.y() -= scale_(surface.edge_inset_y);
+            }
+        }
+        if (bounds.min.y() >= bounds.max.y())
+            continue;
+        const Polygons footprint = intersection(Polygons{surface.poly}, Polygons{bounds.polygon()});
+        auto           match     = std::find_if(footprints.begin(), footprints.end(),
+                                                [&](const auto& other) { return std::abs(other.print_z - surface.print_z) < EPSILON; });
+        if (match == footprints.end())
+            footprints.push_back({surface.print_z, footprint, {surface.poly}});
+        else {
+            polygons_append(match->polygons, footprint);
+            match->source_polygons.push_back(surface.poly);
+        }
+    }
+    std::vector<LandingLayer> result;
+    for (auto& surface : footprints) {
+        surface.polygons        = union_(surface.polygons);
+        surface.source_polygons = union_(surface.source_polygons);
+        std::vector<LandingLayer> groups;
+        for (const auto& layer : layers) {
+            if (std::abs(layer.bottom_z - surface.print_z) > EPSILON)
+                continue;
+            Polygons seeds = intersection(layer.polygons, surface.source_polygons);
+            if (seeds.empty())
+                continue;
+            auto match = std::find_if(groups.begin(), groups.end(),
+                                      [&](const auto& group) { return std::abs(group.print_z - layer.print_z) < EPSILON; });
+            if (match == groups.end())
+                groups.push_back({surface.print_z, layer.print_z, std::move(seeds)});
+            else
+                match->polygons = union_(match->polygons, seeds);
+        }
+        std::sort(groups.begin(), groups.end(), [](const auto& a, const auto& b) { return a.print_z < b.print_z; });
+        Polygons seeds_assigned;
+        for (auto& group : groups) {
+            group.polygons = diff(union_(group.polygons), seeds_assigned);
+            polygons_append(seeds_assigned, group.polygons);
+        }
+        Polygons expanded_assigned;
+        for (size_t i = 0; i < groups.size(); ++i) {
+            Polygons polygons = intersection(offset(groups[i].polygons, scale_(expansion)), surface.polygons);
+            // Different branches on one pin may have different first-layer
+            // heights. Expansion must not invade another branch's first slab.
+            for (size_t j = 0; j < groups.size(); ++j)
+                if (i != j)
+                    polygons = diff(polygons, groups[j].polygons);
+            polygons = diff(polygons, expanded_assigned);
+            polygons_append(expanded_assigned, polygons);
+            if (polygons.empty())
+                continue;
+            auto match = std::find_if(result.begin(), result.end(), [&](const auto& layer) {
+                return std::abs(layer.bottom_z - surface.print_z) < EPSILON && std::abs(layer.print_z - groups[i].print_z) < EPSILON;
+            });
+            if (match == result.end())
+                result.push_back({surface.print_z, groups[i].print_z, std::move(polygons)});
+            else
+                match->polygons = union_(match->polygons, polygons);
+        }
+    }
+    return result;
+}
+
+Polygons landing_printable_region(const PrintObject& object)
+{
+    Polygon     border = get_bed_shape_with_excluded_area(object.print()->config());
+    const Point shift  = object.instances().empty() ? Point(0, 0) : object.instances().front().shift_without_plate_offset();
+    border.translate(-shift);
+    return {std::move(border)};
+}
+
 static ExtrusionPaths split_landing_path(const ExtrusionPath& path, const Polygons& regions)
 {
-    if (path.role() != erSupportMaterialInterface || intersection_pl(path.polyline, regions).empty())
+    if (intersection_pl(path.polyline, regions).empty())
         return {path};
     if (diff_pl(path.polyline, regions).empty()) {
         ExtrusionPath landing(path);
@@ -585,12 +804,34 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
                                                                                                              nlohmann::json::object();
     config.blocker_width_y         = number_or(exclusion, "blocker_width_y", config.blocker_width_y);
     config.blocker_height_z        = number_or(exclusion, "blocker_height_z", config.blocker_height_z);
+    config.landing_edge_inset_y    = number_or(exclusion, "landing_edge_inset_y", config.landing_edge_inset_y);
 
     const auto fail = [error](const std::string& message) {
         if (error)
             *error = message;
         return false;
     };
+    if (j.contains("support_speed")) {
+        const auto& settings = j["support_speed"];
+        if (!settings.is_object())
+            return fail("DynaPin support_speed must be an object");
+        if (settings.contains("layers")) {
+            if (!settings["layers"].is_number_integer() || settings["layers"].get<double>() < 0. ||
+                settings["layers"].get<double>() > double(std::numeric_limits<int>::max()))
+                return fail("DynaPin support_speed.layers must be a non-negative integer");
+            config.support_speed.layers = settings["layers"].get<int>();
+        }
+        for (const auto& entry : {std::pair{"min_x_distance", &config.support_speed.min_x_distance},
+                                  std::pair{"max_x_speed", &config.support_speed.max_x_speed}}) {
+            if (settings.contains(entry.first)) {
+                if (!settings[entry.first].is_number())
+                    return fail(std::string("DynaPin support_speed.") + entry.first + " must be a number");
+                *entry.second = settings[entry.first].get<double>();
+            }
+            if (!std::isfinite(*entry.second) || *entry.second < 0.)
+                return fail(std::string("DynaPin support_speed.") + entry.first + " must be finite and non-negative");
+        }
+    }
     const nlohmann::json pull = j.value("pull_gcode", nlohmann::json::object());
     if (!pull.is_object() || !pull.contains("type") || !pull["type"].is_string() || !pull.contains("normal") ||
         !pull["normal"].is_object() || !pull.contains("alternating") || !pull["alternating"].is_object() || !pull.contains("reverted") ||
@@ -669,7 +910,9 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
     const auto valid_x_front = [&max_x_bed](double x_front) { return std::isfinite(x_front) && x_front < *max_x_bed; };
     if (!valid_x_front(config.pull_gcode.normal.x_front) || !valid_x_front(config.pull_gcode.reverted.x_front) ||
         !valid_x_front(config.pull_gcode.alternating.normal.x_front) || !valid_x_front(config.pull_gcode.alternating.reverted.x_front) ||
-        config.blocker_width_y <= 0. || config.row_pitch_z == 0. || config.col_pitch_y == 0.) {
+        config.blocker_width_y <= 0. || config.row_pitch_z == 0. || config.col_pitch_y == 0. ||
+        !std::isfinite(config.landing_edge_inset_y) || config.landing_edge_inset_y < 0. ||
+        2. * config.landing_edge_inset_y >= config.blocker_width_y) {
         if (error)
             *error = "DynaPin config requires valid pull_gcode x_front values and grid/support_exclusion dimensions";
         return false;
@@ -730,6 +973,7 @@ static VirtualSupportSurface surface_for_pin_shift(const Config& config, const P
     VirtualSupportSurface surface;
     surface.pin         = pin;
     surface.print_z     = blocker_z_range(config, pin).z_max;
+    surface.edge_inset_y = config.landing_edge_inset_y;
     surface.poly.points = {Point(scale_(min_x) - shift.x(), scale_(min_y) - shift.y()),
                            Point(scale_(max_x) - shift.x(), scale_(min_y) - shift.y()),
                            Point(scale_(max_x) - shift.x(), scale_(max_y) - shift.y()),

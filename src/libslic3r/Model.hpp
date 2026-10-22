@@ -373,6 +373,9 @@ public:
     LayerHeightProfile      layer_height_profile;
     // Whether or not this object is printable
     bool                    printable { true };
+    // Whether this object is automatically moved onto the build plate after transformations.
+    // Auto Drop is shared by all instances of this object.
+    bool auto_drop{true};
 
     // This vector holds position of selected support points for SLA. The data are
     // saved in mesh coordinates to allow using them for several instances.
@@ -679,11 +682,9 @@ private:
         Internal::StaticSerializationWrapper<ModelConfigObject const> config_wrapper(config);
         Internal::StaticSerializationWrapper<LayerHeightProfile const> layer_heigth_profile_wrapper(layer_height_profile);
         ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
-            sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation, brim_points,
-            m_bounding_box_approx, m_bounding_box_approx_valid, 
-            m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
-            m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id);
+           sla_support_points, sla_points_status, sla_drain_holes, printable, auto_drop, origin_translation, brim_points,
+           m_bounding_box_approx, m_bounding_box_approx_valid, m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
+           m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid, cut_connectors, cut_id);
     }
     template<class Archive> void load(Archive& ar) {
         ar(cereal::base_class<ObjectBase>(this));
@@ -692,11 +693,9 @@ private:
         // BBS: add backup, check modify
         SaveObjectGaurd gaurd(*this);
         ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
-            sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation, brim_points,
-            m_bounding_box_approx, m_bounding_box_approx_valid, 
-            m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
-            m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id);
+           sla_support_points, sla_points_status, sla_drain_holes, printable, auto_drop, origin_translation, brim_points,
+           m_bounding_box_approx, m_bounding_box_approx_valid, m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
+           m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid, cut_connectors, cut_id);
         std::vector<ObjectID> volume_ids2;
         std::transform(volumes.begin(), volumes.end(), std::back_inserter(volume_ids2), std::mem_fn(&ObjectBase::id));
         if (volume_ids != volume_ids2)

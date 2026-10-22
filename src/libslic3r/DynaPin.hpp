@@ -90,6 +90,13 @@ struct PullConfig
     PullMoveConfig        reverted;
 };
 
+struct SupportSpeedConfig
+{
+    int    layers         = 3;
+    double min_x_distance = 5.; // mm per extrusion segment
+    double max_x_speed    = 0.; // mm/s; 0 uses initial_layer_speed
+};
+
 struct Config
 {
     int            row_count        = 0;
@@ -102,7 +109,9 @@ struct Config
     double         col_pitch_y      = 0.;
     double         blocker_width_y  = 0.;
     double         blocker_height_z = 0.;
+    double         landing_edge_inset_y = 0.;
     PullConfig     pull_gcode;
+    SupportSpeedConfig support_speed;
 };
 
 struct BlockerZRange
@@ -142,6 +151,7 @@ struct VirtualSupportSurface
     Pin     pin;          // ピン識別子。着地後の枝とG-code出力を対応付ける。
     Polygon poly;         // ピン上面の XY 形状（object-local 座標）
     double  print_z = 0.; // ピン上面の Z 高さ (mm)
+    double  edge_inset_y = 0.; // 着地面の外縁余白。隣接ピンとの共有境界には適用しない。
 };
 
 struct LandingLayer
@@ -151,10 +161,30 @@ struct LandingLayer
     Polygons polygons;
 };
 
+struct LandingLayerAdjustment
+{
+    size_t                    source;
+    std::vector<LandingLayer> layers;
+};
+
+// Replace only the first landing footprint, keeping its upper Z fixed. The
+// replacement starts on the pin and respects the support layer height limits.
+std::vector<LandingLayerAdjustment> align_landing_layers(const std::vector<LandingLayer>&          layers,
+                                                         const std::vector<VirtualSupportSurface>& surfaces,
+                                                         double                                    min_height,
+                                                         double                                    max_height);
+
 // Result indices match layers; coincident Z slabs count as a single layer.
 std::vector<Polygons> landing_regions(const std::vector<LandingLayer>&          layers,
                                       const std::vector<VirtualSupportSurface>& surfaces,
                                       size_t                                    layer_count);
+// Count support layers above each actual landing footprint, excluding the base itself.
+std::vector<Polygons> stabilization_regions(const std::vector<LandingLayer>& layers, const std::vector<Polygons>& bases, size_t layer_count);
+// First-layer footprints expanded only within the corresponding pin surface.
+std::vector<LandingLayer> landing_base_layers(const std::vector<LandingLayer>&          layers,
+                                              const std::vector<VirtualSupportSurface>& surfaces,
+                                              double                                    expansion);
+Polygons                  landing_printable_region(const PrintObject& object);
 void                  mark_landing_paths(ExtrusionEntityCollection& collection, const Polygons& regions);
 
 struct TreePinLanding

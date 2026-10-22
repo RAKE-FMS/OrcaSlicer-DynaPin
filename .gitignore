@@ -52,3 +52,4 @@ models/
 __pycache__/
 old-models/
 outputs/
+verification-models/

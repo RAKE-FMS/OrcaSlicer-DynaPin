@@ -6,6 +6,7 @@
 #include "libslic3r/ShortestPath.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/GCode.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/GCode/CoolingBuffer.hpp"
 #include "libslic3r/GCode/FanMover.hpp"
 
@@ -97,10 +98,179 @@ TEST_CASE("DynaPin ignores support beginning far above an unused pin", "[DynaPin
     CHECK(masks.front().empty());
 }
 
+TEST_CASE("DynaPin stabilization starts after each landing and stops after three real layers", "[DynaPin][SupportSpeed]")
+{
+    const Polygon                            left = rectangle(0, 0, 10, 10), right = rectangle(20, 0, 10, 10);
+    const std::vector<DynaPin::LandingLayer> layers{{10., 10.2, {left}},         {10.2, 10.4, {left, right}}, {10.4, 10.6, {left, right}},
+                                                    {10.6, 10.8, {left, right}}, {10.8, 11., {left, right}},  {11., 11.2, {left, right}}};
+    const std::vector<Polygons>              bases{{left}, {right}, {}, {}, {}, {}};
+    const auto                               masks = DynaPin::stabilization_regions(layers, bases, 3);
+    REQUIRE(masks.size() == layers.size());
+    CHECK(masks[0].empty());
+    CHECK(intersection(masks[1], {left}).size() == 1);
+    CHECK(intersection(masks[1], {right}).empty());
+    CHECK(intersection(masks[3], {left}).size() == 1);
+    CHECK(intersection(masks[4], {left}).empty());
+    CHECK(intersection(masks[4], {right}).size() == 1);
+    CHECK(masks[5].empty());
+    const auto disabled = DynaPin::stabilization_regions(layers, bases, 0);
+    CHECK(std::all_of(disabled.begin(), disabled.end(), [](const Polygons& mask) { return mask.empty(); }));
+}
+
+TEST_CASE("DynaPin stabilization stops at gaps and counts coincident Z only once", "[DynaPin][SupportSpeed]")
+{
+    const Polygon                            area = rectangle(0, 0, 10, 10);
+    const std::vector<DynaPin::LandingLayer> layers{{10., 10.2, {area}},  {10.2, 10.4, {area}}, {10.2, 10.4, {area}},
+                                                    {10.4, 10.6, {area}}, {10.6, 10.8, {area}}, {10.8, 11., {area}}};
+    const std::vector<Polygons>              bases{{area}, {}, {}, {}, {}, {}};
+    const auto                               masks = DynaPin::stabilization_regions(layers, bases, 3);
+    CHECK(masks[0].empty());
+    for (size_t i = 1; i <= 4; ++i)
+        CHECK_FALSE(masks[i].empty());
+    CHECK(masks[5].empty());
+    const auto gap = DynaPin::stabilization_regions({{10., 10.2, {area}}, {10.4, 10.6, {area}}}, {{area}, {}}, 3);
+    CHECK(gap[1].empty());
+}
+
+TEST_CASE("DynaPin stabilization never consumes support below the landing top", "[DynaPin][SupportSpeed]")
+{
+    const Polygon                            area = rectangle(0, 0, 10, 10);
+    const std::vector<DynaPin::LandingLayer> layers{{10., 10.1, {area}},  {10., 10.2, {area}},  {10.2, 10.4, {area}},
+                                                    {10.4, 10.6, {area}}, {10.6, 10.8, {area}}, {10.8, 11., {area}}};
+    const auto                               masks = DynaPin::stabilization_regions(layers, {{}, {area}, {}, {}, {}, {}}, 3);
+    CHECK(masks[0].empty());
+    CHECK(masks[1].empty());
+    CHECK_FALSE(masks[2].empty());
+    CHECK_FALSE(masks[3].empty());
+    CHECK_FALSE(masks[4].empty());
+    CHECK(masks[5].empty());
+}
+
+TEST_CASE("DynaPin support speed caps only long X extrusion components", "[DynaPin][SupportSpeed]")
+{
+    const Point origin(0, 0);
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(10., 0.)), 80., 5., 20.) == Catch::Approx(20.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(-10., 0.)), 80., 5., 20.) == Catch::Approx(20.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(0., 10.)), 80., 5., 20.) == Catch::Approx(80.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(4.9, 0.)), 80., 5., 20.) == Catch::Approx(80.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(5., 0.)), 80., 5., 20.) == Catch::Approx(20.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(6., 8.)), 80., 5., 20.) == Catch::Approx(100. / 3.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(10., 0.)), 10., 5., 20.) == Catch::Approx(10.));
+}
+
+TEST_CASE("DynaPin landing layers start on each pin without moving their upper connection", "[DynaPin][LandingZ]")
+{
+    const Polygon                            left  = rectangle(0, 0, 5, 5);
+    const Polygon                            right = rectangle(10, 0, 5, 5);
+    const double                             pin_z = GENERATE(10., 10.05, 10.149, 10.299);
+    const std::vector<DynaPin::LandingLayer> layers{{10.3, 10.6, {left, right}}, {10.6, 10.8, {left, right}}};
+    const auto changes = DynaPin::align_landing_layers(layers, {{{0, 0}, left, pin_z}, {{0, 1}, right, 10.3}}, 0.08, 0.3);
+    REQUIRE(changes.size() == 1);
+    CHECK(changes.front().source == 0);
+    double bottom = pin_z;
+    for (const auto& layer : changes.front().layers) {
+        CHECK(layer.bottom_z == Catch::Approx(bottom));
+        CHECK(layer.print_z - layer.bottom_z >= 0.08 - EPSILON);
+        CHECK(layer.print_z - layer.bottom_z <= 0.3 + EPSILON);
+        CHECK(diff(layer.polygons, {left}).empty());
+        CHECK(intersection(layer.polygons, {right}).empty());
+        bottom = layer.print_z;
+    }
+    CHECK(bottom == Catch::Approx(layers.front().print_z));
+    CHECK(DynaPin::align_landing_layers(layers, {{{0, 0}, left, 1.}}, 0.08, 0.3).empty());
+    CHECK(DynaPin::align_landing_layers(layers, {}, 0.08, 0.3).empty());
+}
+
+TEST_CASE("DynaPin base expansion stays on pins and separates different first heights", "[DynaPin][LandingBase]")
+{
+    const Polygon                            pin   = rectangle(0, 0, 8, 8);
+    const Polygon                            first = rectangle(1, 1, 2, 2);
+    const Polygon                            other = rectangle(5, 1, 2, 2);
+    const std::vector<DynaPin::LandingLayer> layers{{10., 10.2, {first}}, {10., 10.2, {first}}, {10., 10.3, {other}}, {10.3, 10.5, {pin}}};
+    const auto                               bases = DynaPin::landing_base_layers(layers, {{{0, 0}, pin, 10.}}, 2.);
+    REQUIRE(bases.size() == 2);
+    for (const auto& base : bases) {
+        CHECK(base.bottom_z == 10.);
+        CHECK(diff(base.polygons, {pin}).empty());
+    }
+    CHECK(intersection(bases[0].polygons, bases[1].polygons).empty());
+    CHECK(diff({first}, bases[0].polygons).empty());
+    CHECK(diff({other}, bases[1].polygons).empty());
+    const auto unexpanded = DynaPin::landing_base_layers(layers, {{{0, 0}, pin, 10.}}, 0.);
+    REQUIRE(unexpanded.size() == 2);
+    CHECK(area(unexpanded[0].polygons) == Catch::Approx(first.area()));
+    CHECK(DynaPin::landing_base_layers({{10.1, 10.3, {first}}}, {{{0, 0}, pin, 10.}}, 2.).empty());
+}
+
+TEST_CASE("DynaPin base fills a printable island between raster columns", "[DynaPin][LandingBase]")
+{
+    ExtrusionEntityCollection collection;
+    const Flow                flow(0.6, 0.2, 0.4);
+    const Polygon             island = rectangle(0.2, 0., 0.65, 1.5);
+    DynaPin::fill_landing_paths(collection.entities, {island}, flow, 0.45, 0);
+    REQUIRE_FALSE(collection.empty());
+    for (const auto* entity : collection.entities) {
+        CHECK(entity->role() == erSupportMaterial);
+        CHECK(diff_pl(entity->as_polyline(), offset(Polygons{island}, -0.5 * flow.scaled_width() + SCALED_EPSILON)).empty());
+    }
+}
+
+TEST_CASE("DynaPin base insets only exposed edges of contiguous pins", "[DynaPin][LandingBase][PinEdges]")
+{
+    const auto   columns = GENERATE(std::vector<int>{0}, std::vector<int>{0, 1}, std::vector<int>{0, 1, 2}, std::vector<int>{0, 2});
+    const double shift   = GENERATE(0., -31.25);
+    std::vector<DynaPin::VirtualSupportSurface> surfaces;
+    std::vector<DynaPin::LandingLayer>          layers;
+    Polygons                                    expected;
+    for (const int column : columns) {
+        const Polygon pin = rectangle(0., shift + 12.4 * column, 20., 12.4);
+        surfaces.push_back({{0, column}, pin, 10., 1.2});
+        layers.push_back({10., 10.2, {pin}});
+        const bool left  = std::find(columns.begin(), columns.end(), column - 1) == columns.end();
+        const bool right = std::find(columns.begin(), columns.end(), column + 1) == columns.end();
+        expected.push_back(rectangle(0., shift + 12.4 * column + (left ? 1.2 : 0.), 20., 12.4 - (left ? 1.2 : 0.) - (right ? 1.2 : 0.)));
+    }
+    const auto bases = DynaPin::landing_base_layers(layers, surfaces, 100.);
+    REQUIRE(bases.size() == 1);
+    CHECK(diff(bases.front().polygons, expected).empty());
+    CHECK(diff(expected, bases.front().polygons).empty());
+    CHECK(union_ex(bases.front().polygons).size() == (columns.back() == 2 && columns.size() == 2 ? 2 : 1));
+    const Flow                flow(0.6, 0.2, 0.4);
+    ExtrusionEntityCollection paths;
+    DynaPin::fill_landing_paths(paths.entities, bases.front().polygons, flow, 0.9, 0);
+    REQUIRE_FALSE(paths.empty());
+    const auto safe = offset(union_(expected), -0.5 * flow.scaled_width() + SCALED_EPSILON);
+    for (const auto* path : paths.entities)
+        CHECK(diff_pl(path->as_polyline(), safe).empty());
+    for (auto& surface : surfaces)
+        surface.edge_inset_y = 0.;
+    const auto legacy = DynaPin::landing_base_layers(layers, surfaces, 100.);
+    Polygons   nominal;
+    for (const auto& surface : surfaces)
+        nominal.push_back(surface.poly);
+    CHECK(diff(nominal, legacy.front().polygons).empty());
+}
+
+TEST_CASE("DynaPin base expands across shared pin edges but not different heights", "[DynaPin][LandingBase][PinEdges]")
+{
+    std::vector<DynaPin::VirtualSupportSurface> surfaces{{{0, 0}, rectangle(0., 0., 20., 12.4), 10., 1.2},
+                                                         {{0, 1}, rectangle(0., 12.4, 20., 12.4), 10., 1.2}};
+    const std::vector<DynaPin::LandingLayer>    layers{{10., 10.2, {rectangle(5., 11.5, 1., 0.5)}}};
+    const auto                                  joined = DynaPin::landing_base_layers(layers, surfaces, 2.);
+    REQUIRE(joined.size() == 1);
+    CHECK(unscale_(get_extents(joined.front().polygons).max.y()) > 12.4);
+    surfaces.back().pin.row = 1;
+    surfaces.back().print_z = 17.4;
+    const auto separated    = DynaPin::landing_base_layers(layers, surfaces, 2.);
+    REQUIRE(separated.size() == 1);
+    CHECK(unscale_(get_extents(separated.front().polygons).max.y()) == Catch::Approx(11.2));
+}
+
 TEST_CASE("DynaPin landing paths preserve traversal and extrusion volume", "[DynaPin][Cooling]")
 {
     const Polygon region = rectangle(2, -1, 2, 2);
-    ExtrusionPath original(erSupportMaterialInterface, 0.08, 0.4, 0.2);
+    const auto    role   = GENERATE(erSupportMaterial, erSupportMaterialInterface);
+    ExtrusionPath original(role, 0.08, 0.4, 0.2);
     original.polyline = Polyline(Points{Point(scale_(0), scale_(0)), Point(scale_(6), scale_(0)), Point(scale_(0), scale_(0))});
     ExtrusionEntityCollection collection;
     collection.append(original);
@@ -116,7 +286,7 @@ TEST_CASE("DynaPin landing paths preserve traversal and extrusion volume", "[Dyn
         const auto* path = &part;
         CHECK(path->first_point() == previous);
         previous = path->last_point();
-        CHECK(path->role() == erSupportMaterialInterface);
+        CHECK(path->role() == role);
         if (path->is_dynapin_landing)
             landing_length += unscale<double>(path->length());
         const ExtrusionPath copied(path->polyline, *path);
@@ -124,6 +294,32 @@ TEST_CASE("DynaPin landing paths preserve traversal and extrusion volume", "[Dyn
     }
     CHECK(previous == original.last_point());
     CHECK(landing_length == Catch::Approx(4.0));
+}
+
+TEST_CASE("DynaPin mixed support speeds survive cooling and fan look-ahead", "[DynaPin][SupportSpeed][Cooling]")
+{
+    const bool  slowdown = GENERATE(false, true);
+    GCode       generator;
+    PrintConfig config;
+    config.slow_down_for_layer_cooling.values = {slowdown};
+    config.slow_down_layer_time.values        = {4.};
+    config.fan_min_speed.values               = {40};
+    config.fan_max_speed.values               = {40};
+    generator.apply_print_config(config);
+    generator.writer().set_extruders({0});
+    CoolingBuffer     cooling(generator);
+    const std::string source = "G1 F4200;_EXTRUDE_SET_SPEED\nG1 F1200;_EXTRUDE_SET_SPEED\nG1 X100 E1\n"
+                               "G1 F4200;_EXTRUDE_SET_SPEED\nG1 Y10 E1\n"
+                               "G1 F1200;_EXTRUDE_SET_SPEED\nG1 X200 E1\n;_EXTRUDE_END\n";
+    const std::string cooled = cooling.process_layer(std::string(source), 10, true);
+    FanMover          mover(generator.writer(), 1.f, true, false, false, 0.f);
+    const std::string output = mover.process_gcode(cooled, true);
+    INFO(output);
+    GCodeReader reader;
+    reader.parse_buffer(output, [&](GCodeReader& state, const GCodeReader::GCodeLine& line) {
+        if (line.cmd_is("G1") && line.has_y())
+            CHECK(line.new_F(state) == Catch::Approx(4200.));
+    });
 }
 
 TEST_CASE("DynaPin cooling overrides role fans and survives fan look-ahead", "[DynaPin][Cooling]")
@@ -304,4 +500,47 @@ TEST_CASE("DynaPin retains modulated flow along column connectors", "[DynaPin][L
     }
     CHECK(previous == points.back());
     CHECK(reduced_found);
+}
+
+TEST_CASE("DynaPin layer landing schedule interleaves models in machine X order", "[DynaPin][LandingOrder]")
+{
+    std::vector<DynaPin::LandingExtrusion> input;
+    double                                 volume = 0.;
+    for (size_t source = 0; source < 2; ++source) {
+        ExtrusionEntityCollection collection;
+        const Flow                flow(source == 0 ? 0.44 : 0.6, source == 0 ? 0.2 : 0.3, 0.4);
+        DynaPin::fill_landing_paths(collection.entities, {rectangle(0, 0, 4, 4)}, flow, 0.8, 0);
+        ExtrusionPaths paths;
+        DynaPin::collect_landing_paths(collection, paths);
+        for (auto& path : paths) {
+            path.polyline.translate(Point::new_scale(source == 0 ? 1. : 0., source == 0 ? 10. : 0.));
+            volume += path.total_volume();
+            input.push_back({source, std::move(path)});
+        }
+    }
+    // An ordinary path must never enter the landing pass.
+    ExtrusionEntityCollection ordinary;
+    ExtrusionPath             ordinary_path(erSupportMaterial, 0.1, 0.5, 0.2);
+    ordinary_path.polyline = Polyline(Points{Point::new_scale(0., 0.), Point::new_scale(4., 0.)});
+    ordinary.append(ordinary_path);
+    ExtrusionPaths collected;
+    DynaPin::collect_landing_paths(ordinary, collected);
+    CHECK(collected.empty());
+    const auto ordered = DynaPin::schedule_landing_paths(std::move(input));
+    REQUIRE_FALSE(ordered.empty());
+    coord_t previous_x = std::numeric_limits<coord_t>::lowest();
+    size_t  changes = 0, previous_source = ordered.front().source;
+    double  scheduled_volume = 0.;
+    for (const auto& item : ordered) {
+        CHECK(item.path.first_point().x() >= previous_x);
+        CHECK(item.path.last_point().x() >= item.path.first_point().x());
+        previous_x = item.path.first_point().x();
+        CHECK(item.path.is_dynapin_landing);
+        CHECK(item.path.height == Catch::Approx(item.source == 0 ? 0.2 : 0.3));
+        scheduled_volume += item.path.total_volume();
+        changes += previous_source != item.source;
+        previous_source = item.source;
+    }
+    CHECK(changes > 2);
+    CHECK(scheduled_volume == Catch::Approx(volume));
 }

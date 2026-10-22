@@ -577,6 +577,22 @@ void Selection::set_printable(bool printable)
     wxGetApp().plater()->update();
 }
 
+bool Selection::get_auto_drop() const
+{
+    if (!m_valid || is_wipe_tower() || m_model == nullptr)
+        return true;
+
+    for (const auto& object_and_instances : m_cache.content) {
+        const int object_idx = object_and_instances.first;
+        if (object_idx < 0 || object_idx >= int(m_model->objects.size()))
+            continue;
+        if (!m_model->objects[object_idx]->auto_drop)
+            return false;
+    }
+
+    return true;
+}
+
 void Selection::add_all()
 {
     if (!m_valid)
@@ -2981,21 +2997,27 @@ void Selection::synchronize_unselected_volumes()
 
 void Selection::ensure_on_bed()
 {
+    if (m_model == nullptr)
+        return;
+
     typedef std::map<std::pair<int, int>, double> InstancesToZMap;
     InstancesToZMap instances_min_z;
 
     for (size_t i = 0; i < m_volumes->size(); ++i) {
         GLVolume* volume = (*m_volumes)[i];
-        if (!volume->is_wipe_tower && !volume->is_modifier &&
-            std::find(m_cache.sinking_volumes.begin(), m_cache.sinking_volumes.end(), i) == m_cache.sinking_volumes.end()) {
-            const double min_z = volume->transformed_convex_hull_bounding_box().min.z();
-            std::pair<int, int> instance = std::make_pair(volume->object_idx(), volume->instance_idx());
-            InstancesToZMap::iterator it = instances_min_z.find(instance);
-            if (it == instances_min_z.end())
-                it = instances_min_z.insert(InstancesToZMap::value_type(instance, DBL_MAX)).first;
-
-            it->second = std::min(it->second, min_z);
+        const int object_idx = volume->object_idx();
+        if (volume->is_wipe_tower || volume->is_modifier || object_idx < 0 || object_idx >= int(m_model->objects.size()) ||
+            !m_model->objects[object_idx]->auto_drop ||
+            std::find(m_cache.sinking_volumes.begin(), m_cache.sinking_volumes.end(), i) != m_cache.sinking_volumes.end()) {
+            continue;
         }
+        const double              min_z    = volume->transformed_convex_hull_bounding_box().min.z();
+        std::pair<int, int>       instance = std::make_pair(volume->object_idx(), volume->instance_idx());
+        InstancesToZMap::iterator it       = instances_min_z.find(instance);
+        if (it == instances_min_z.end())
+            it = instances_min_z.insert(InstancesToZMap::value_type(instance, DBL_MAX)).first;
+
+        it->second = std::min(it->second, min_z);
     }
 
     for (GLVolume* volume : *m_volumes) {

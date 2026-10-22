@@ -19,6 +19,7 @@
 #include <set>
 #include <fstream>
 #include <limits>
+#include <map>
 
 using namespace Slic3r::Test;
 using namespace Slic3r;
@@ -107,24 +108,37 @@ bool support_coverage_intersects_below_z(const PrintObject &object, const Polygo
     return false;
 }
 
-bool support_coverage_intersects_z_range(const PrintObject &object, const Polygon &region, double z_min, double z_max)
+bool support_coverage_intersects_z_range(const PrintObject& object, const Polygon& region, double z_min, double z_max)
 {
-    for (const SupportLayer *layer : object.support_layers()) {
-        if (layer->bottom_z() > z_max + EPSILON || layer->print_z + EPSILON < z_min)
+    for (const SupportLayer* layer : object.support_layers()) {
+        if (layer->print_z <= z_min + EPSILON)
             continue;
-
-        Polygons covered;
-        layer->support_fills.polygons_covered_by_width(covered, float(SCALED_EPSILON));
-        if (!intersection(covered, { region }).empty())
-            return true;
+        // Touching the pin top is allowed. Inspect each extrusion's thickness,
+        // since ordinary and landing regions may share a Z with different heights.
+        auto intersects = [&](const ExtrusionPath& path) {
+            return layer->print_z - path.height < z_max - EPSILON && !intersection(path.polygons_covered_by_width(), {region}).empty();
+        };
+        const auto flat = layer->support_fills.flatten();
+        for (const auto* entity : flat.entities) {
+            if (const auto* path = dynamic_cast<const ExtrusionPath*>(entity)) {
+                if (intersects(*path))
+                    return true;
+            } else if (const auto* multipath = dynamic_cast<const ExtrusionMultiPath*>(entity)) {
+                if (std::any_of(multipath->paths.begin(), multipath->paths.end(), intersects))
+                    return true;
+            } else if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(entity)) {
+                if (std::any_of(loop->paths.begin(), loop->paths.end(), intersects))
+                    return true;
+            }
+        }
     }
     return false;
 }
 
-double maximum_support_coverage_area_in_z_range(const PrintObject &object, const Polygon &region, double z_min, double z_max)
+double maximum_support_coverage_area_in_z_range(const PrintObject& object, const Polygon& region, double z_min, double z_max)
 {
     double maximum_area = 0.;
-    for (const SupportLayer *layer : object.support_layers()) {
+    for (const SupportLayer* layer : object.support_layers()) {
         if (layer->bottom_z() > z_max + EPSILON || layer->print_z + EPSILON < z_min)
             continue;
 
@@ -181,8 +195,13 @@ SCENARIO("SupportMaterial: DynaPin keeps normal interfaces without a synthetic p
         CHECK(support_interface_above_z(print_object, 44.3));
     }
 
-    THEN("The first real support layer above the pin top has a regular interface") {
-        CHECK(support_interface_at_z(print_object, 44.7));
+    THEN("The pin landing is a base rather than an interface")
+    {
+        for (const auto* layer : print_object.support_layers())
+            if (!layer->dynapin_landing_regions.empty()) {
+                CHECK(layer->print_z - layer->height == Catch::Approx(44.3).margin(EPSILON));
+                CHECK_FALSE(support_interface_at_z(print_object, layer->print_z));
+            }
     }
 
     THEN("The layer spanning the pin top is still generated") {
@@ -205,12 +224,197 @@ SCENARIO("SupportMaterial: DynaPin keeps normal interfaces without a synthetic p
     }
 }
 
+TEST_CASE("DynaPin support starts on pins at different heights", "[DynaPin][SupportMaterial][LandingZ]")
+{
+    ResourcesDirGuard resources_guard(test_resources_dir());
+    DataDirGuard      data_dir_guard;
+    const double      layer_height = GENERATE(0.2, 0.3);
+    const bool        independent  = GENERATE(false, true);
+    const int         depth        = GENERATE(0, 2);
+    const bool        variable     = GENERATE(false, true);
+    Print             print;
+    Model             model;
+    TriangleMesh      mesh = Test::mesh(TestMesh::cube_20x20x20);
+    TriangleMesh      top  = Test::mesh(TestMesh::cube_20x20x20);
+    top.scale(Vec3f(10.f, 5.f, 0.1f));
+    top.translate(0.f, 0.f, 50.f);
+    mesh.merge(top);
+    auto* object = model.add_object();
+    object->add_volume(std::move(mesh));
+    object->add_instance();
+    object->ensure_on_bed();
+    if (variable)
+        object->layer_height_profile.set({0., 0.2, 10., 0.2, 16., 0.3, 25., 0.3, 30., 0.16, 52., 0.16});
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_support", true},
+        {"support_type", "normal(auto)"},
+        {"enable_dynapin_support_optimization", true},
+        {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+        {"dynapin_debug_stage", 2},
+        {"dynapin_selected_pins", "1,0 2,1 3,2 5,3"},
+        {"layer_height", layer_height},
+        {"independent_support_layer_height", independent},
+        {"support_interface_bottom_layers", depth},
+    });
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    const auto& printed = *print.objects().front();
+    for (const auto& surface : DynaPin::pin_top_surfaces_for_object(printed)) {
+        CAPTURE(surface.pin.row, surface.pin.col, surface.print_z, layer_height, independent, depth, variable);
+        std::map<double, double> bottoms;
+        for (const SupportLayer* layer : printed.support_layers()) {
+            if (layer->print_z <= surface.print_z + EPSILON || layer->print_z > surface.print_z + 1.)
+                continue;
+            auto check = [&](const ExtrusionPath& path) {
+                if (!intersection_pl(path.polyline, {surface.poly}).empty()) {
+                    const double bottom = layer->print_z - path.height;
+                    CHECK(bottom >= surface.print_z - EPSILON);
+                    CHECK(path.height <= printed.slicing_parameters().max_suport_layer_height + EPSILON);
+                    auto [it, inserted] = bottoms.emplace(layer->print_z, bottom);
+                    if (!inserted)
+                        CHECK(it->second == Catch::Approx(bottom).margin(EPSILON));
+                }
+            };
+            const auto flat = layer->support_fills.flatten();
+            for (const auto* entity : flat.entities) {
+                if (const auto* path = dynamic_cast<const ExtrusionPath*>(entity))
+                    check(*path);
+                else if (const auto* multipath = dynamic_cast<const ExtrusionMultiPath*>(entity))
+                    for (const auto& path : multipath->paths)
+                        check(path);
+                else if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(entity))
+                    for (const auto& path : loop->paths)
+                        check(path);
+            }
+        }
+        REQUIRE_FALSE(bottoms.empty());
+        double previous = surface.print_z;
+        for (const auto& [top_z, bottom_z] : bottoms) {
+            CHECK(bottom_z == Catch::Approx(previous).margin(EPSILON));
+            previous = top_z;
+        }
+    }
+}
+
+TEST_CASE("DynaPin base follows first-layer settings and object overrides", "[DynaPin][LandingBase]")
+{
+    ResourcesDirGuard resources_guard(test_resources_dir());
+    DataDirGuard      data_dir_guard;
+    const std::string style   = GENERATE("default", "tree_slim", "tree_strong", "tree_hybrid");
+    const auto [top_z, top_y] = GENERATE(std::pair{22.7f, 11.5f}, std::pair{28.f, 11.5f}, std::pair{28.f, 14.f});
+    Print        print;
+    Model        model;
+    TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
+    mesh.scale(Vec3f(1.f, 1.f, 0.25f));
+    mesh.translate(30.f, 30.f, 0.f);
+    TriangleMesh top = Test::mesh(TestMesh::cube_20x20x20);
+    top.scale(Vec3f(0.1f, 0.1f, 0.1f));
+    top.translate(111.5f, top_y, top_z);
+    mesh.merge(top);
+    auto* object = model.add_object();
+    object->add_volume(std::move(mesh));
+    object->add_instance();
+    object->ensure_on_bed();
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"enable_support", true},
+        {"enable_dynapin_support_optimization", true},
+        {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+        {"dynapin_selected_pins", "2,0"},
+        {"dynapin_debug_stage", 2},
+        {"support_type", style == "default" ? "normal(auto)" : "tree(auto)"},
+        {"support_style", style},
+        {"support_interface_bottom_layers", 0},
+        {"raft_first_layer_expansion", 0.},
+        {"raft_first_layer_density", 90.},
+        {"initial_layer_line_width", "0.5"},
+    });
+    print.auto_assign_extruders(object);
+    struct Metrics
+    {
+        double area   = 0.;
+        double volume = 0.;
+        size_t layers = 0;
+    };
+    auto slice = [&](double width) {
+        print.apply(model, config);
+        print.set_status_silent();
+        print.process();
+        Metrics     metrics;
+        const auto& printed  = *print.objects().front();
+        const auto  surfaces = DynaPin::pin_top_surfaces_for_object(printed);
+        REQUIRE(surfaces.size() == 1);
+        CHECK(surfaces.front().edge_inset_y == Catch::Approx(1.2));
+        for (const auto* layer : printed.support_layers()) {
+            bool marked = false;
+            auto check  = [&](const ExtrusionPath& path) {
+                if (std::abs(layer->print_z - path.height - surfaces.front().print_z) < EPSILON) {
+                    auto bounds = get_extents(surfaces.front().poly);
+                    bounds.min.y() += scale_(surfaces.front().edge_inset_y);
+                    bounds.max.y() -= scale_(surfaces.front().edge_inset_y);
+                    const auto on_pin = intersection_pl(path.polyline, Polygons{surfaces.front().poly});
+                    CHECK(diff_pl(on_pin, Polygons{bounds.polygon()}).empty());
+                }
+                if (!path.is_dynapin_landing)
+                    return;
+                marked = true;
+                CHECK(path.role() == erSupportMaterial);
+                CHECK(path.width == Catch::Approx(width));
+                CHECK(layer->print_z - path.height == Catch::Approx(surfaces.front().print_z).margin(EPSILON));
+                const auto flow = support_material_1st_layer_flow(&printed, path.height);
+                CHECK(path.mm3_per_mm == Catch::Approx(flow.mm3_per_mm()));
+                // The deposited bead has a half-width radius. Testing the
+                // eroded pin avoids the conservative square joins used by
+                // polygons_covered_by_width at angled raster connectors.
+                auto bounds = get_extents(surfaces.front().poly);
+                bounds.min.y() += scale_(surfaces.front().edge_inset_y);
+                bounds.max.y() -= scale_(surfaces.front().edge_inset_y);
+                const auto safe = offset(Polygons{bounds.polygon()}, -0.5 * scale_(path.width) + SCALED_EPSILON);
+                CHECK(diff_pl(path.polyline, safe).empty());
+                metrics.volume += path.total_volume();
+            };
+            const auto flat = layer->support_fills.flatten();
+            for (const auto* entity : flat.entities) {
+                if (const auto* path = dynamic_cast<const ExtrusionPath*>(entity))
+                    check(*path);
+                else if (const auto* multi = dynamic_cast<const ExtrusionMultiPath*>(entity))
+                    for (const auto& path : multi->paths)
+                        check(path);
+                else if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(entity))
+                    for (const auto& path : loop->paths)
+                        check(path);
+            }
+            metrics.layers += marked;
+            metrics.area += area(layer->dynapin_landing_regions);
+        }
+        CHECK(metrics.layers == 1);
+        return metrics;
+    };
+    CAPTURE(style, top_z, top_y);
+    const auto dense = slice(0.5);
+    config.set_deserialize_strict({{"raft_first_layer_density", 45.}});
+    const auto sparse = slice(0.5);
+    CHECK(sparse.area == Catch::Approx(dense.area));
+    CHECK(sparse.volume < dense.volume);
+    config.set_deserialize_strict({{"raft_first_layer_expansion", 2.}, {"initial_layer_line_width", "0.6"}});
+    const auto expanded = slice(0.6);
+    CHECK(expanded.area > sparse.area);
+    object->config.set_key_value("raft_first_layer_expansion", new ConfigOptionFloat(0.));
+    object->config.set_key_value("raft_first_layer_density", new ConfigOptionPercent(90.));
+    const auto overridden = slice(0.6);
+    CHECK(overridden.area == Catch::Approx(sparse.area));
+    CHECK(overridden.volume > sparse.volume);
+}
+
 SCENARIO("SupportMaterial: DynaPin blocks stacked pin spans", "[SupportMaterial][DynaPin]")
 {
     ResourcesDirGuard resources_guard(test_resources_dir());
     DataDirGuard      data_dir_guard;
 
-    TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
+    TriangleMesh mesh          = Test::mesh(TestMesh::cube_20x20x20);
     TriangleMesh floating_slab = Test::mesh(TestMesh::cube_20x20x20);
     floating_slab.scale(Vec3f(10.f, 5.f, 0.1f));
     floating_slab.translate(0.f, 0.f, 60.f);
@@ -549,7 +753,7 @@ SCENARIO("SupportMaterial: Checking bridge speed", "[SupportMaterial]")
 
 #endif
 
-TEST_CASE("DynaPin landing interfaces follow bottom depth and reslicing", "[DynaPin][SupportMaterial][Cooling]")
+TEST_CASE("DynaPin landing bases use first-layer settings independently of interface depth", "[DynaPin][SupportMaterial][Cooling]")
 {
     const char*       pattern = GENERATE("rectilinear", "concentric", "grid", "rectilinear_interlaced");
     ResourcesDirGuard resources_guard(test_resources_dir());
@@ -610,7 +814,8 @@ TEST_CASE("DynaPin landing interfaces follow bottom depth and reslicing", "[Dyna
             const auto flat        = layer->support_fills.flatten();
             auto       check_path  = [&](const ExtrusionPath& path) {
                 if (path.is_dynapin_landing) {
-                    CHECK(path.role() == erSupportMaterialInterface);
+                    CHECK(path.role() == erSupportMaterial);
+                    CHECK(path.width == Catch::Approx(support_material_1st_layer_flow(print.objects().front(), path.height).width()));
                     has_landing = true;
                 }
             };
@@ -634,7 +839,7 @@ TEST_CASE("DynaPin landing interfaces follow bottom depth and reslicing", "[Dyna
         print.apply(model, config);
         print.set_status_silent();
         print.process();
-        CHECK(landing_layers() == (bottom_layers < 0 ? 2 : bottom_layers));
+        CHECK(landing_layers() == 1);
     }
     // Rotating/translating the model must not rotate the machine-axis raster.
     const Vec3d original_offset = object->instances.front()->get_offset();
@@ -643,23 +848,29 @@ TEST_CASE("DynaPin landing interfaces follow bottom depth and reslicing", "[Dyna
     object->instances.front()->set_offset(Vec3d(150., 0., 0.));
     print.apply(model, config);
     print.process();
-    CHECK(landing_layers() == 2);
+    CHECK(landing_layers() == 1);
     object->instances.front()->set_rotation(original_rotation);
     object->instances.front()->set_offset(original_offset);
-    // Object overrides take precedence over the selected process preset.
+    // Interface depth overrides must not disable or multiply the landing base.
     config.set_deserialize_strict({{"support_interface_bottom_layers", 0}});
     object->config.set_key_value("support_interface_bottom_layers", new ConfigOptionInt(3));
     print.apply(model, config);
     print.process();
-    CHECK(landing_layers() == 3);
+    CHECK(landing_layers() == 1);
     object->config.erase("support_interface_bottom_layers");
-    // Bottom depth remains meaningful even when ordinary top interfaces are disabled.
-    config.set_deserialize_strict({{"support_interface_top_layers", 0}, {"support_interface_bottom_layers", 3}});
+    // A base is still printed when all ordinary interfaces are disabled.
+    config.set_deserialize_strict({{"support_interface_top_layers", 0}, {"support_interface_bottom_layers", 0}});
     print.apply(model, config);
     print.process();
-    CHECK(landing_layers() == 3);
+    CHECK(landing_layers() == 1);
     config.set_deserialize_strict({
         {"support_material_interface_fan_speed", "100"},
+        {"initial_layer_speed", 17.},
+        {"support_filament", 2},
+        {"support_interface_filament", 1},
+        {"filament_diameter", "1.75,1.75"},
+        {"filament_colour", "#FFFFFF;#FF0000"},
+        {"flush_volumes_matrix", "0,0,0,0"},
         {"fan_speedup_time", 0.5},
         {"fan_kickstart", 0.3},
     });
@@ -677,12 +888,17 @@ TEST_CASE("DynaPin landing interfaces follow bottom depth and reslicing", "[Dyna
     bool             protected_region = false;
     bool             ordinary_cooling = false;
     int              fan              = -1;
+    int              active_tool      = 0;
     std::set<double> protected_layers;
     double           previous_landing_z = -1.;
     double           previous_landing_x = -1.e20;
     GCodeReader      reader;
     reader.apply_config(export_print.config());
     reader.parse_buffer(output, [&](GCodeReader& state, const GCodeReader::GCodeLine& line) {
+        if (line.cmd_is("T0"))
+            active_tool = 0;
+        if (line.cmd_is("T1"))
+            active_tool = 1;
         if (line.raw() == DynaPin::LANDING_FAN_START)
             protected_region = true;
         else if (line.raw() == DynaPin::LANDING_FAN_END)
@@ -693,6 +909,8 @@ TEST_CASE("DynaPin landing interfaces follow bottom depth and reslicing", "[Dyna
         if (line.extruding(state)) {
             if (protected_region) {
                 CHECK(fan == 0);
+                CHECK(active_tool == 1);
+                CHECK(line.new_F(state) <= 17. * 60. + 0.01);
                 if (std::abs(previous_landing_z - state.z()) > EPSILON) {
                     previous_landing_z = state.z();
                     previous_landing_x = -1.e20;
@@ -706,7 +924,7 @@ TEST_CASE("DynaPin landing interfaces follow bottom depth and reslicing", "[Dyna
         }
     });
     CHECK_FALSE(protected_region);
-    CHECK(protected_layers.size() == 3);
+    CHECK(protected_layers.size() == 1);
     CHECK(ordinary_cooling);
     config.set_deserialize_strict(
         {{"support_interface_top_layers", 2}, {"support_interface_bottom_layers", 64}, {"support_interface_filament", 1}});
@@ -716,5 +934,6 @@ TEST_CASE("DynaPin landing interfaces follow bottom depth and reslicing", "[Dyna
     for (const SupportLayer* layer : print.objects().front()->support_layers())
         if (!layer->dynapin_landing_regions.empty())
             last_landing_z = std::max(last_landing_z, layer->print_z);
-    CHECK(last_landing_z > 49.6);
+    CHECK(last_landing_z < 45.);
+    CHECK(support_interface_above_z(*print.objects().front(), 49.6));
 }
