@@ -31,6 +31,110 @@ namespace fs = boost::filesystem;
 
 namespace Slic3r::DynaPin {
 
+static ExtrusionPaths support_paths(const ExtrusionEntityCollection& collection)
+{
+    ExtrusionPaths paths;
+    const auto     flat = collection.flatten();
+    for (const auto* entity : flat.entities) {
+        if (const auto* path = dynamic_cast<const ExtrusionPath*>(entity))
+            paths.push_back(*path);
+        else if (const auto* multi = dynamic_cast<const ExtrusionMultiPath*>(entity))
+            append(paths, multi->paths);
+        else if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(entity))
+            append(paths, loop->paths);
+    }
+    return paths;
+}
+
+bool starts_on_pin(const PrintObject& object)
+{
+    if (!object.print()->config().enable_dynapin_support_optimization.value || effective_debug_stage(*object.print()) < 1)
+        return false;
+    const SupportLayer* first = nullptr;
+    for (const auto* layer : object.support_layers())
+        if (layer->has_extrusions() && (!first || layer->print_z < first->print_z))
+            first = layer;
+    if (!first)
+        return false;
+    for (const auto* layer : object.layers())
+        if (layer->has_extrusions() && layer->print_z < first->print_z - EPSILON)
+            return false;
+    ExtrusionPaths paths;
+    collect_landing_paths(first->support_fills, paths);
+    const auto surfaces = landing_surfaces_for_object(object);
+    for (const auto& path : paths)
+        for (const auto& surface : surfaces)
+            if (std::abs(first->print_z - path.height - surface.print_z) < EPSILON &&
+                surface.poly.contains((path.first_point() + path.last_point()) / 2))
+                return true;
+    return false;
+}
+
+std::vector<SupportExtrusions> normalized_support_paths(const std::vector<PrintObject*>& objects)
+{
+    std::vector<SupportExtrusions> result;
+    using Group = std::map<size_t, ExtrusionEntityCollection>;
+    std::map<std::pair<coord_t, unsigned int>, Group> groups;
+    std::vector<double>                               densities;
+    for (const auto* object : objects) {
+        const auto  tools = object->object_extruders();
+        const Point shift = object->instances().front().shift;
+        for (const auto* layer : object->support_layers()) {
+            const size_t source = result.size();
+            result.push_back({object, layer, {}});
+            densities.push_back(object->config().raft_first_layer_density.value * 0.01);
+            for (auto& path : support_paths(layer->support_fills)) {
+                unsigned int filament = (path.role() == erSupportMaterialInterface || path.role() == erIroning) ?
+                                            object->config().support_interface_filament.value :
+                                            object->config().support_filament.value;
+                if (filament == 0 && tools.size() != 1) {
+                    // Export may inherit the current tool. Keep ambiguous cases
+                    // unchanged so collision checking remains conservative.
+                    path.polyline.translate(shift);
+                    result.back().paths.push_back(std::move(path));
+                    continue;
+                }
+                filament = filament == 0 ? tools.front() : filament - 1;
+                groups[{coord_t(std::llround(layer->print_z / EPSILON)), filament}][source].append(path);
+            }
+        }
+    }
+    for (auto& layer_group : groups) {
+        std::vector<LandingExtrusion> emitted, landing;
+        std::vector<LandingRegion>    regions;
+        size_t                        landing_sources = 0;
+        for (auto& entry : layer_group.second) {
+            const auto& source = result[entry.first];
+            const Point shift  = source.object->instances().front().shift;
+            remove_duplicate_support_paths(entry.second, shift, entry.first, erMixed, emitted);
+            ExtrusionPaths paths;
+            collect_landing_paths(entry.second, paths);
+            if (!paths.empty()) {
+                ++landing_sources;
+                append(regions, landing_extrusion_regions(*source.layer, shift, entry.first));
+            }
+            for (auto& path : paths) {
+                path.polyline.translate(shift);
+                landing.push_back({entry.first, std::move(path)});
+            }
+        }
+        const bool shared = landing_sources > 1;
+        if (shared)
+            for (auto& item : schedule_landing_paths(std::move(landing), false, densities, regions))
+                result[item.source].paths.push_back(std::move(item.path));
+        for (const auto& entry : layer_group.second) {
+            auto& source = result[entry.first];
+            for (auto& path : support_paths(entry.second)) {
+                if (shared && path.is_dynapin_landing)
+                    continue;
+                path.polyline.translate(source.object->instances().front().shift);
+                source.paths.push_back(std::move(path));
+            }
+        }
+    }
+    return result;
+}
+
 std::vector<LandingRegion> landing_extrusion_regions(const SupportLayer& layer, const Point& instance_shift, size_t source)
 {
     std::vector<LandingRegion> result;

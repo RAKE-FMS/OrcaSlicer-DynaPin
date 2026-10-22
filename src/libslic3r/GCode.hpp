@@ -246,7 +246,7 @@ public:
     void            set_layer_count(unsigned int value) { m_layer_count = value; }
     void            apply_print_config(const PrintConfig &print_config);
 
-    std::string     travel_to(const Point& point, ExtrusionRole role, std::string comment, double z = DBL_MAX);
+    std::string     travel_to(const Point& point, ExtrusionRole role, std::string comment, double z = DBL_MAX, double landing_width = 0.);
     bool            needs_retraction(const Polyline& travel, ExtrusionRole role, LiftType& lift_type);
     std::string     retract(bool toolchange = false, bool is_last_retraction = false, LiftType lift_type = LiftType::NormalLift, bool apply_instantly = false, ExtrusionRole role = erNone);
     std::string     unretract() { return m_writer.unlift() + m_writer.unretract(); }
@@ -620,6 +620,7 @@ private:
     std::set<std::string> m_dynapin_pulls_done;
     double m_dynapin_travel_clearance_z = 0.;
     std::optional<DynaPin::Config> m_dynapin_travel_config;
+    bool                             m_last_dynapin_landing = false;
     DynaPin::SupportSpeedConfig      m_dynapin_support_speed;
     std::map<const Layer*, Polygons> m_dynapin_stabilization_regions;
 

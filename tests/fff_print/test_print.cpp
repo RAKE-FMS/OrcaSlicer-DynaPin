@@ -2718,12 +2718,19 @@ TEST_CASE("DynaPin sloped landings generate lower support and pull before extrus
     const double clearance          = DynaPin::pin_travel_clearance_z(print, pin_config, {{1, 0}, {1, 1}});
     size_t       wipes              = 0;
     size_t       hop_checks         = 0;
+    size_t       landing_travel_checks     = 0;
+    size_t       continuous_landing_checks = 0;
     double       nominal_layer_z    = 0.;
+    double       last_extrusion_z          = 0.;
+    bool         last_extrusion_landing    = false;
+    bool         moved_z_since_extrusion   = false;
     bool         wiping             = false;
     bool         first_layer_travel = false;
     GCodeReader  reader;
     reader.apply_config(print.config());
     reader.parse_buffer(gcode, [&](GCodeReader& state, const GCodeReader::GCodeLine& line) {
+        if (line.cmd_is("G1") && line.has_z() && std::abs(line.z() - state.z()) > 0.001)
+            moved_z_since_extrusion = true;
         if (line.raw().rfind(";Z:", 0) == 0)
             nominal_layer_z = std::stod(line.raw().substr(3));
         if (line.raw().rfind("; Z_HEIGHT: ", 0) == 0)
@@ -2759,6 +2766,20 @@ TEST_CASE("DynaPin sloped landings generate lower support and pull before extrus
             const double minimum_z = line.has_z() ? std::min<double>(state.z(), line.z()) : state.z();
             CHECK(DynaPin::required_pin_travel_z(print, pin_config, {{1, 0}, {1, 1}}, Polyline(Points{from, to}), Vec2d::Zero(), minimum_z,
                                                  0.2) == 0.);
+            if (landing) {
+                CHECK((line.has_f() ? line.f() : state.f()) <= print.config().initial_layer_speed.value * 60. + 0.01);
+                if (minimum_z >= nominal_layer_z + pin_config.landing_slope.travel_clearance - 0.001) {
+                    CHECK_FALSE(line.has_z()); // Vertical release must precede XY.
+                    ++landing_travel_checks;
+                } else {
+                    CHECK(last_extrusion_landing);
+                    CHECK(last_extrusion_z == Catch::Approx(nominal_layer_z).margin(0.001));
+                    CHECK(minimum_z == Catch::Approx(nominal_layer_z).margin(0.001));
+                    CHECK(unscale<double>((to - from).norm()) < 2.);
+                    CHECK_FALSE(moved_z_since_extrusion);
+                    ++continuous_landing_checks;
+                }
+            }
             if (minimum_z < clearance - 0.001)
                 ++low_travels;
         }
@@ -2771,6 +2792,11 @@ TEST_CASE("DynaPin sloped landings generate lower support and pull before extrus
             CHECK(state.z() < 15.2);
             ++moves;
         }
+        if (!wiping && line.extruding(state)) {
+            last_extrusion_landing  = landing;
+            last_extrusion_z        = line.has_z() ? line.z() : state.z();
+            moved_z_since_extrusion = false;
+        }
     });
     CHECK(pulls == 2);
     CHECK(moves > 0);
@@ -2778,6 +2804,10 @@ TEST_CASE("DynaPin sloped landings generate lower support and pull before extrus
     CHECK(wipes > 0);
     if (sloped && lifted)
         CHECK(hop_checks > 0);
+    if (sloped) {
+        CHECK(landing_travel_checks > 0);
+        CHECK(continuous_landing_checks > 0);
+    }
     CAPTURE(print.print_statistics().total_used_filament, print.print_statistics().estimated_normal_print_time);
     CHECK(print.print_statistics().total_used_filament > 0.);
     boost::filesystem::remove(path);

@@ -42,6 +42,16 @@ struct LandingRegion
     Polygons polygons;
 };
 std::vector<LandingRegion> landing_extrusion_regions(const SupportLayer& layer, const Point& instance_shift, size_t source);
+// Read-only preparation for collision checking, using the same support trimming
+// and shared landing raster as export. Paths are in machine XY coordinates.
+struct SupportExtrusions
+{
+    const PrintObject*  object;
+    const SupportLayer* layer;
+    ExtrusionPaths      paths;
+};
+std::vector<SupportExtrusions> normalized_support_paths(const std::vector<PrintObject*>& objects);
+bool                           starts_on_pin(const PrintObject& object);
 // Process one instance's support at one Z and extruder. Keep ownership, flow,
 // transverse crossings and distinct parallel lines; trim only collinear repeats
 // from earlier instances. Source collections remain reusable for other copies.
