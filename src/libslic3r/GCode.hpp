@@ -618,6 +618,8 @@ private:
 
     Print *m_print{nullptr};
     std::set<std::string> m_dynapin_pulls_done;
+    double m_dynapin_travel_clearance_z = 0.;
+    std::optional<DynaPin::Config> m_dynapin_travel_config;
     DynaPin::SupportSpeedConfig      m_dynapin_support_speed;
     std::map<const Layer*, Polygons> m_dynapin_stabilization_regions;
 

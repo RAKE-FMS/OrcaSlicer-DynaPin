@@ -6,6 +6,8 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <set>
+#include <tuple>
 
 namespace Slic3r::DynaPin {
 
@@ -159,7 +161,8 @@ static void assemble_landing(ExtrusionEntityCollection& collection, const Polygo
     }
 }
 
-void fill_landing_paths(ExtrusionEntitiesPtr& out, const Polygons& regions, const Flow& flow, double density, coord_t origin_x)
+void fill_landing_paths(
+    ExtrusionEntitiesPtr& out, const Polygons& regions, const Flow& flow, double density, coord_t origin_x, bool fit_edges)
 {
     if (regions.empty() || density <= 0.)
         return;
@@ -173,12 +176,35 @@ void fill_landing_paths(ExtrusionEntitiesPtr& out, const Polygons& regions, cons
     for (coord_t x = first; x <= box.max.x(); x += pitch)
         lines.emplace_back(Points{Point(x, box.min.y() - coord_t(SCALED_EPSILON)), Point(x, box.max.y() + coord_t(SCALED_EPSILON))});
     Polylines tracks = intersection_pl(lines, inset);
+    if (fit_edges) {
+        tracks.clear();
+        for (const auto& island : union_ex(inset)) {
+            const auto    bounds     = get_extents(island);
+            const coord_t edge_inset = std::min<coord_t>(SCALED_EPSILON, (bounds.max.x() - bounds.min.x()) / 2);
+            const coord_t left       = bounds.min.x() + edge_inset;
+            const coord_t span       = bounds.max.x() - edge_inset - left;
+            const size_t  intervals  = size_t(span / pitch);
+            Polylines     fitted;
+            if (intervals == 0) {
+                const coord_t x = left + span / 2;
+                fitted.emplace_back(
+                    Points{Point(x, bounds.min.y() - coord_t(SCALED_EPSILON)), Point(x, bounds.max.y() + coord_t(SCALED_EPSILON))});
+            } else {
+                for (size_t i = 0; i <= intervals; ++i) {
+                    const coord_t x = left + coord_t(std::llround(double(span) * i / intervals));
+                    fitted.emplace_back(
+                        Points{Point(x, bounds.min.y() - coord_t(SCALED_EPSILON)), Point(x, bounds.max.y() + coord_t(SCALED_EPSILON))});
+                }
+            }
+            append(tracks, intersection_pl(fitted, ExPolygons{island}));
+        }
+    }
     // A printable island narrower than the raster pitch may fall between all
     // grid columns. Give it one track without changing the traversal direction.
     for (const auto& island : union_ex(inset)) {
         const auto    bounds = get_extents(island);
         const coord_t x      = origin_x + coord_t(std::ceil(double(bounds.min.x() - origin_x) / pitch)) * pitch;
-        if (x > bounds.max.x()) {
+        if (!fit_edges && x > bounds.max.x()) {
             const coord_t  center = bounds.min.x() + (bounds.max.x() - bounds.min.x()) / 2;
             const Polyline track(
                 Points{Point(center, bounds.min.y() - coord_t(SCALED_EPSILON)), Point(center, bounds.max.y() + coord_t(SCALED_EPSILON))});
@@ -218,8 +244,87 @@ void collect_landing_paths(const ExtrusionEntityCollection& collection, Extrusio
     }
 }
 
-std::vector<LandingExtrusion> schedule_landing_paths(std::vector<LandingExtrusion> paths, bool include_source_links)
+// Independently phased rasters can double the material even when their center
+// lines never coincide. Refill their shared bead footprint on one machine grid.
+static std::vector<LandingExtrusion> merge_landing_rasters(std::vector<LandingExtrusion>     paths,
+                                                           const std::vector<double>&        densities,
+                                                           const std::vector<LandingRegion>& regions)
 {
+    using Key = std::tuple<ExtrusionRole, float, float, double, double>;
+    std::map<Key, std::vector<LandingExtrusion>> groups;
+    for (auto& item : paths) {
+        const auto& path = item.path;
+        groups[{path.role(), path.width, path.height, path.mm3_per_mm, densities.at(item.source)}].push_back(std::move(item));
+    }
+    std::map<std::pair<size_t, float>, size_t> source_height_groups;
+    for (const auto& entry : groups) {
+        std::set<size_t> sources;
+        for (const auto& item : entry.second)
+            sources.insert(item.source);
+        for (size_t source : sources)
+            ++source_height_groups[{source, std::get<2>(entry.first)}];
+    }
+    std::vector<LandingExtrusion> result;
+    for (auto& entry : groups) {
+        auto& group = entry.second;
+        // A height-only region cannot distinguish modulated flows within one
+        // source slab. Preserve those paths rather than refill the full region
+        // once for each flow variant.
+        if (std::any_of(group.begin(), group.end(),
+                        [&](const auto& item) { return source_height_groups.at({item.source, item.path.height}) > 1; })) {
+            append(result, std::move(group));
+            continue;
+        }
+        std::map<size_t, Polygons> footprints;
+        for (const auto& item : group)
+            for (const Line& line : item.path.polyline.lines())
+                if (line.a.x() == line.b.x())
+                    polygons_append(footprints[item.source], offset(Polyline(Points{line.a, line.b}), 0.5 * scale_(item.path.width)));
+        if (!regions.empty())
+            for (auto& source : footprints) {
+                Polygons intended;
+                for (const auto& region : regions)
+                    if (region.source == source.first && std::abs(region.height - group.front().path.height) < EPSILON)
+                        polygons_append(intended, region.polygons);
+                if (!intended.empty())
+                    source.second = std::move(intended);
+            }
+        Polygons combined;
+        bool     overlap = false;
+        for (auto& source : footprints) {
+            source.second = union_(source.second);
+            overlap |= !intersection(source.second, combined).empty();
+            combined = union_(combined, source.second);
+        }
+        if (!overlap && regions.empty()) {
+            append(result, std::move(group));
+            continue;
+        }
+        const auto&               attributes = group.front().path;
+        ExtrusionEntityCollection raster;
+        fill_landing_paths(raster.entities, combined, Flow(attributes.width, attributes.height, attributes.width), std::get<4>(entry.first),
+                           0, !regions.empty());
+        ExtrusionPaths tracks;
+        collect_landing_paths(raster, tracks);
+        Polygons assigned;
+        for (const auto& source : footprints) {
+            const Polygons owned = diff(source.second, assigned);
+            for (const auto& track : tracks)
+                for (auto& part : intersection_pl(track.polyline, owned))
+                    result.push_back({source.first, ExtrusionPath(std::move(part), attributes)});
+            assigned = union_(assigned, source.second);
+        }
+    }
+    return result;
+}
+
+std::vector<LandingExtrusion> schedule_landing_paths(std::vector<LandingExtrusion>     paths,
+                                                     bool                              include_source_links,
+                                                     const std::vector<double>&        source_densities,
+                                                     const std::vector<LandingRegion>& source_regions)
+{
+    if (!include_source_links && !source_densities.empty())
+        paths = merge_landing_rasters(std::move(paths), source_densities, source_regions);
     std::map<coord_t, std::vector<LandingExtrusion>> columns;
     std::vector<LandingExtrusion>                    links;
     for (const auto& item : paths) {

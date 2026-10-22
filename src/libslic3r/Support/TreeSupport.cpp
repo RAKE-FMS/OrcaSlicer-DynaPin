@@ -2596,7 +2596,7 @@ void TreeSupport::prepare_dynapin_landing_layers()
     const auto& used_pins = m_object->dynapin_tree_landing_plan().used_pins;
     if (used_pins.empty())
         return;
-    auto surfaces = DynaPin::pin_top_surfaces_for_object(*m_object);
+    auto surfaces = DynaPin::landing_surfaces_for_object(*m_object);
     surfaces.erase(std::remove_if(surfaces.begin(), surfaces.end(),
                                   [&](const auto& surface) {
                                       return std::find(used_pins.begin(), used_pins.end(), surface.pin) == used_pins.end();
@@ -2621,7 +2621,8 @@ void TreeSupport::prepare_dynapin_landing_layers()
         }
     }
     const auto            adjustments = DynaPin::align_landing_layers(slabs, surfaces, m_slicing_params.min_layer_height,
-                                                                      m_slicing_params.max_suport_layer_height);
+                                                                      m_slicing_params.max_suport_layer_height,
+                                                                      config.raft_first_layer_expansion.value);
     std::vector<Polygons> replaced(areas.size());
     std::vector<Area>     adjusted;
     for (const auto& change : adjustments) {
@@ -2657,7 +2658,8 @@ void TreeSupport::prepare_dynapin_landing_layers()
     slabs.clear();
     for (const Area& area : adjusted)
         slabs.push_back({area.layer->print_z - area.group.height, area.layer->print_z, to_polygons(area.polygon)});
-    auto       bases    = DynaPin::landing_base_layers(slabs, surfaces, config.raft_first_layer_expansion.value);
+    const bool sloped_landing = std::any_of(surfaces.begin(), surfaces.end(), [](const auto& s) { return s.source_print_z != 0.; });
+    auto       bases    = DynaPin::landing_base_layers(slabs, surfaces, sloped_landing ? 0. : config.raft_first_layer_expansion.value);
     const auto blockers = DynaPin::support_blocker_regions_local(*m_object);
     for (auto& base : bases) {
         base.polygons = intersection(base.polygons, to_polygons(m_machine_border));

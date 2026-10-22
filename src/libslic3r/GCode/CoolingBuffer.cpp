@@ -74,6 +74,7 @@ struct CoolingLine
         TYPE_IRONING_FAN_END   = 1 << 20,
         TYPE_DYNAPIN_FAN_START = 1 << 21,
         TYPE_DYNAPIN_FAN_END   = 1 << 22,
+        TYPE_DEPOSIT           = 1 << 23,
     };
 
     CoolingLine(unsigned int type, size_t  line_start, size_t  line_end) :
@@ -390,19 +391,25 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
             // G0, G1 or G92
             // Parse the G-code line.
             std::vector<float> new_pos(current_pos);
+            bool has_e = false;
             const char *c = sline.data() + 3;
             for (;;) {
                 // Skip whitespaces.
-                for (; *c == ' ' || *c == '\t'; ++ c);
+                for (; *c == ' ' || *c == '\t'; ++c)
+                    ;
                 if (*c == 0 || *c == ';')
                     break;
 
                 assert(is_decimal_separator_point()); // for atof
-                //BBS: Parse the axis.
+                // BBS: Parse the axis.
                 size_t axis = (*c >= 'X' && *c <= 'Z') ? (*c - 'X') :
-                              (*c == 'E') ? 3 : (*c == 'F') ? 4 :
-                              (*c == 'I') ? 5 : (*c == 'J') ? 6 : size_t(-1);
+                              (*c == 'E')              ? 3 :
+                              (*c == 'F')              ? 4 :
+                              (*c == 'I')              ? 5 :
+                              (*c == 'J')              ? 6 :
+                                                         size_t(-1);
                 if (axis != size_t(-1)) {
+                    has_e |= axis == 3;
                     new_pos[axis] = float(atof(++c));
                     if (axis == 4) {
                         // Convert mm/min to mm/sec.
@@ -469,6 +476,8 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
                     line.length = std::abs(dif[3]);
                 }
                 line.feedrate = new_pos[4];
+                if (has_e && dxy2 > 0.f && dif[3] > 0.f)
+                    line.type |= CoolingLine::TYPE_DEPOSIT;
                 assert((line.type & CoolingLine::TYPE_ADJUSTABLE) == 0 || line.feedrate > 0.f);
                 if (line.length > 0)
                     line.time = line.length / line.feedrate;
@@ -476,12 +485,12 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
                 if ((line.type & CoolingLine::TYPE_ADJUSTABLE) || active_speed_modifier != size_t(-1))
                     line.time_max = (adjustment->slow_down_min_speed == 0.f) ? FLT_MAX : std::max(line.time, line.length / adjustment->slow_down_min_speed);
                 // BBS: add G2 and G3 support
-                if (active_speed_modifier < adjustment->lines.size() && ((line.type & CoolingLine::TYPE_G1) ||
-                                                                         (line.type & CoolingLine::TYPE_G2) ||
-                                                                         (line.type & CoolingLine::TYPE_G3))) {
+                if (active_speed_modifier < adjustment->lines.size() &&
+                    ((line.type & CoolingLine::TYPE_G1) || (line.type & CoolingLine::TYPE_G2) || (line.type & CoolingLine::TYPE_G3))) {
                     // Inside the ";_EXTRUDE_SET_SPEED" blocks, there must not be a G1 Fxx entry.
                     assert((line.type & CoolingLine::TYPE_HAS_F) == 0);
-                    CoolingLine &sm = adjustment->lines[active_speed_modifier];
+                    CoolingLine& sm = adjustment->lines[active_speed_modifier];
+                    sm.type |= line.type & CoolingLine::TYPE_DEPOSIT;
                     assert(sm.feedrate > 0.f);
                     sm.length   += line.length;
                     sm.time     += line.time;
@@ -725,15 +734,40 @@ std::string CoolingBuffer::apply_layer_cooldown(
                 lines.emplace_back(&line);
         std::sort(lines.begin(), lines.end(), [](const CoolingLine *ln1, const CoolingLine *ln2) { return ln1->line_start < ln2->line_start; } );
     }
+    // Keep the fan stopped across travel, wipe and retraction between landing
+    // paths. Removing the inner boundaries also prevents FanMover look-ahead
+    // and kickstart from restarting it in these gaps.
+    std::vector<bool> skip_landing_boundary(lines.size(), false);
+    size_t            pending_landing_end   = size_t(-1);
+    bool              begins_with_landing   = false;
+    bool              first_deposition_seen = false;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const auto type = lines[i]->type;
+        if (type & CoolingLine::TYPE_DYNAPIN_FAN_START) {
+            if (!first_deposition_seen)
+                begins_with_landing = true;
+            if (pending_landing_end != size_t(-1)) {
+                skip_landing_boundary[pending_landing_end] = true;
+                skip_landing_boundary[i]                   = true;
+            }
+            pending_landing_end = size_t(-1);
+        } else if (type & CoolingLine::TYPE_DYNAPIN_FAN_END) {
+            pending_landing_end = i;
+        } else if (type & (CoolingLine::TYPE_DEPOSIT | CoolingLine::TYPE_SET_TOOL | CoolingLine::TYPE_G4)) {
+            pending_landing_end = size_t(-1);
+        }
+        if (type & CoolingLine::TYPE_DEPOSIT)
+            first_deposition_seen = true;
+    }
     // Second generate the adjusted G-code.
     std::string new_gcode;
     new_gcode.reserve(gcode.size() * 2);
-    bool overhang_fan_control= false;
-    int  overhang_fan_speed   = 0;
-    bool internal_bridge_fan_control= false; // ORCA: Add support for separate internal bridge fan speed control
-    int  internal_bridge_fan_speed   = 0; // ORCA: Add support for separate internal bridge fan speed control
-    bool supp_interface_fan_control= false;
-    int  supp_interface_fan_speed = 0;
+    bool overhang_fan_control        = false;
+    int  overhang_fan_speed          = 0;
+    bool internal_bridge_fan_control = false; // ORCA: Add support for separate internal bridge fan speed control
+    int  internal_bridge_fan_speed   = 0;     // ORCA: Add support for separate internal bridge fan speed control
+    bool supp_interface_fan_control  = false;
+    int  supp_interface_fan_speed    = 0;
     bool ironing_fan_control= false; // ORCA: Add support for ironing fan speed control
     int  ironing_fan_speed   = 0; // ORCA: Add support for ironing fan speed control
     auto change_extruder_set_fan = [ this, layer_id, layer_time, &new_gcode,
@@ -741,7 +775,7 @@ std::string CoolingBuffer::apply_layer_cooldown(
         &internal_bridge_fan_control, &internal_bridge_fan_speed,
         &supp_interface_fan_control, &supp_interface_fan_speed,
         &ironing_fan_control, &ironing_fan_speed
-    ](bool immediately_apply) {
+    ](bool immediately_apply, bool suppress_part_fan = false) {
 #define EXTRUDER_CONFIG(OPT) m_config.OPT.get_at(m_current_extruder)
         float fan_min_speed = EXTRUDER_CONFIG(fan_min_speed);
         float fan_speed_new = EXTRUDER_CONFIG(reduce_fan_stop_start_freq) ? fan_min_speed : 0;
@@ -814,7 +848,7 @@ std::string CoolingBuffer::apply_layer_cooldown(
         if (fan_speed_new != m_fan_speed) {
             m_fan_speed = fan_speed_new;
             m_current_fan_speed = fan_speed_new;
-            if (immediately_apply)
+            if (immediately_apply && !suppress_part_fan)
                 new_gcode  += GCodeWriter::set_fan(m_config.gcode_flavor, m_fan_speed);
         }
         //BBS
@@ -827,27 +861,37 @@ std::string CoolingBuffer::apply_layer_cooldown(
 
     const char         *pos               = gcode.c_str();
     int                 current_feedrate  = 0;
-    change_extruder_set_fan(true);
+    change_extruder_set_fan(true, begins_with_landing);
+    if (begins_with_landing) {
+        new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, 0);
+    }
 
     // Orca: Reduce set fan commands by deferring the GCodeWriter::set_fan calls. Inspired by SuperSlicer
     // define fan_speed_change_requests and initialize it with all possible types fan speed change requests
     std::unordered_map<int, bool> fan_speed_change_requests = {{CoolingLine::TYPE_OVERHANG_FAN_START, false},
-                                                               {CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START, false}, // ORCA: Add support for separate internal bridge fan speed control
+                                                               {CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START,
+                                                                false}, // ORCA: Add support for separate internal bridge fan speed control
                                                                {CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_START, false},
-                                                               {CoolingLine::TYPE_IRONING_FAN_START, false}, // ORCA: Add support for ironing fan speed control
+                                                               {CoolingLine::TYPE_IRONING_FAN_START,
+                                                                false}, // ORCA: Add support for ironing fan speed control
                                                                {CoolingLine::TYPE_FORCE_RESUME_FAN, false}};
     bool need_set_fan = false;
     bool                          dynapin_fan_off           = false;
     int                           fan_speed_before_landing  = -1;
 
-    for (const CoolingLine *line : lines) {
+    for (size_t line_index = 0; line_index < lines.size(); ++line_index) {
+        const CoolingLine* line = lines[line_index];
         const char *line_start  = gcode.c_str() + line->line_start;
         const char *line_end    = gcode.c_str() + line->line_end;
         if (line_start > pos)
             new_gcode.append(pos, line_start - pos);
+        if (skip_landing_boundary[line_index]) {
+            pos = line_end;
+            continue;
+        }
         if (line->type & CoolingLine::TYPE_SET_TOOL) {
             unsigned int new_extruder = 0;
-            auto ret = std::from_chars(line_start + m_toolchange_prefix.size(), line_end, new_extruder);
+            auto         ret          = std::from_chars(line_start + m_toolchange_prefix.size(), line_end, new_extruder);
             if (std::errc::invalid_argument != ret.ec) {
                 if (new_extruder != m_current_extruder) {
                     m_current_extruder = new_extruder;

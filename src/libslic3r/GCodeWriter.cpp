@@ -748,6 +748,14 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
     return out_string;
 }
 
+std::string GCodeWriter::travel_to_z_preserving_lift(double z, const std::string& comment)
+{
+    const double lift = std::max(m_to_lift, m_lifted);
+    m_to_lift         = 0.;
+    m_lifted          = lift;
+    return this->_travel_to_z(z + lift, comment);
+}
+
 std::string GCodeWriter::travel_to_z(double z, const std::string &comment, bool force)
 {
     /*  If target Z is lower than current Z but higher than nominal Z

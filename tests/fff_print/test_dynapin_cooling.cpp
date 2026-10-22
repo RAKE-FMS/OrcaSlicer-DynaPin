@@ -360,6 +360,60 @@ TEST_CASE("DynaPin cooling overrides role fans and survives fan look-ahead", "[D
     }
 }
 
+TEST_CASE("DynaPin fan stays stopped between consecutive landing paths", "[DynaPin][Cooling][LandingFanContinuity]")
+{
+    const bool  ordinary_between = GENERATE(false, true);
+    const bool  relative_e       = GENERATE(false, true);
+    GCode       generator;
+    PrintConfig config;
+    config.fan_min_speed.values                = {40};
+    config.fan_max_speed.values                = {40};
+    config.reduce_fan_stop_start_freq.values   = {true};
+    config.close_fan_the_first_x_layers.values = {0};
+    config.slow_down_for_layer_cooling.values  = {false};
+    config.use_relative_e_distances.value      = relative_e;
+    config.auxiliary_fan.value = true;
+    config.additional_cooling_fan_speed.values = {25};
+    generator.apply_print_config(config);
+    generator.writer().set_extruders({0});
+    CoolingBuffer     cooling(generator);
+    const std::string source    = std::string(DynaPin::LANDING_FAN_START) + "\nG1 X1 E1 F600\n;_EXTRUDE_END\n" + DynaPin::LANDING_FAN_END +
+                                  (relative_e ? "\nG1 E-0.2\n;WIPE_START\nG1 X1.1 E-0.1\n;WIPE_END\nG1 X1.2\nG1 E0.3\n" :
+                                                "\nG1 E0.8\n;WIPE_START\nG1 X1.1 E0.7\n;WIPE_END\nG1 X1.2\nG1 E1\n") +
+                                  (ordinary_between ? "G1 X1.5 E1.5\n;_EXTRUDE_END\n" : "") + DynaPin::LANDING_FAN_START +
+                                  "\nG1 X2 E2\n;_EXTRUDE_END\n" + DynaPin::LANDING_FAN_END + "\nG1 X3 E3\n;_EXTRUDE_END\n";
+    const auto        processed = cooling.process_layer(std::string(source), 2, true);
+    CHECK(processed.find("M106 P2 S63") != std::string::npos);
+    CHECK(processed.find("M106 S102", processed.rfind(DynaPin::LANDING_FAN_END)) != std::string::npos);
+    for (const float advance : {0.f, 0.5f, 5.f}) {
+        FanMover   mover(generator.writer(), advance, true, false, false, 0.3f);
+        const auto output = mover.process_gcode(processed, true);
+        INFO(output);
+        size_t             starts           = 0;
+        bool               protected_region = false;
+        int                fan              = -1;
+        std::istringstream stream(output);
+        for (std::string line; std::getline(stream, line);) {
+            if (line == DynaPin::LANDING_FAN_START) {
+                protected_region = true;
+                ++starts;
+            } else if (line == DynaPin::LANDING_FAN_END)
+                protected_region = false;
+            else if (line.rfind("M106 S", 0) == 0) {
+                fan = std::stoi(line.substr(6));
+                if (protected_region)
+                    CHECK(fan == 0);
+            } else if (line.rfind("G1 X1.2", 0) == 0 && !ordinary_between) {
+                CHECK(protected_region);
+                CHECK(fan == 0);
+            } else if (line.rfind("G1 X3 E3", 0) == 0)
+                CHECK(fan > 0); // Ordinary cooling may begin with a kickstart.
+        }
+        CHECK(starts == (ordinary_between ? 2 : 1));
+        CHECK_FALSE(protected_region);
+    }
+}
+
 TEST_CASE("DynaPin landing raster preserves columns, holes and flow fragments", "[DynaPin][LandingOrder]")
 {
     const int  shape = GENERATE(0, 1, 2, 3);
@@ -500,6 +554,95 @@ TEST_CASE("DynaPin retains modulated flow along column connectors", "[DynaPin][L
     }
     CHECK(previous == points.back());
     CHECK(reduced_found);
+}
+
+TEST_CASE("DynaPin shared landing raster respects spacing across model phases", "[DynaPin][LandingSpacing]")
+{
+    const Flow                             flow(0.5, 0.2, 0.4);
+    const double                           density = GENERATE(0.8, 1.0);
+    std::vector<DynaPin::LandingExtrusion> input;
+    std::vector<DynaPin::LandingRegion>    regions;
+    for (size_t source = 0; source < 2; ++source) {
+        ExtrusionEntityCollection collection;
+        regions.push_back({source, flow.height(), {rectangle(source * 3., 0., 6., 4.)}});
+        DynaPin::fill_landing_paths(collection.entities, {rectangle(source * 3., 0., 6., 4.)}, flow, density, scale_(source * 0.073));
+        ExtrusionPaths paths;
+        DynaPin::collect_landing_paths(collection, paths);
+        for (auto& path : paths) {
+            input.push_back({source, std::move(path)});
+        }
+    }
+    const Polygons safe_centers = offset(Polygons{rectangle(0., 0., 9., 4.)}, -0.5 * flow.scaled_width() + SCALED_EPSILON);
+    const auto     output       = DynaPin::schedule_landing_paths(std::move(input), false, {density, density}, regions);
+    REQUIRE_FALSE(output.empty());
+    coord_t left = std::numeric_limits<coord_t>::max(), right = std::numeric_limits<coord_t>::lowest();
+    for (size_t i = 0; i < output.size(); ++i) {
+        const auto& a = output[i].path;
+        left          = std::min(left, a.first_point().x());
+        right         = std::max(right, a.first_point().x());
+        CHECK(a.is_dynapin_landing);
+        CHECK(a.height == flow.height());
+        CHECK(a.mm3_per_mm == flow.mm3_per_mm());
+        CHECK(diff_pl(a.polyline, safe_centers).empty());
+        for (size_t j = i + 1; j < output.size(); ++j) {
+            const auto&   b         = output[j].path;
+            const coord_t y_overlap = std::min(std::max(a.first_point().y(), a.last_point().y()),
+                                               std::max(b.first_point().y(), b.last_point().y())) -
+                                      std::max(std::min(a.first_point().y(), a.last_point().y()),
+                                               std::min(b.first_point().y(), b.last_point().y()));
+            if (y_overlap > SCALED_EPSILON)
+                CHECK(unscale<double>(std::abs(a.first_point().x() - b.first_point().x())) >= flow.spacing() / density - 0.001);
+        }
+    }
+    CHECK(unscale<double>(left) == Catch::Approx(0.25).margin(0.001));
+    CHECK(unscale<double>(right) == Catch::Approx(8.75).margin(0.001));
+}
+
+TEST_CASE("DynaPin shared landing raster meets neighboring slope bands", "[DynaPin][LandingSpacing][LandingBandGap]")
+{
+    std::vector<DynaPin::LandingExtrusion> input;
+    std::vector<DynaPin::LandingRegion>    regions;
+    for (size_t source = 0; source < 2; ++source)
+        for (size_t band = 0; band < 2; ++band) {
+            const Flow     flow(0.5, band == 0 ? 0.1 : 0.2, 0.4);
+            const double   left  = std::max(source * 5., band * 7.5);
+            const double   right = std::min(source * 5. + 10., band * 7.5 + 7.5);
+            const Polygons area{rectangle(left, 0., right - left, 4.)};
+            regions.push_back({source, flow.height(), area});
+            ExtrusionEntityCollection collection;
+            DynaPin::fill_landing_paths(collection.entities, area, flow, 1., scale_(source * 0.073));
+            ExtrusionPaths paths;
+            DynaPin::collect_landing_paths(collection, paths);
+            for (auto& path : paths)
+                input.push_back({source, std::move(path)});
+        }
+    const auto output        = DynaPin::schedule_landing_paths(std::move(input), false, {1., 1.}, regions);
+    double     left_band_end = 0., right_band_start = 15.;
+    for (const auto& item : output) {
+        const double x = unscale<double>(item.path.first_point().x());
+        if (item.path.height < 0.15)
+            left_band_end = std::max(left_band_end, x + item.path.width / 2.);
+        else
+            right_band_start = std::min(right_band_start, x - item.path.width / 2.);
+    }
+    CHECK(left_band_end == Catch::Approx(7.5).margin(0.001));
+    CHECK(right_band_start == Catch::Approx(7.5).margin(0.001));
+}
+
+TEST_CASE("DynaPin shared landing keeps modulated flows within a slab", "[DynaPin][LandingSpacing]")
+{
+    std::vector<DynaPin::LandingExtrusion> input;
+    for (size_t i = 0; i < 2; ++i) {
+        ExtrusionPath path(erSupportMaterial, i == 0 ? 0.05 : 0.08, 0.5, 0.2);
+        path.is_dynapin_landing = true;
+        path.polyline           = Polyline(Points{Point::new_scale(1., i * 2.), Point::new_scale(1., i * 2. + 2.)});
+        input.push_back({0, std::move(path)});
+    }
+    const auto output = DynaPin::schedule_landing_paths(std::move(input), false, {1.}, {{0, 0.2f, {rectangle(0., 0., 4., 4.)}}});
+    REQUIRE(output.size() == 2);
+    CHECK(output[0].path.mm3_per_mm == 0.05);
+    CHECK(output[1].path.mm3_per_mm == 0.08);
+    CHECK(output[0].path.total_volume() + output[1].path.total_volume() == Catch::Approx(0.26));
 }
 
 TEST_CASE("DynaPin layer landing schedule interleaves models in machine X order", "[DynaPin][LandingOrder]")
