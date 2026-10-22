@@ -6,6 +6,8 @@
 #include "3DScene.hpp"
 #include "GLShader.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/BuildVolume.hpp"
+#include <boost/nowide/cstdio.hpp>
 #include <functional>
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/GCode/Thumbnails.hpp"
@@ -326,11 +328,15 @@ ThumbnailData render_unsliced_image(const PreviewCapture&           capture,
     decode_colors(filament_colors, colors);
     if (colors.empty())
         colors.push_back(ColorRGBA::WHITE());
-    BoundingBoxf3 scene;
+    const BuildVolume build_volume(source_plate.get_shape(), printable_height, source_plate.get_extruder_areas(),
+                                   source_plate.get_extruder_heights());
+    BoundingBoxf3     scene;
     for (size_t obj = 0; obj < objects.size(); ++obj) {
         const auto* object = objects[obj];
         for (size_t instance = 0; instance < object->instances.size(); ++instance) {
-            if (!source_plate.contain_instance(int(obj), int(instance)) || !object->instances[instance]->is_printable())
+            const auto* model_instance = object->instances[instance];
+            if (!source_plate.contain_instance(int(obj), int(instance)) || !object->printable || !model_instance->printable ||
+                model_instance->calc_print_volume_state(build_volume) != ModelInstancePVS_Inside)
                 continue;
             for (size_t volume = 0; volume < object->volumes.size(); ++volume) {
                 if (!object->volumes[volume]->is_model_part())
@@ -367,7 +373,7 @@ void save_preview_image(const std::string& path, const ThumbnailData& image)
     const auto png = GCodeThumbnails::compress_thumbnail(image, GCodeThumbnailsFormat::PNG);
     if (!png || !png->data)
         throw std::runtime_error("Cannot encode preview PNG");
-    const std::string temporary = path + ".tmp";
+    const std::string temporary = boost::filesystem::unique_path(path + ".%%%%-%%%%-%%%%-%%%%.tmp").string();
     {
         boost::nowide::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
         stream.write(static_cast<const char*>(png->data), png->size);
@@ -377,7 +383,13 @@ void save_preview_image(const std::string& path, const ThumbnailData& image)
             throw std::runtime_error("Cannot write preview PNG: " + path);
         }
     }
-    if (Slic3r::rename_file(temporary, path)) {
+    // POSIX rename replaces the destination atomically; rename_file removes it first.
+#ifdef _WIN32
+    const bool replace_failed = bool(Slic3r::rename_file(temporary, path));
+#else
+    const bool replace_failed = boost::nowide::rename(temporary.c_str(), path.c_str()) != 0;
+#endif
+    if (replace_failed) {
         boost::filesystem::remove(temporary);
         throw std::runtime_error("Cannot replace preview PNG: " + path);
     }

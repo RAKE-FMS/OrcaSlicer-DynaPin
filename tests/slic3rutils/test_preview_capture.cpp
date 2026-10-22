@@ -11,6 +11,38 @@
 using namespace Slic3r;
 using namespace Slic3r::GUI;
 
+TEST_CASE("Preview PNG replacement preserves files on failure", "[preview_capture]")
+{
+    const auto directory = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("orca-capture-%%%%-%%%%");
+    boost::filesystem::create_directory(directory);
+    ScopeGuard cleanup([&] { boost::filesystem::remove_all(directory); });
+    const auto path             = directory / "capture.png";
+    const auto legacy_temporary = directory / "capture.png.tmp";
+    {
+        boost::nowide::ofstream old(path.string());
+        old << "old image";
+        boost::nowide::ofstream sentinel(legacy_temporary.string());
+        sentinel << "unrelated temporary";
+    }
+    ThumbnailData image;
+    image.set(2, 2);
+    std::fill(image.pixels.begin(), image.pixels.end(), 255);
+    REQUIRE_NOTHROW(save_preview_image(path.string(), image));
+    boost::nowide::ifstream saved(path.string(), std::ios::binary);
+    char                    signature[8]{};
+    saved.read(signature, sizeof(signature));
+    REQUIRE(std::string(signature, sizeof(signature)) == std::string("\x89PNG\r\n\x1a\n", 8));
+    REQUIRE(boost::filesystem::file_size(legacy_temporary) == 19);
+
+    // A nonempty destination directory forces replacement failure on all platforms.
+    const auto blocked = directory / "blocked.png";
+    boost::filesystem::create_directory(blocked);
+    boost::filesystem::copy_file(path, blocked / "old.png");
+    REQUIRE_THROWS(save_preview_image(blocked.string(), image));
+    REQUIRE(boost::filesystem::exists(blocked / "old.png"));
+    REQUIRE(std::distance(boost::filesystem::directory_iterator(directory), boost::filesystem::directory_iterator()) == 3);
+}
+
 TEST_CASE("Capture camera preserves plate-relative framing", "[preview_capture]")
 {
     Camera camera;
@@ -198,6 +230,33 @@ TEST_CASE("Render unsliced models without toolpaths", "[.preview_capture_render]
         if (original.GetData()[i] > original.GetData()[i + 1] + 20)
             ++foreground;
     REQUIRE(foreground > 100);
+
+    SECTION("Object print flag is respected")
+    {
+        object->printable = false;
+        REQUIRE_THROWS(export_preview_image_cli(path.string(), capture, print, result, plate, true));
+        return;
+    }
+    SECTION("Instance print flag is respected")
+    {
+        object->instances[0]->printable = false;
+        REQUIRE_THROWS(export_preview_image_cli(path.string(), capture, print, result, plate, true));
+        return;
+    }
+    SECTION("Target plate bounds override a stale inside state")
+    {
+        object->instances[0]->set_offset(Vec3d(140, 40, 0));
+        REQUIRE_THROWS(export_preview_image_cli(path.string(), capture, print, result, plate, true));
+        return;
+    }
+    SECTION("Target plate capture ignores another selected plate") {}
+
+    // Selecting another plate updates this cached state, but must not hide the captured model.
+    object->instances[0]->print_volume_state = ModelInstancePVS_Fully_Outside;
+    export_preview_image_cli(path.string(), capture, print, result, plate, true);
+    wxImage recaptured;
+    REQUIRE(recaptured.LoadFile(wxString::FromUTF8(path.string()), wxBITMAP_TYPE_PNG));
+    REQUIRE(std::equal(original.GetData(), original.GetData() + 640 * 360 * 3, recaptured.GetData()));
 
     // An overlapping instance belonging to another plate and non-printing volumes must not change the image.
     object->add_instance()->set_offset(Vec3d(40, 40, 40));
