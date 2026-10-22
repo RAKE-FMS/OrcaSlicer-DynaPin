@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/DynaPin.hpp"
+#include "libslic3r/DynaPinSupport.hpp"
 #include "libslic3r/DynaPinLanding.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/GCodeReader.hpp"
@@ -936,4 +937,75 @@ TEST_CASE("DynaPin landing bases use first-layer settings independently of inter
             last_landing_z = std::max(last_landing_z, layer->print_z);
     CHECK(last_landing_z < 45.);
     CHECK(support_interface_above_z(*print.objects().front(), 49.6));
+}
+
+TEST_CASE("Independent DynaPin columns keep upper extrusion inside the pin", "[DynaPin][IndependentSupport][SupportMaterial]")
+{
+    ResourcesDirGuard resources_guard(test_resources_dir());
+    DataDirGuard      data_dir_guard;
+    const bool        external_target = GENERATE(false, true);
+    const std::string style           = GENERATE("normal", "tree_slim", "tree_strong", "tree_hybrid");
+    CAPTURE(style, external_target);
+    Print print;
+    print.set_plate_origin(Vec3d::Zero());
+    Model        model;
+    TriangleMesh mesh = Test::mesh(TestMesh::cube_20x20x20);
+    mesh.scale(Vec3f(0.1f, 0.1f, 0.05f));
+    TriangleMesh roof = Test::mesh(TestMesh::cube_20x20x20);
+    roof.scale(Vec3f(0.75f, external_target ? 0.6f : 0.45f, 0.1f));
+    // The existing DynaPin machine geometry places column zero at Y=10.8 mm.
+    roof.translate(50.f, external_target ? 4.8f : 6.3f, 50.f);
+    mesh.merge(roof);
+    ModelObject* object = model.add_object();
+    object->add_volume(std::move(mesh));
+    object->add_instance();
+    object->ensure_on_bed();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"enable_support", true},
+                                   {"enable_dynapin_support_optimization", true},
+                                   {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+                                   {"dynapin_selected_pins", "5,0"},
+                                   {"dynapin_debug_stage", 2},
+                                   {"support_type", style == "normal" ? "normal(auto)" : "tree(auto)"},
+                                   {"support_style", style == "normal" ? "default" : style},
+                                   {"support_interface_top_layers", 2}});
+    for (const std::string& key : config.keys()) {
+        ConfigOption* option = config.option(key);
+        if (option->type() == coEnums) {
+            const auto* definition = print_config_def.get(key);
+            REQUIRE(definition->enum_keys_map != nullptr);
+            if (option->nullable())
+                static_cast<ConfigOptionEnumsGenericNullable*>(option)->keys_map = definition->enum_keys_map;
+            else
+                static_cast<ConfigOptionEnumsGeneric*>(option)->keys_map = definition->enum_keys_map;
+        }
+    }
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    const PrintObject& printed  = *print.objects().front();
+    const auto         surfaces = DynaPin::landing_surfaces_for_object(printed);
+    Polygons           limit;
+    for (const auto& footprint : DynaPin::landing_footprints(surfaces))
+        polygons_append(limit, footprint);
+    REQUIRE_FALSE(limit.empty());
+    size_t checked = 0;
+    bool   outside = false;
+    for (const auto* layer : printed.support_layers()) {
+        if (layer->print_z < 46. || layer->print_z > 50.)
+            continue;
+        Polygons covered;
+        layer->support_fills.polygons_covered_by_width(covered, float(SCALED_EPSILON));
+        if (covered.empty())
+            continue;
+        const bool extends = !diff(covered, offset(limit, float(scale_(0.002)))).empty();
+        outside |= extends;
+        if (!external_target)
+            CHECK_FALSE(extends);
+        ++checked;
+    }
+    CHECK(checked > 0);
+    if (external_target)
+        CHECK(outside);
 }

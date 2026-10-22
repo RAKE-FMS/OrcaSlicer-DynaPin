@@ -1,4 +1,5 @@
 #include "DynaPin.hpp"
+#include "DynaPinSupport.hpp"
 #include "DynaPinGCode.hpp"
 #include "DynaPinLanding.hpp"
 #include "ExtrusionEntityCollection.hpp"
@@ -498,17 +499,9 @@ std::vector<Polygons> support_stabilization_regions(const PrintObject& object, s
     return result;
 }
 
-std::vector<LandingLayer> landing_base_layers(const std::vector<LandingLayer>&          layers,
-                                              const std::vector<VirtualSupportSurface>& surfaces,
-                                              double                                    expansion)
+std::vector<Polygons> landing_footprints(const std::vector<VirtualSupportSurface>& surfaces)
 {
-    struct Footprint
-    {
-        double   print_z;
-        Polygons polygons;
-        Polygons source_polygons;
-    };
-    std::vector<Footprint> footprints;
+    std::vector<Polygons> result;
     for (const auto& surface : surfaces) {
         BoundingBox bounds = get_extents(surface.poly);
         for (const bool lower : {true, false}) {
@@ -527,9 +520,182 @@ std::vector<LandingLayer> landing_base_layers(const std::vector<LandingLayer>&  
                     bounds.max.y() -= scale_(surface.edge_inset_y);
             }
         }
-        if (bounds.min.y() >= bounds.max.y())
+        if (bounds.min.y() >= bounds.max.y()) {
+            result.emplace_back();
             continue;
-        const Polygons footprint = intersection(Polygons{surface.poly}, Polygons{bounds.polygon()});
+        }
+        result.push_back(intersection(Polygons{surface.poly}, Polygons{bounds.polygon()}));
+    }
+    return result;
+}
+
+std::vector<Polygons> independent_support_removals(const std::vector<LandingLayer>&          layers,
+                                                   const std::vector<VirtualSupportSurface>& surfaces,
+                                                   const std::vector<Polygons>&              targets)
+{ return independent_support_removals(layers, surfaces, targets, {}); }
+
+std::vector<Polygons> independent_support_removals(const std::vector<LandingLayer>&          layers,
+                                                   const std::vector<VirtualSupportSurface>& surfaces,
+                                                   const std::vector<Polygons>&              targets,
+                                                   const std::vector<double>&                extrusion_margins)
+{
+    assert(layers.size() == targets.size());
+    assert(extrusion_margins.empty() || extrusion_margins.size() == layers.size());
+    std::vector<Polygons> result(layers.size());
+    if (surfaces.empty())
+        return result;
+    const auto footprints = landing_footprints(surfaces);
+    auto       root       = [](std::vector<size_t>& parents, size_t i) {
+        while (parents[i] != i) {
+            parents[i] = parents[parents[i]];
+            i          = parents[i];
+        }
+        return i;
+    };
+    std::vector<size_t> pin_groups(surfaces.size());
+    std::iota(pin_groups.begin(), pin_groups.end(), 0);
+    for (size_t i = 0; i < surfaces.size(); ++i)
+        for (size_t j = 0; j < i; ++j)
+            if (surfaces[i].pin == surfaces[j].pin ||
+                (std::abs(surfaces[i].print_z - surfaces[j].print_z) < EPSILON && surfaces[i].pin.row == surfaces[j].pin.row &&
+                 std::abs(surfaces[i].pin.col - surfaces[j].pin.col) == 1 &&
+                 !intersection(offset({surfaces[i].poly}, float(SCALED_EPSILON)), {surfaces[j].poly}).empty()))
+                pin_groups[root(pin_groups, i)] = root(pin_groups, j);
+    std::vector<Polygons> limits(surfaces.size());
+    for (size_t i = 0; i < surfaces.size(); ++i)
+        polygons_append(limits[root(pin_groups, i)], footprints[i]);
+    for (auto& limit : limits)
+        limit = union_(limit);
+
+    // Treat shared boundaries as connections as well. Only a coordinate-scale
+    // tolerance is allowed here; an extrusion-width dilation could join islands.
+    const auto connected = [](const Polygons& a, const Polygons& b) { return !intersection(offset(a, float(SCALED_EPSILON)), b).empty(); };
+    struct Node
+    {
+        size_t   source;
+        Polygons polygons;
+        Polygons target;
+        bool     lower = false;
+        bool     upper = false;
+    };
+    std::vector<Node> nodes;
+    for (size_t i = 0; i < layers.size(); ++i)
+        for (const auto& island : union_ex(layers[i].polygons)) {
+            Node node{i, to_polygons(island), {}};
+            for (const auto& target : union_ex(targets[i]))
+                if (!intersection(node.polygons, to_polygons(target)).empty())
+                    polygons_append(node.target, to_polygons(target));
+            nodes.push_back(std::move(node));
+        }
+    std::vector<size_t> parents(nodes.size());
+    std::iota(parents.begin(), parents.end(), 0);
+    std::vector<std::pair<size_t, size_t>> edges;
+    std::vector<size_t>                    order(nodes.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(),
+              [&](size_t a, size_t b) { return layers[nodes[a].source].bottom_z < layers[nodes[b].source].bottom_z; });
+    for (size_t a = 0; a < order.size(); ++a) {
+        const size_t i     = order[a];
+        const auto&  first = layers[nodes[i].source];
+        for (size_t b = a + 1; b < order.size(); ++b) {
+            const size_t j      = order[b];
+            const auto&  second = layers[nodes[j].source];
+            if (second.bottom_z > first.print_z + EPSILON)
+                break;
+            if (!get_extents(nodes[i].polygons).overlap(get_extents(nodes[j].polygons)) || !connected(nodes[i].polygons, nodes[j].polygons))
+                continue;
+            parents[root(parents, i)] = root(parents, j);
+            edges.emplace_back(i, j);
+            // Base/interface slabs may overlap vertically before the native
+            // generator modulates their heights. Follow their actual extents.
+            if (first.bottom_z < second.bottom_z - EPSILON)
+                nodes[j].lower = true;
+            if (second.bottom_z < first.bottom_z - EPSILON)
+                nodes[i].lower = true;
+            if (first.print_z < second.print_z - EPSILON)
+                nodes[i].upper = true;
+            if (second.print_z < first.print_z - EPSILON)
+                nodes[j].upper = true;
+        }
+    }
+    std::vector<std::vector<size_t>> components(nodes.size());
+    for (size_t i = 0; i < nodes.size(); ++i)
+        components[root(parents, i)].push_back(i);
+    std::vector<Polygons> clipped(nodes.size());
+    for (const auto& component : components) {
+        if (component.empty())
+            continue;
+        bool             safe = true;
+        std::set<size_t> landings;
+        for (size_t i : component) {
+            const auto& node = nodes[i];
+            const auto& slab = layers[node.source];
+            if (!node.lower) {
+                bool on_pin = false;
+                for (size_t j = 0; j < surfaces.size(); ++j)
+                    if (std::abs(slab.bottom_z - surfaces[j].print_z) < EPSILON && !intersection(node.polygons, footprints[j]).empty()) {
+                        on_pin = true;
+                        landings.insert(root(pin_groups, j));
+                    }
+                safe &= on_pin;
+            }
+            // Source masks describe the complete contact, including islands that
+            // only carry interface margin. An absent source mask is unknown.
+            if (!node.upper && targets[node.source].empty())
+                safe = false;
+        }
+        if (!safe || landings.size() != 1)
+            continue;
+        const auto& limit = limits[*landings.begin()];
+        for (size_t i : component) {
+            const auto&    node      = nodes[i];
+            const Polygons printable = extrusion_margins.empty() ? limit : offset(limit, float(-scale_(extrusion_margins[node.source])));
+            clipped[i]               = intersection(node.polygons, printable);
+            // Preserve the complete associated target, including portions
+            // beyond the support island (e.g. tree contact-point sampling).
+            if (!node.target.empty() && !diff(node.target, printable).empty())
+                safe = false;
+            if (union_ex(clipped[i]).size() > 1)
+                safe = false;
+        }
+        // A redundant edge may disappear without disconnecting the column.
+        // Check the remaining component, rather than requiring every old edge.
+        std::vector<size_t> clipped_parents(nodes.size());
+        std::iota(clipped_parents.begin(), clipped_parents.end(), 0);
+        for (const auto& edge : edges)
+            if (root(parents, edge.first) == root(parents, component.front()) && !clipped[edge.first].empty() &&
+                !clipped[edge.second].empty() && connected(clipped[edge.first], clipped[edge.second]))
+                clipped_parents[root(clipped_parents, edge.first)] = root(clipped_parents, edge.second);
+        std::set<size_t> remaining;
+        for (size_t i : component)
+            if (!clipped[i].empty())
+                remaining.insert(root(clipped_parents, i));
+        safe &= remaining.size() == 1;
+        if (!safe)
+            continue;
+        for (size_t i : component)
+            polygons_append(result[nodes[i].source], diff(nodes[i].polygons, clipped[i]));
+    }
+    return result;
+}
+
+std::vector<LandingLayer> landing_base_layers(const std::vector<LandingLayer>&          layers,
+                                              const std::vector<VirtualSupportSurface>& surfaces,
+                                              double                                    expansion)
+{
+    struct Footprint
+    {
+        double   print_z;
+        Polygons polygons;
+        Polygons source_polygons;
+    };
+    std::vector<Footprint> footprints;
+    const auto             printable = landing_footprints(surfaces);
+    for (size_t i = 0; i < surfaces.size(); ++i) {
+        const auto& surface   = surfaces[i];
+        const auto& footprint = printable[i];
+        if (footprint.empty())
+            continue;
         auto           match     = std::find_if(footprints.begin(), footprints.end(),
                                                 [&](const auto& other) { return std::abs(other.print_z - surface.print_z) < EPSILON; });
         if (match == footprints.end())

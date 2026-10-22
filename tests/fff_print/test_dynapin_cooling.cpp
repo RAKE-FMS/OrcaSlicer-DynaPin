@@ -1,3 +1,4 @@
+#include "libslic3r/DynaPinSupport.hpp"
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/ClipperUtils.hpp"
@@ -688,4 +689,131 @@ TEST_CASE("DynaPin layer landing schedule interleaves models in machine X order"
     }
     CHECK(changes > 2);
     CHECK(scheduled_volume == Catch::Approx(volume));
+}
+
+TEST_CASE("Independent pin columns shrink only with known internal targets", "[DynaPin][IndependentSupport]")
+{
+    const Polygon                                     pin    = rectangle(0, 0, 8, 8);
+    const Polygon                                     wide   = rectangle(-1, -1, 10, 10);
+    const Polygon                                     target = rectangle(2, 2, 2, 2);
+    const std::vector<DynaPin::VirtualSupportSurface> surfaces{{{0, 0}, pin, 10.}};
+    std::vector<DynaPin::LandingLayer>                layers{{10., 10.2, {pin}}, {10.2, 10.4, {wide}}, {10.4, 10.6, {wide}}};
+    std::vector<Polygons>                             targets{{}, {}, {target}};
+    auto                                              removed = DynaPin::independent_support_removals(layers, surfaces, targets);
+    REQUIRE(removed.size() == layers.size());
+    CHECK(removed[0].empty());
+    CHECK(area(removed[1]) > 0.);
+    CHECK(diff(diff(layers[2].polygons, removed[2]), {pin}).empty());
+    SECTION("External supported geometry preserves the whole column") { targets[2] = {wide}; }
+    SECTION("Unknown target preserves the whole column") { targets[2].clear(); }
+    SECTION("A connection to a lower external root preserves the whole column")
+    {
+        layers.push_back({9.8, 10.2, {rectangle(7, 0, 3, 8)}});
+        targets.emplace_back();
+    }
+    removed = DynaPin::independent_support_removals(layers, surfaces, targets);
+    for (const auto& polygons : removed)
+        CHECK(polygons.empty());
+}
+
+TEST_CASE("Independent support clipping respects pin groups and disconnected islands", "[DynaPin][IndependentSupport]")
+{
+    const Polygon                               pin  = rectangle(0, 0, 8, 8);
+    const Polygon                               wide = rectangle(-1, -1, 10, 10);
+    std::vector<DynaPin::VirtualSupportSurface> surfaces{{{0, 0}, pin, 10., 1.}};
+    std::vector<DynaPin::LandingLayer>          layers{{10., 10.2, {rectangle(0, 1, 8, 6)}}, {10.2, 10.4, {wide}}};
+    std::vector<Polygons>                       targets{{}, {rectangle(2, 2, 2, 2)}};
+    SECTION("The same edge inset applies above the landing")
+    {
+        const auto removed = DynaPin::independent_support_removals(layers, surfaces, targets);
+        REQUIRE(area(removed[1]) > 0.);
+        CHECK(diff(diff(layers[1].polygons, removed[1]), {rectangle(0, 1, 8, 6)}).empty());
+    }
+    SECTION("An unrelated external island at the same Z does not protect the internal column")
+    {
+        layers[1].polygons.push_back(rectangle(20, 0, 3, 3));
+        targets[1].push_back(rectangle(20, 0, 3, 3));
+        const auto removed = DynaPin::independent_support_removals(layers, surfaces, targets);
+        CHECK(area(removed[1]) > 0.);
+        CHECK(intersection(removed[1], {rectangle(20, 0, 3, 3)}).empty());
+    }
+    SECTION("A branch whose clipping would disconnect it is retained")
+    {
+        layers.push_back({10.4, 10.6, {rectangle(8.5, 0, 2, 3)}});
+        targets.push_back({rectangle(8.5, 0, 1, 1)});
+        const auto removed = DynaPin::independent_support_removals(layers, surfaces, targets);
+        for (const auto& region : removed)
+            CHECK(region.empty());
+    }
+    SECTION("An empty landing set is an identity")
+    {
+        const auto removed = DynaPin::independent_support_removals(layers, {}, targets);
+        for (const auto& region : removed)
+            CHECK(region.empty());
+    }
+}
+
+TEST_CASE("Independent support uses continuous pin groups but preserves separate roots", "[DynaPin][IndependentSupport]")
+{
+    const Polygon                               left  = rectangle(0, 0, 8, 8);
+    const Polygon                               right = rectangle(0, 8, 8, 8);
+    std::vector<DynaPin::VirtualSupportSurface> surfaces{{{0, 0}, left, 10., 1.}, {{0, 1}, right, 10., 1.}};
+    std::vector<DynaPin::LandingLayer>          layers{{10., 10.2, {rectangle(0, 1, 8, 14)}}, {10.2, 10.4, {rectangle(-1, 0, 10, 16)}}};
+    std::vector<Polygons>                       targets{{}, {rectangle(2, 7, 2, 2)}};
+    SECTION("Adjacent pin interiors have no inset at their shared edge")
+    {
+        const auto removed = DynaPin::independent_support_removals(layers, surfaces, targets);
+        CHECK(area(removed[1]) > 0.);
+        CHECK(diff(targets[1], diff(layers[1].polygons, removed[1])).empty());
+    }
+    SECTION("Different heights remain distinct landing groups")
+    {
+        surfaces[1].print_z = 10.1;
+        layers[0].polygons  = {rectangle(0, 1, 8, 6)};
+        layers.push_back({10.1, 10.2, {rectangle(0, 9, 8, 6)}});
+        targets.emplace_back();
+        const auto removed = DynaPin::independent_support_removals(layers, surfaces, targets);
+        for (const auto& region : removed)
+            CHECK(region.empty());
+    }
+    SECTION("Bands of a sloped physical pin form one group")
+    {
+        surfaces = {{{0, 0}, rectangle(0, 0, 4, 8), 10., 1.}, {{0, 0}, rectangle(4, 0, 4, 8), 10.1, 1.}};
+        layers   = {{10., 10.2, {rectangle(0, 1, 4, 6)}}, {10.1, 10.2, {rectangle(4, 1, 4, 6)}}, {10.2, 10.4, {rectangle(-1, 0, 10, 8)}}};
+        targets  = {{}, {}, {rectangle(2, 2, 4, 2)}};
+        const auto removed = DynaPin::independent_support_removals(layers, surfaces, targets);
+        CHECK(area(removed[2]) > 0.);
+    }
+}
+
+TEST_CASE("Independent support connects overlapping base and interface slabs", "[DynaPin][IndependentSupport]")
+{
+    const Polygon                            pin  = rectangle(0, 0, 8, 8);
+    const Polygon                            wide = rectangle(-1, -1, 10, 10);
+    const std::vector<DynaPin::LandingLayer> layers{{10., 10.2, {pin}}, {10.2, 10.6, {wide}}, {10.4, 10.8, {wide}}};
+    const auto removed = DynaPin::independent_support_removals(layers, {{{0, 0}, pin, 10.}}, {{}, {}, {rectangle(2, 2, 2, 2)}});
+    CHECK(area(removed[1]) > 0.);
+    CHECK(area(removed[2]) > 0.);
+}
+
+TEST_CASE("Independent columns can lose redundant connections outside the pin", "[DynaPin][IndependentSupport]")
+{
+    const Polygon pin = rectangle(0, 0, 8, 8);
+    const Polygon left{Points{Point(scale_(-2.), scale_(-2.)), Point(scale_(10.), scale_(-2.)), Point(scale_(10.), scale_(-1.)),
+                              Point(scale_(2.), scale_(-1.)), Point(scale_(2.), scale_(4.)), Point(scale_(-2.), scale_(4.))}};
+    const std::vector<DynaPin::LandingLayer> layers{{10., 10.2, {pin}}, {10.2, 10.4, {left}}, {10.2, 10.4, {rectangle(6, -2, 4, 6)}}};
+    const auto removed = DynaPin::independent_support_removals(layers, {{{0, 0}, pin, 10.}},
+                                                               {{}, {rectangle(0.5, 1, 1, 1)}, {rectangle(6.5, 1, 1, 1)}});
+    CHECK(area(removed[1]) > 0.);
+    CHECK(area(removed[2]) > 0.);
+}
+
+TEST_CASE("Independent support reserves the width beyond native infill spacing", "[DynaPin][IndependentSupport]")
+{
+    const Polygon                            pin = rectangle(0, 0, 8, 8);
+    const std::vector<DynaPin::LandingLayer> layers{{10., 10.2, {pin}}, {10.2, 10.4, {pin}}};
+    const auto removed = DynaPin::independent_support_removals(layers, {{{0, 0}, pin, 10.}}, {{}, {rectangle(2, 2, 2, 2)}}, {0., 0.04});
+    CHECK(removed[0].empty());
+    CHECK(area(removed[1]) > 0.);
+    CHECK(diff(diff(layers[1].polygons, removed[1]), {rectangle(0.04, 0.04, 7.92, 7.92)}).empty());
 }

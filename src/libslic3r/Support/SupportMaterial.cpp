@@ -6,6 +6,7 @@
 #include "SupportMaterial.hpp"
 #include "SupportCommon.hpp"
 #include "../DynaPin.hpp"
+#include "../DynaPinSupport.hpp"
 #include "../DynaPinPlacement.hpp"
 #include "Geometry.hpp"
 #include "Point.hpp"
@@ -1192,6 +1193,36 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
         }
         append(intermediate_layers, landing_layers);
         std::sort(intermediate_layers.begin(), intermediate_layers.end(), [](const auto* a, const auto* b) { return *a < *b; });
+    }
+
+    if (!landing_surfaces.empty()) {
+        SupportGeneratorLayersPtr candidates = intermediate_layers;
+        append(candidates, interface_layers);
+        append(candidates, bottom_contacts);
+        append(candidates, top_contacts);
+        append(candidates, base_interface_layers);
+        std::vector<DynaPin::LandingLayer> slabs;
+        std::vector<Polygons>              targets;
+        std::vector<double>                margins;
+        for (const auto* layer : candidates) {
+            slabs.push_back({layer->bottom_print_z(), layer->print_z, layer->polygons});
+            targets.push_back(layer->overhang_polygons ? *layer->overhang_polygons : Polygons{});
+            const auto base      = m_support_params.support_material_flow.with_height(float(layer->height));
+            const auto interface = m_support_params.support_material_interface_flow.with_height(float(layer->height));
+            margins.push_back(
+                layer->dynapin_landing_regions.empty() ?
+                    0.5 * std::max({0., double(base.width() - std::min(base.spacing(), m_support_params.support_material_flow.spacing())),
+                                    double(interface.width() -
+                                           std::min(interface.spacing(), m_support_params.support_material_interface_flow.spacing()))}) :
+                    0.);
+        }
+        const auto removals = DynaPin::independent_support_removals(slabs, landing_surfaces, targets, margins);
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            if (removals[i].empty())
+                continue;
+            candidates[i]->polygons                = diff(candidates[i]->polygons, removals[i]);
+            candidates[i]->dynapin_landing_regions = diff(candidates[i]->dynapin_landing_regions, removals[i]);
+        }
     }
 
     BOOST_LOG_TRIVIAL(info) << "Support generator - Creating layers";

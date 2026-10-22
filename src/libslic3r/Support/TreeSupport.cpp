@@ -1,4 +1,5 @@
 #include "../DynaPinLanding.hpp"
+#include "../DynaPinSupport.hpp"
 #include <chrono>
 #include <math.h>
 #include <unordered_map>
@@ -2696,6 +2697,48 @@ void TreeSupport::prepare_dynapin_landing_layers()
         for (auto& polygon : union_ex(base.polygons))
             final_areas.push_back({std::move(polygon), group, source->layer, true});
     }
+    // Associate actual overhang islands with the highest overlapping support
+    // slabs below them. Interface expansion is deliberately not a target.
+    slabs.clear();
+    for (const auto& area : final_areas)
+        slabs.push_back({area.layer->print_z - area.group.height, area.layer->print_z, to_polygons(area.polygon)});
+    std::vector<Polygons> targets(slabs.size());
+    for (const auto* layer : m_object->layers())
+        for (const auto& overhang : layer->loverhangs) {
+            const Polygons target  = to_polygons(overhang);
+            double         highest = -1.;
+            for (const auto& slab : slabs)
+                if (slab.print_z <= layer->bottom_z() + EPSILON &&
+                    layer->bottom_z() - slab.print_z <=
+                        m_slicing_params.gap_support_object + m_slicing_params.max_suport_layer_height + EPSILON &&
+                    !intersection(slab.polygons, target).empty())
+                    highest = std::max(highest, slab.print_z);
+            for (size_t i = 0; i < slabs.size(); ++i)
+                if (highest >= 0. && std::abs(slabs[i].print_z - highest) < EPSILON)
+                    polygons_append(targets[i], target);
+        }
+    std::vector<double> margins;
+    for (const auto& area : final_areas) {
+        const auto base      = m_support_params.support_material_flow.with_height(float(area.group.height));
+        const auto interface = m_support_params.support_material_interface_flow.with_height(float(area.group.height));
+        margins.push_back(
+            area.landing ?
+                0. :
+                0.5 * std::max({0., double(base.width() - std::min(base.spacing(), m_support_params.support_material_flow.spacing())),
+                                double(interface.width() -
+                                       std::min(interface.spacing(), m_support_params.support_material_interface_flow.spacing()))}));
+    }
+    const auto        removals = DynaPin::independent_support_removals(slabs, surfaces, targets, margins);
+    std::vector<Area> clipped_areas;
+    for (size_t i = 0; i < final_areas.size(); ++i) {
+        if (removals[i].empty()) {
+            clipped_areas.push_back(std::move(final_areas[i]));
+            continue;
+        }
+        for (auto& polygon : diff_ex({final_areas[i].polygon}, removals[i]))
+            clipped_areas.push_back({std::move(polygon), final_areas[i].group, final_areas[i].layer, final_areas[i].landing});
+    }
+    final_areas = std::move(clipped_areas);
     adjusted = std::move(final_areas);
     // Keep one SupportLayer per Z; group metadata retains local thickness.
     for (SupportLayer* layer : m_object->support_layers()) {
