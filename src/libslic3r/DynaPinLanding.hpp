@@ -19,8 +19,9 @@ struct LandingExtrusion
     size_t        source;
     ExtrusionPath path;
 };
-void                          collect_landing_paths(const ExtrusionEntityCollection& collection, ExtrusionPaths& out);
-std::vector<LandingExtrusion> schedule_landing_paths(std::vector<LandingExtrusion> paths);
+void collect_landing_paths(const ExtrusionEntityCollection& collection, ExtrusionPaths& out);
+// Shared multi-model output should omit source-local links so they cannot skip global scan columns.
+std::vector<LandingExtrusion> schedule_landing_paths(std::vector<LandingExtrusion> paths, bool include_source_links = true);
 // Use the final extrusion heights: a SupportLayer may merge slabs with different bottoms.
 std::vector<Polygons> support_stabilization_regions(const PrintObject& object, size_t layer_count);
 // Limit the X component without accelerating already slower extrusion.

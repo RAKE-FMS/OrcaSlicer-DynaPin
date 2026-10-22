@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <map>
 #include <memory>
 
@@ -217,31 +218,65 @@ void collect_landing_paths(const ExtrusionEntityCollection& collection, Extrusio
     }
 }
 
-std::vector<LandingExtrusion> schedule_landing_paths(std::vector<LandingExtrusion> paths)
+std::vector<LandingExtrusion> schedule_landing_paths(std::vector<LandingExtrusion> paths, bool include_source_links)
 {
-    std::vector<LandingExtrusion> segments;
+    std::map<coord_t, std::vector<LandingExtrusion>> columns;
+    std::vector<LandingExtrusion>                    links;
     for (const auto& item : paths) {
         const Points& points = item.path.polyline.points;
         for (size_t i = 1; i < points.size(); ++i) {
             if (points[i - 1] == points[i])
                 continue;
+            if (points[i - 1].x() != points[i].x()) {
+                if (!include_source_links)
+                    continue;
+                ExtrusionPath link(Polyline(Points{points[i - 1], points[i]}), item.path);
+                if (link.first_point().x() > link.last_point().x())
+                    link.reverse();
+                link.set_reverse();
+                links.push_back({item.source, std::move(link)});
+                continue;
+            }
             ExtrusionPath segment(Polyline(Points{points[i - 1], points[i]}), item.path);
-            if (segment.first_point().x() > segment.last_point().x())
-                segment.reverse();
             segment.set_reverse();
-            segments.push_back({item.source, std::move(segment)});
+            columns[segment.first_point().x()].push_back({item.source, std::move(segment)});
         }
     }
-    // Keep the original Y traversal and flow, including short links between columns.
-    // Splitting the serpentine paths lets overlapping object X ranges interleave.
-    std::stable_sort(segments.begin(), segments.end(), [](const auto& a, const auto& b) {
+
+    // Per-object diagonal links may jump past another object's columns once the
+    // columns are interleaved. Keep only the scan columns and form one global
+    // serpentine order so travel moves connect adjacent columns at the same Y end.
+    std::vector<LandingExtrusion> ordered;
+    bool                          forward = true;
+    for (auto& column_entry : columns) {
+        auto& column = column_entry.second;
+        std::stable_sort(column.begin(), column.end(), [forward](const auto& a, const auto& b) {
+            const coord_t a_edge = forward ? std::min(a.path.first_point().y(), a.path.last_point().y()) :
+                                             std::max(a.path.first_point().y(), a.path.last_point().y());
+            const coord_t b_edge = forward ? std::min(b.path.first_point().y(), b.path.last_point().y()) :
+                                             std::max(b.path.first_point().y(), b.path.last_point().y());
+            return forward ? a_edge < b_edge : a_edge > b_edge;
+        });
+        for (auto& item : column) {
+            const bool ascending = item.path.first_point().y() < item.path.last_point().y();
+            if (ascending != forward)
+                item.path.reverse();
+            ordered.push_back(std::move(item));
+        }
+        forward = !forward;
+    }
+
+    // Preserve source links for callers that need the original extrusion volume.
+    // Shared-layer G-code omits them because they jump past interleaved columns.
+    ordered.insert(ordered.end(), std::make_move_iterator(links.begin()), std::make_move_iterator(links.end()));
+    std::stable_sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
         if (a.path.first_point().x() != b.path.first_point().x())
             return a.path.first_point().x() < b.path.first_point().x();
         const bool a_column = a.path.first_point().x() == a.path.last_point().x();
         const bool b_column = b.path.first_point().x() == b.path.last_point().x();
         return a_column && !b_column;
     });
-    return segments;
+    return ordered;
 }
 
 bool ordered_landing_collection(const ExtrusionEntityCollection& collection)

@@ -5358,7 +5358,7 @@ LayerResult GCode::process_layer(const Print& print,
             }
             const bool shared_landing = landing_instances > 1;
             if (shared_landing) {
-                const auto ordered         = DynaPin::schedule_landing_paths(std::move(landing_paths));
+                const auto ordered         = DynaPin::schedule_landing_paths(std::move(landing_paths), false);
                 size_t     previous_source = size_t(-1);
                 for (const auto& item : ordered) {
                     const auto& instance = instances_to_print[item.source];
