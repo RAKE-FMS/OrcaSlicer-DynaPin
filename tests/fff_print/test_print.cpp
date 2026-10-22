@@ -2330,3 +2330,131 @@ TEST_CASE("DynaPin shared front bounds support independently of pull offsets", "
     CHECK(DynaPin::blocker_for_pin(object, config, pin).poly.points == blocker.poly.points);
     CHECK(DynaPin::surface_for_pin(object, config, pin).poly.points == surface.poly.points);
 }
+
+TEST_CASE("DynaPin landing G-code interleaves overlapping model X ranges", "[Print][DynaPin][LandingOrder]")
+{
+    ResourcesDirGuard  resources_guard(test_resources_dir());
+    TemporaryDirGuard  temporary_guard;
+    DebugStageEnvGuard stage_guard;
+    const std::string  support_type = GENERATE("normal(auto)", "tree(auto)");
+    const std::string  layout       = GENERATE("models", "copies", "different_z", "disabled");
+    const bool         shared       = layout == "models" || layout == "copies";
+    PullConfigFile     file;
+    file.write(pull_reference_fixtures()[0]["config"]);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"enable_dynapin_support_optimization", layout != "disabled"},
+                                   {"dynapin_debug_stage", 1},
+                                   {"dynapin_config_path", file.path.string()},
+                                   {"dynapin_selected_pins", "0,0"},
+                                   {"enable_support", true},
+                                   {"support_type", support_type},
+                                   {"support_style", "tree_slim"},
+                                   {"initial_layer_speed", 20.},
+                                   {"set_other_flow_ratios", true},
+                                   {"gcode_flavor", "klipper"},
+                                   {"exclude_object", true},
+                                   {"gcode_label_objects", true},
+                                   {"slow_down_layers", 0},
+                                   {"slow_down_for_layer_cooling", "0"},
+                                   {"filament_max_volumetric_speed", "1000"}});
+    for (const std::string& key : config.keys()) {
+        ConfigOption* option = config.option(key);
+        if (option->type() == coEnums) {
+            const auto* definition = print_config_def.get(key);
+            if (option->nullable())
+                static_cast<ConfigOptionEnumsGenericNullable*>(option)->keys_map = definition->enum_keys_map;
+            else
+                static_cast<ConfigOptionEnumsGeneric*>(option)->keys_map = definition->enum_keys_map;
+        }
+    }
+    Print print;
+    Model model;
+    init_dynapin_print(print, model, config);
+    if (layout == "copies") {
+        model.objects.front()->add_instance()->set_offset({101., 130., 0.});
+    } else {
+        auto* second = model.add_object(*model.objects.front());
+        second->name = "second.stl";
+        second->instances.front()->set_offset({101., 130., 0.});
+        second->config.set_key_value("support_flow_ratio", new ConfigOptionFloat(0.8));
+    }
+    print.apply(model, config);
+    print.process();
+    REQUIRE(print.num_object_instances() == 2);
+    size_t expected_tracks = 0;
+    double expected_volume = 0.;
+    size_t object_index    = 0;
+    for (auto* object : print.objects()) {
+        REQUIRE(object->support_layers().empty());
+        const double  z     = layout == "different_z" && object_index++ > 0 ? 7.7 : 7.5;
+        auto*         layer = object->add_support_layer(0, 0, 0.2, z);
+        const Polygon footprint(
+            Points{Point::new_scale(-8., -8.), Point::new_scale(8., -8.), Point::new_scale(8., 8.), Point::new_scale(-8., 8.)});
+        layer->support_islands         = {ExPolygon(footprint)};
+        layer->dynapin_landing_regions = {footprint};
+        const Flow flow(0.5, 0.2, 0.4);
+        DynaPin::fill_landing_paths(layer->support_fills.entities, {footprint}, flow, 0.8, 0);
+        ExtrusionPaths paths;
+        DynaPin::collect_landing_paths(layer->support_fills, paths);
+        for (const auto& path : paths) {
+            expected_volume += path.total_volume() * object->instances().size() * object->config().support_flow_ratio.value;
+            const auto& points = path.polyline.points;
+            for (size_t i = 1; i < points.size(); ++i)
+                expected_tracks += points[i - 1].x() == points[i].x() ? object->instances().size() : 0;
+        }
+    }
+    const auto output_path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("dynapin-order-%%%%%%.gcode");
+    GCodeProcessorResult result;
+    print.export_gcode(output_path.string(), &result, nullptr);
+    std::ifstream     stream(output_path.string());
+    const std::string output((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    boost::filesystem::remove(output_path);
+    const std::string role_prefix = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role);
+    bool              support     = false;
+    std::string       active_object;
+    size_t            tracks = 0, owner_changes = 0;
+    double            previous_x = -1e10, previous_y = -1e10, extrusion = 0.;
+    double            previous_z = -1.;
+    size_t            x_resets   = 0;
+    GCodeReader       reader;
+    reader.apply_config(print.config());
+    reader.parse_buffer(output, [&](GCodeReader& state, const GCodeReader::GCodeLine& line) {
+        if (line.cmd_is("EXCLUDE_OBJECT_START")) {
+            CHECK(active_object.empty());
+            active_object = line.raw().substr(line.raw().find("NAME="));
+        } else if (line.cmd_is("EXCLUDE_OBJECT_END")) {
+            CHECK_FALSE(active_object.empty());
+            CHECK(line.raw().substr(line.raw().find("NAME=")) == active_object);
+            active_object.clear();
+        }
+        if (line.raw().find(role_prefix) == 0)
+            support = line.raw() == role_prefix + "Support";
+        if (!support || !line.cmd_is("G1") || !line.extruding(state) || (!line.has_x() && !line.has_y()))
+            return;
+        CHECK_FALSE(active_object.empty());
+        CHECK(state.z() == Catch::Approx(layout == "different_z" && state.y() > 125. ? 7.7 : 7.5).margin(0.001));
+        extrusion += line.dist_E(state);
+        if (std::abs(line.new_X(state) - state.x()) < 0.001 && std::abs(line.new_Y(state) - state.y()) > 1.) {
+            if (state.z() != previous_z)
+                previous_x = -1e10;
+            previous_z = state.z();
+            if (shared)
+                CHECK(state.x() >= previous_x - 0.001);
+            x_resets += state.x() < previous_x - 0.001;
+            CHECK(line.new_F(state) / 60. == Catch::Approx(20.).margin(0.01));
+            ++tracks;
+            owner_changes += previous_y > -1e9 && std::abs(state.y() - previous_y) > 20.;
+            previous_x = state.x();
+            previous_y = state.y();
+        }
+    });
+    CHECK(tracks == expected_tracks);
+    if (shared) {
+        CHECK(owner_changes > 2);
+        CHECK(x_resets == 0);
+    } else
+        CHECK(owner_changes <= 2);
+    CHECK(active_object.empty());
+    const double diameter = print.config().filament_diameter.get_at(0);
+    CHECK(extrusion * PI * diameter * diameter / 4. == Catch::Approx(expected_volume).epsilon(0.002));
+}

@@ -501,3 +501,46 @@ TEST_CASE("DynaPin retains modulated flow along column connectors", "[DynaPin][L
     CHECK(previous == points.back());
     CHECK(reduced_found);
 }
+
+TEST_CASE("DynaPin layer landing schedule interleaves models in machine X order", "[DynaPin][LandingOrder]")
+{
+    std::vector<DynaPin::LandingExtrusion> input;
+    double                                 volume = 0.;
+    for (size_t source = 0; source < 2; ++source) {
+        ExtrusionEntityCollection collection;
+        const Flow                flow(source == 0 ? 0.44 : 0.6, source == 0 ? 0.2 : 0.3, 0.4);
+        DynaPin::fill_landing_paths(collection.entities, {rectangle(0, 0, 4, 4)}, flow, 0.8, 0);
+        ExtrusionPaths paths;
+        DynaPin::collect_landing_paths(collection, paths);
+        for (auto& path : paths) {
+            path.polyline.translate(Point::new_scale(source == 0 ? 1. : 0., source == 0 ? 10. : 0.));
+            volume += path.total_volume();
+            input.push_back({source, std::move(path)});
+        }
+    }
+    // An ordinary path must never enter the landing pass.
+    ExtrusionEntityCollection ordinary;
+    ExtrusionPath             ordinary_path(erSupportMaterial, 0.1, 0.5, 0.2);
+    ordinary_path.polyline = Polyline(Points{Point::new_scale(0., 0.), Point::new_scale(4., 0.)});
+    ordinary.append(ordinary_path);
+    ExtrusionPaths collected;
+    DynaPin::collect_landing_paths(ordinary, collected);
+    CHECK(collected.empty());
+    const auto ordered = DynaPin::schedule_landing_paths(std::move(input));
+    REQUIRE_FALSE(ordered.empty());
+    coord_t previous_x = std::numeric_limits<coord_t>::lowest();
+    size_t  changes = 0, previous_source = ordered.front().source;
+    double  scheduled_volume = 0.;
+    for (const auto& item : ordered) {
+        CHECK(item.path.first_point().x() >= previous_x);
+        CHECK(item.path.last_point().x() >= item.path.first_point().x());
+        previous_x = item.path.first_point().x();
+        CHECK(item.path.is_dynapin_landing);
+        CHECK(item.path.height == Catch::Approx(item.source == 0 ? 0.2 : 0.3));
+        scheduled_volume += item.path.total_volume();
+        changes += previous_source != item.source;
+        previous_source = item.source;
+    }
+    CHECK(changes > 2);
+    CHECK(scheduled_volume == Catch::Approx(volume));
+}

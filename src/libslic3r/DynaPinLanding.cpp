@@ -201,6 +201,49 @@ void order_landing_paths(ExtrusionEntityCollection& collection, const Polygons& 
         assemble_landing(collection, regions, false);
 }
 
+void collect_landing_paths(const ExtrusionEntityCollection& collection, ExtrusionPaths& out)
+{
+    for (const ExtrusionEntity* entity : collection.entities) {
+        if (const auto* nested = dynamic_cast<const ExtrusionEntityCollection*>(entity))
+            collect_landing_paths(*nested, out);
+        else if (const auto* path = dynamic_cast<const ExtrusionPath*>(entity)) {
+            if (path->is_dynapin_landing)
+                out.push_back(*path);
+        } else if (const auto* multi = dynamic_cast<const ExtrusionMultiPath*>(entity)) {
+            for (const auto& path : multi->paths)
+                if (path.is_dynapin_landing)
+                    out.push_back(path);
+        }
+    }
+}
+
+std::vector<LandingExtrusion> schedule_landing_paths(std::vector<LandingExtrusion> paths)
+{
+    std::vector<LandingExtrusion> segments;
+    for (const auto& item : paths) {
+        const Points& points = item.path.polyline.points;
+        for (size_t i = 1; i < points.size(); ++i) {
+            if (points[i - 1] == points[i])
+                continue;
+            ExtrusionPath segment(Polyline(Points{points[i - 1], points[i]}), item.path);
+            if (segment.first_point().x() > segment.last_point().x())
+                segment.reverse();
+            segment.set_reverse();
+            segments.push_back({item.source, std::move(segment)});
+        }
+    }
+    // Keep the original Y traversal and flow, including short links between columns.
+    // Splitting the serpentine paths lets overlapping object X ranges interleave.
+    std::stable_sort(segments.begin(), segments.end(), [](const auto& a, const auto& b) {
+        if (a.path.first_point().x() != b.path.first_point().x())
+            return a.path.first_point().x() < b.path.first_point().x();
+        const bool a_column = a.path.first_point().x() == a.path.last_point().x();
+        const bool b_column = b.path.first_point().x() == b.path.last_point().x();
+        return a_column && !b_column;
+    });
+    return segments;
+}
+
 bool ordered_landing_collection(const ExtrusionEntityCollection& collection)
 {
     return collection.no_sort && !collection.empty() &&
