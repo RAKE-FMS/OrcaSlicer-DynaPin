@@ -2468,6 +2468,20 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     m_last_layer_z = 0.f;
     m_max_layer_z  = 0.f;
     m_dynapin_pulls_done.clear();
+    m_dynapin_stabilization_regions.clear();
+    m_dynapin_support_speed = {};
+    if (print.config().enable_dynapin_support_optimization.value && DynaPin::effective_debug_stage(print) >= 1) {
+        DynaPin::Config config;
+        if (DynaPin::load_config_for_print(print, config) && config.support_speed.layers > 0) {
+            m_dynapin_support_speed = config.support_speed;
+            for (const PrintObject* object : print.objects()) {
+                auto regions = DynaPin::support_stabilization_regions(*object, size_t(config.support_speed.layers));
+                for (size_t i = 0; i < regions.size(); ++i)
+                    if (!regions[i].empty())
+                        m_dynapin_stabilization_regions.emplace(object->support_layers()[i], std::move(regions[i]));
+            }
+        }
+    }
     m_last_width = 0.f;
     m_is_role_based_fan_on.fill(false);
 
@@ -6753,6 +6767,24 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
         append_role_based_fan_marker(erIroning, "_IRONING"sv, ironing_fan_speed >= 0 && path.role() == erIroning);
     };
 
+    const auto   stabilization   = m_dynapin_stabilization_regions.find(m_layer);
+    const double max_x_speed     = m_dynapin_support_speed.max_x_speed > 0. ? m_dynapin_support_speed.max_x_speed :
+                                                                              m_config.get_abs_value("initial_layer_speed");
+    bool         protect_support = false;
+    if (stabilization != m_dynapin_stabilization_regions.end() &&
+        (path.role() == erSupportMaterial || path.role() == erSupportMaterialInterface || path.role() == erSupportTransition) &&
+        !path.is_dynapin_landing && !path.is_force_no_extrusion()) {
+        // Preserve arc output for paths that have no segment requiring a cap.
+        for (const Line& line : path.polyline.lines()) {
+            if (DynaPin::support_segment_speed(line, speed, m_dynapin_support_speed.min_x_distance, max_x_speed) < speed &&
+                !intersection_ln(Lines{line}, stabilization->second).empty()) {
+                protect_support = true;
+                break;
+            }
+        }
+    }
+    if (protect_support && m_enable_cooling_markers)
+        comment += DynaPin::SUPPORT_FIXED_SPEED;
     if (!variable_speed) {
         // F is mm per minute.
         if ((std::abs(writer().get_current_speed() - F) > EPSILON) || (std::abs(_mm3_per_mm - m_last_mm3_mm) > EPSILON)) {
@@ -6817,7 +6849,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             }
             // BBS: use G1 if not enable arc fitting or has no arc fitting result or in spiral_mode mode or we are doing sloped extrusion
             // Attention: G2 and G3 is not supported in spiral_mode mode
-            if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr) {
+            if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr ||
+                protect_support) {
                 double path_length  = 0.;
                 double total_length = sloped == nullptr ? 0. : path.polyline.length() * SCALING_FACTOR;
                 for (const Line& line : path.polyline.lines()) {
@@ -6826,6 +6859,15 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                     if (line_length < EPSILON)
                         continue;
                     path_length += line_length;
+                    if (protect_support) {
+                        double       segment_speed = speed;
+                        const double capped        = DynaPin::support_segment_speed(line, speed, m_dynapin_support_speed.min_x_distance,
+                                                                                    max_x_speed);
+                        if (capped < speed && !intersection_ln(Lines{line}, stabilization->second).empty())
+                            segment_speed = capped;
+                        if (std::abs(m_writer.get_current_speed() - segment_speed * 60.) > EPSILON)
+                            gcode += m_writer.set_speed(segment_speed * 60., "", comment);
+                    }
                     auto dE = e_per_mm * line_length;
                     if (_needSAFC(path)) {
                         auto oldE = dE;

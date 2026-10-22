@@ -5,6 +5,9 @@
 
 namespace Slic3r::DynaPin {
 
+// Keep directional support speeds intact while retaining ordinary cooling adjustment.
+inline constexpr const char* SUPPORT_FIXED_SPEED = ";_DYNAPIN_SUPPORT_FIXED_SPEED";
+
 std::string return_gcode(const Config& config, const Vec3d& return_position);
 
 } // namespace Slic3r::DynaPin

@@ -1,5 +1,6 @@
 #include "DynaPin.hpp"
 #include "DynaPinGCode.hpp"
+#include "DynaPinLanding.hpp"
 #include "ExtrusionEntityCollection.hpp"
 
 #include "Layer.hpp"
@@ -110,6 +111,93 @@ std::vector<Polygons> landing_regions(const std::vector<LandingLayer>&          
     for (Polygons& regions : result)
         if (!regions.empty())
             regions = union_(std::move(regions));
+    return result;
+}
+
+std::vector<Polygons> stabilization_regions(const std::vector<LandingLayer>& layers, const std::vector<Polygons>& bases, size_t layer_count)
+{
+    assert(layers.size() == bases.size());
+    std::vector<Polygons> result(layers.size());
+    if (layer_count == 0)
+        return result;
+    std::vector<size_t> order(layers.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return layers[a].print_z < layers[b].print_z; });
+    for (size_t base = 0; base < layers.size(); ++base) {
+        if (bases[base].empty())
+            continue;
+        double previous_z = layers[base].print_z;
+        size_t count      = 0;
+        for (size_t i = 0; i < order.size() && count < layer_count;) {
+            size_t j = i + 1;
+            while (j < order.size() && layers[order[j]].print_z <= layers[order[i]].print_z + EPSILON)
+                ++j;
+            bool overlaps = false;
+            for (size_t k = i; k < j; ++k) {
+                const size_t id = order[k];
+                if (layers[id].print_z <= layers[base].print_z + EPSILON || layers[id].bottom_z > previous_z + EPSILON)
+                    continue;
+                Polygons region = diff(intersection(layers[id].polygons, bases[base]), bases[id]);
+                overlaps |= !region.empty();
+                polygons_append(result[id], std::move(region));
+            }
+            if (overlaps) {
+                ++count;
+                previous_z = layers[order[i]].print_z;
+            }
+            i = j;
+        }
+    }
+    for (Polygons& region : result)
+        if (!region.empty())
+            region = union_(std::move(region));
+    return result;
+}
+
+std::vector<Polygons> support_stabilization_regions(const PrintObject& object, size_t layer_count)
+{
+    const auto&           support_layers = object.support_layers();
+    std::vector<Polygons> result(support_layers.size());
+    if (layer_count == 0 || std::none_of(support_layers.begin(), support_layers.end(),
+                                         [](const SupportLayer* layer) { return !layer->dynapin_landing_regions.empty(); }))
+        return result;
+    std::vector<LandingLayer> slabs;
+    std::vector<Polygons>     bases;
+    std::vector<size_t>       sources;
+    for (size_t i = 0; i < support_layers.size(); ++i) {
+        const SupportLayer& layer = *support_layers[i];
+        // Final paths can have different heights even when their top Z is shared.
+        std::map<float, std::pair<Polygons, bool>> by_height;
+        auto                                       append = [&](const ExtrusionPath& path) {
+            if (path.is_force_no_extrusion() || path.height <= 0.)
+                return;
+            auto& slab = by_height[path.height];
+            path.polygons_covered_by_width(slab.first, SCALED_EPSILON);
+            slab.second |= path.is_dynapin_landing;
+        };
+        const auto flattened = layer.support_fills.flatten();
+        for (const ExtrusionEntity* entity : flattened.entities) {
+            if (const auto* path = dynamic_cast<const ExtrusionPath*>(entity))
+                append(*path);
+            else if (const auto* multi = dynamic_cast<const ExtrusionMultiPath*>(entity))
+                for (const auto& path : multi->paths)
+                    append(path);
+            else if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(entity))
+                for (const auto& path : loop->paths)
+                    append(path);
+        }
+        for (auto& [height, data] : by_height) {
+            slabs.push_back({layer.print_z - height, layer.print_z, union_(std::move(data.first))});
+            bases.push_back(data.second ? layer.dynapin_landing_regions : Polygons{});
+            sources.push_back(i);
+        }
+    }
+    auto regions = stabilization_regions(slabs, bases, layer_count);
+    for (size_t i = 0; i < slabs.size(); ++i)
+        polygons_append(result[sources[i]], std::move(regions[i]));
+    for (Polygons& region : result)
+        if (!region.empty())
+            region = union_(std::move(region));
     return result;
 }
 
@@ -723,6 +811,27 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
             *error = message;
         return false;
     };
+    if (j.contains("support_speed")) {
+        const auto& settings = j["support_speed"];
+        if (!settings.is_object())
+            return fail("DynaPin support_speed must be an object");
+        if (settings.contains("layers")) {
+            if (!settings["layers"].is_number_integer() || settings["layers"].get<double>() < 0. ||
+                settings["layers"].get<double>() > double(std::numeric_limits<int>::max()))
+                return fail("DynaPin support_speed.layers must be a non-negative integer");
+            config.support_speed.layers = settings["layers"].get<int>();
+        }
+        for (const auto& entry : {std::pair{"min_x_distance", &config.support_speed.min_x_distance},
+                                  std::pair{"max_x_speed", &config.support_speed.max_x_speed}}) {
+            if (settings.contains(entry.first)) {
+                if (!settings[entry.first].is_number())
+                    return fail(std::string("DynaPin support_speed.") + entry.first + " must be a number");
+                *entry.second = settings[entry.first].get<double>();
+            }
+            if (!std::isfinite(*entry.second) || *entry.second < 0.)
+                return fail(std::string("DynaPin support_speed.") + entry.first + " must be finite and non-negative");
+        }
+    }
     const nlohmann::json pull = j.value("pull_gcode", nlohmann::json::object());
     if (!pull.is_object() || !pull.contains("type") || !pull["type"].is_string() || !pull.contains("normal") ||
         !pull["normal"].is_object() || !pull.contains("alternating") || !pull["alternating"].is_object() || !pull.contains("reverted") ||

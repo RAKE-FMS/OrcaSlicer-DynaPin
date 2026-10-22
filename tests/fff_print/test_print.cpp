@@ -112,6 +112,52 @@ TEST_CASE("DynaPin pull settings are isolated by mode", "[DynaPin][DynaPinPull]"
     CHECK(DynaPin::pull_gcode_for_pin(config, {0, 0}).find("G1 X130.0000 Z6.0000") != std::string::npos);
 }
 
+TEST_CASE("DynaPin support speed settings default and validate", "[DynaPin][SupportSpeed]")
+{
+    PullConfigFile file;
+    Print          print;
+    Model          model;
+    init_pull_config_print(print, model, file);
+    auto json = pull_reference_fixtures()[0]["config"];
+    file.write(json);
+    DynaPin::Config defaults;
+    REQUIRE(DynaPin::load_config_for_print(print, defaults));
+    CHECK(defaults.support_speed.layers == 3);
+    CHECK(defaults.support_speed.min_x_distance == 5.);
+    CHECK(defaults.support_speed.max_x_speed == 0.);
+    json["support_speed"] = {{"layers", 2}, {"min_x_distance", 8.}, {"max_x_speed", 12.}};
+    file.write(json);
+    DynaPin::Config custom;
+    REQUIRE(DynaPin::load_config_for_print(print, custom));
+    CHECK(custom.support_speed.layers == 2);
+    CHECK(custom.support_speed.min_x_distance == 8.);
+    CHECK(custom.support_speed.max_x_speed == 12.);
+    for (const auto& invalid : {nlohmann::json(-1), nlohmann::json(1.5), nlohmann::json(true), nlohmann::json("3")}) {
+        json["support_speed"]["layers"] = invalid;
+        file.write(json);
+        DynaPin::Config config;
+        std::string     error;
+        CHECK_FALSE(DynaPin::load_config_for_print(print, config, &error));
+        CHECK_FALSE(error.empty());
+    }
+    json["support_speed"]["layers"] = 0;
+    file.write(json);
+    DynaPin::Config disabled;
+    REQUIRE(DynaPin::load_config_for_print(print, disabled));
+    CHECK(disabled.support_speed.layers == 0);
+    for (const char* key : {"min_x_distance", "max_x_speed"}) {
+        for (const auto& invalid : {nlohmann::json(-1.), nlohmann::json("nan"), nlohmann::json(true)}) {
+            auto bad                  = json;
+            bad["support_speed"][key] = invalid;
+            file.write(bad);
+            DynaPin::Config config;
+            std::string     error;
+            CHECK_FALSE(DynaPin::load_config_for_print(print, config, &error));
+            CHECK_FALSE(error.empty());
+        }
+    }
+}
+
 TEST_CASE("DynaPin rejects legacy or invalid pull configurations", "[DynaPin][DynaPinPull]")
 {
     const int invalid_case = GENERATE(0, 1, 2, 3, 4, 5, 6, 7);
@@ -2061,6 +2107,120 @@ TEST_CASE("Tree pin selection preserves multi-stage overhang choices", "[Print][
             }
         }
     }
+}
+
+TEST_CASE("DynaPin final G-code slows X support extrusion for exactly three layers", "[DynaPin][SupportSpeed]")
+{
+    ResourcesDirGuard   resources_guard(test_resources_dir());
+    TemporaryDirGuard   temporary_guard;
+    DebugStageEnvGuard  stage_guard;
+    const bool          arc_fitting   = GENERATE(false, true);
+    const bool          mixed_heights = GENERATE(false, true);
+    const ExtrusionRole support_role  = GENERATE(erSupportMaterial, erSupportMaterialInterface, erSupportTransition);
+    const std::string   role_label    = ExtrusionEntity::role_to_string(support_role);
+    auto                json          = pull_reference_fixtures()[0]["config"];
+    json["support_speed"]             = {{"layers", 3}, {"min_x_distance", 5.}, {"max_x_speed", 0.}};
+    PullConfigFile file;
+    file.write(json);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"enable_dynapin_support_optimization", true},
+                                   {"dynapin_debug_stage", 2},
+                                   {"dynapin_config_path", file.path.string()},
+                                   {"dynapin_selected_pins", "0,0"},
+                                   {"enable_support", true},
+                                   {"support_type", "normal(auto)"},
+                                   {"initial_layer_speed", 20.},
+                                   {"support_speed", 80.},
+                                   {"support_interface_speed", "100%"},
+                                   {"bridge_speed", 80.},
+                                   {"slow_down_layers", 0},
+                                   {"max_volumetric_extrusion_rate_slope", 20.},
+                                   {"fan_speedup_time", 1.},
+                                   {"slow_down_for_layer_cooling", "0"},
+                                   {"filament_max_volumetric_speed", "1000"},
+                                   {"enable_arc_fitting", arc_fitting}});
+    Print print;
+    Model model;
+    for (const std::string& key : config.keys()) {
+        ConfigOption* option = config.option(key);
+        if (option->type() == coEnums) {
+            const auto* definition = print_config_def.get(key);
+            if (option->nullable())
+                static_cast<ConfigOptionEnumsGenericNullable*>(option)->keys_map = definition->enum_keys_map;
+            else
+                static_cast<ConfigOptionEnumsGeneric*>(option)->keys_map = definition->enum_keys_map;
+        }
+    }
+    init_dynapin_print(print, model, config);
+    print.process();
+    PrintObject* object = print.get_object(size_t(0));
+    REQUIRE(object->support_layers().empty());
+    const Polygon footprint(
+        Points{Point::new_scale(-9., -9.), Point::new_scale(9., -9.), Point::new_scale(9., 9.), Point::new_scale(-9., 9.)});
+    for (int i = 0; i < 5; ++i) {
+        SupportLayer* layer = object->add_support_layer(i, i, mixed_heights ? 0.1 : 0.2, 7.5 + i * 0.2);
+        if (!mixed_heights || i > 0)
+            layer->support_islands = {ExPolygon(footprint)};
+        if (i == 0)
+            layer->dynapin_landing_regions = {footprint};
+        ExtrusionPath path(support_role, 0.1, 0.5f, 0.2f);
+        path.polyline = Polyline(
+            Points{Point::new_scale(-8., -8.), Point::new_scale(8., -8.), Point::new_scale(8., 8.), Point::new_scale(-8., -8.)});
+        path.is_dynapin_landing = i == 0;
+        if (arc_fitting) {
+            path.simplify_by_fitting_arc(scale_(0.01));
+            REQUIRE_FALSE(path.polyline.fitting_result.empty());
+        }
+        layer->support_fills.append(path);
+    }
+    const auto output_path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("dynapin-speed-%%%%%%.gcode");
+    GCodeProcessorResult result;
+    print.export_gcode(output_path.string(), &result, nullptr);
+    std::ifstream     stream(output_path.string());
+    const std::string output((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    boost::filesystem::remove(output_path);
+    const std::string role_prefix = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role);
+    REQUIRE_FALSE(output.empty());
+    REQUIRE(output.find(role_prefix + role_label) != std::string::npos);
+    REQUIRE(output.find('\0') == std::string::npos);
+    size_t        callbacks = 0, support_tags = 0, support_moves = 0;
+    bool          support = false;
+    std::set<int> capped_layers;
+    size_t        normal_y = 0, normal_later = 0, diagonal = 0;
+    GCodeReader   reader;
+    reader.apply_config(print.config());
+    reader.parse_buffer(output, [&](GCodeReader& state, const GCodeReader::GCodeLine& line) {
+        ++callbacks;
+        if (line.raw().find(role_prefix) == 0) {
+            support = line.raw() == role_prefix + role_label;
+            support_tags += support;
+        }
+        support_moves += support && line.has_x();
+        if (!support || !line.extruding(state) || !line.cmd_is("G1") || (!line.has_x() && !line.has_y()))
+            return;
+        const int    index = int(std::round((state.z() - 7.5) / 0.2));
+        const double dx    = std::abs(line.new_X(state) - state.x());
+        const double dy    = std::abs(line.new_Y(state) - state.y());
+        const double speed = line.new_F(state) / 60.;
+        if (index >= 1 && index <= 3) {
+            if (dx >= 5.) {
+                CHECK(speed * dx / std::hypot(dx, dy) <= 20.01);
+                capped_layers.insert(index);
+                diagonal += dy > 5.;
+            } else if (dy > 5.) {
+                CHECK(speed == Catch::Approx(80.).margin(0.01));
+                ++normal_y;
+            }
+        } else if (index == 4) {
+            CHECK(speed == Catch::Approx(80.).margin(0.01));
+            ++normal_later;
+        }
+    });
+    CAPTURE(callbacks, support_tags, support_moves);
+    CHECK(capped_layers == std::set<int>{1, 2, 3});
+    CHECK(diagonal >= 3);
+    CHECK(normal_y >= 3);
+    CHECK(normal_later >= 3);
 }
 
 TEST_CASE("DynaPin pulls share one lift and restore the saved position", "[DynaPin][DynaPinPull]")

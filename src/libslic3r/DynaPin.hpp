@@ -90,6 +90,13 @@ struct PullConfig
     PullMoveConfig        reverted;
 };
 
+struct SupportSpeedConfig
+{
+    int    layers         = 3;
+    double min_x_distance = 5.; // mm per extrusion segment
+    double max_x_speed    = 0.; // mm/s; 0 uses initial_layer_speed
+};
+
 struct Config
 {
     int            row_count        = 0;
@@ -104,6 +111,7 @@ struct Config
     double         blocker_height_z = 0.;
     double         landing_edge_inset_y = 0.;
     PullConfig     pull_gcode;
+    SupportSpeedConfig support_speed;
 };
 
 struct BlockerZRange
@@ -170,6 +178,8 @@ std::vector<LandingLayerAdjustment> align_landing_layers(const std::vector<Landi
 std::vector<Polygons> landing_regions(const std::vector<LandingLayer>&          layers,
                                       const std::vector<VirtualSupportSurface>& surfaces,
                                       size_t                                    layer_count);
+// Count support layers above each actual landing footprint, excluding the base itself.
+std::vector<Polygons> stabilization_regions(const std::vector<LandingLayer>& layers, const std::vector<Polygons>& bases, size_t layer_count);
 // First-layer footprints expanded only within the corresponding pin surface.
 std::vector<LandingLayer> landing_base_layers(const std::vector<LandingLayer>&          layers,
                                               const std::vector<VirtualSupportSurface>& surfaces,

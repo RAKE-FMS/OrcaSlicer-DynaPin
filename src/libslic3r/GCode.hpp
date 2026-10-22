@@ -5,6 +5,7 @@
 #include "ExPolygon.hpp"
 #include "GCodeWriter.hpp"
 #include "Layer.hpp"
+#include "DynaPin.hpp"
 #include "Point.hpp"
 #include "PlaceholderParser.hpp"
 #include "PrintConfig.hpp"
@@ -615,6 +616,8 @@ private:
 
     Print *m_print{nullptr};
     std::set<std::string> m_dynapin_pulls_done;
+    DynaPin::SupportSpeedConfig      m_dynapin_support_speed;
+    std::map<const Layer*, Polygons> m_dynapin_stabilization_regions;
 
     std::vector<const PrintObject*> m_printed_objects;
 

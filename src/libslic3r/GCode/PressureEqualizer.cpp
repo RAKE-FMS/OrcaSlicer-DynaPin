@@ -10,6 +10,7 @@
 #include "../GCode.hpp"
 
 #include "PressureEqualizer.hpp"
+#include "../DynaPinGCode.hpp"
 #include "fast_float/fast_float.h"
 #include "GCodeWriter.hpp"
 
@@ -291,7 +292,9 @@ bool PressureEqualizer::process_line(const char *line, const char *line_end, GCo
     assert(!found_extrude_set_speed_tag || !found_extrude_end_tag);
 
     if (found_extrude_set_speed_tag)
-        this->opened_extrude_set_speed_block = true;
+        // Flow smoothing would slow short Y links between the capped X strokes.
+        // CoolingBuffer still sees the original speed-block markers downstream.
+        this->opened_extrude_set_speed_block = !boost::contains(str_line, DynaPin::SUPPORT_FIXED_SPEED);
     else if (found_extrude_end_tag)
         this->opened_extrude_set_speed_block = false;
 

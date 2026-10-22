@@ -6,6 +6,7 @@
 #include "libslic3r/ShortestPath.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/GCode.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/GCode/CoolingBuffer.hpp"
 #include "libslic3r/GCode/FanMover.hpp"
 
@@ -95,6 +96,66 @@ TEST_CASE("DynaPin ignores support beginning far above an unused pin", "[DynaPin
     const Polygon area  = rectangle(0, 0, 10, 10);
     const auto    masks = DynaPin::landing_regions({{50., 50.2, {area}}}, {{{0, 0}, area, 10.}}, 3);
     CHECK(masks.front().empty());
+}
+
+TEST_CASE("DynaPin stabilization starts after each landing and stops after three real layers", "[DynaPin][SupportSpeed]")
+{
+    const Polygon                            left = rectangle(0, 0, 10, 10), right = rectangle(20, 0, 10, 10);
+    const std::vector<DynaPin::LandingLayer> layers{{10., 10.2, {left}},         {10.2, 10.4, {left, right}}, {10.4, 10.6, {left, right}},
+                                                    {10.6, 10.8, {left, right}}, {10.8, 11., {left, right}},  {11., 11.2, {left, right}}};
+    const std::vector<Polygons>              bases{{left}, {right}, {}, {}, {}, {}};
+    const auto                               masks = DynaPin::stabilization_regions(layers, bases, 3);
+    REQUIRE(masks.size() == layers.size());
+    CHECK(masks[0].empty());
+    CHECK(intersection(masks[1], {left}).size() == 1);
+    CHECK(intersection(masks[1], {right}).empty());
+    CHECK(intersection(masks[3], {left}).size() == 1);
+    CHECK(intersection(masks[4], {left}).empty());
+    CHECK(intersection(masks[4], {right}).size() == 1);
+    CHECK(masks[5].empty());
+    const auto disabled = DynaPin::stabilization_regions(layers, bases, 0);
+    CHECK(std::all_of(disabled.begin(), disabled.end(), [](const Polygons& mask) { return mask.empty(); }));
+}
+
+TEST_CASE("DynaPin stabilization stops at gaps and counts coincident Z only once", "[DynaPin][SupportSpeed]")
+{
+    const Polygon                            area = rectangle(0, 0, 10, 10);
+    const std::vector<DynaPin::LandingLayer> layers{{10., 10.2, {area}},  {10.2, 10.4, {area}}, {10.2, 10.4, {area}},
+                                                    {10.4, 10.6, {area}}, {10.6, 10.8, {area}}, {10.8, 11., {area}}};
+    const std::vector<Polygons>              bases{{area}, {}, {}, {}, {}, {}};
+    const auto                               masks = DynaPin::stabilization_regions(layers, bases, 3);
+    CHECK(masks[0].empty());
+    for (size_t i = 1; i <= 4; ++i)
+        CHECK_FALSE(masks[i].empty());
+    CHECK(masks[5].empty());
+    const auto gap = DynaPin::stabilization_regions({{10., 10.2, {area}}, {10.4, 10.6, {area}}}, {{area}, {}}, 3);
+    CHECK(gap[1].empty());
+}
+
+TEST_CASE("DynaPin stabilization never consumes support below the landing top", "[DynaPin][SupportSpeed]")
+{
+    const Polygon                            area = rectangle(0, 0, 10, 10);
+    const std::vector<DynaPin::LandingLayer> layers{{10., 10.1, {area}},  {10., 10.2, {area}},  {10.2, 10.4, {area}},
+                                                    {10.4, 10.6, {area}}, {10.6, 10.8, {area}}, {10.8, 11., {area}}};
+    const auto                               masks = DynaPin::stabilization_regions(layers, {{}, {area}, {}, {}, {}, {}}, 3);
+    CHECK(masks[0].empty());
+    CHECK(masks[1].empty());
+    CHECK_FALSE(masks[2].empty());
+    CHECK_FALSE(masks[3].empty());
+    CHECK_FALSE(masks[4].empty());
+    CHECK(masks[5].empty());
+}
+
+TEST_CASE("DynaPin support speed caps only long X extrusion components", "[DynaPin][SupportSpeed]")
+{
+    const Point origin(0, 0);
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(10., 0.)), 80., 5., 20.) == Catch::Approx(20.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(-10., 0.)), 80., 5., 20.) == Catch::Approx(20.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(0., 10.)), 80., 5., 20.) == Catch::Approx(80.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(4.9, 0.)), 80., 5., 20.) == Catch::Approx(80.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(5., 0.)), 80., 5., 20.) == Catch::Approx(20.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(6., 8.)), 80., 5., 20.) == Catch::Approx(100. / 3.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(10., 0.)), 10., 5., 20.) == Catch::Approx(10.));
 }
 
 TEST_CASE("DynaPin landing layers start on each pin without moving their upper connection", "[DynaPin][LandingZ]")
@@ -233,6 +294,32 @@ TEST_CASE("DynaPin landing paths preserve traversal and extrusion volume", "[Dyn
     }
     CHECK(previous == original.last_point());
     CHECK(landing_length == Catch::Approx(4.0));
+}
+
+TEST_CASE("DynaPin mixed support speeds survive cooling and fan look-ahead", "[DynaPin][SupportSpeed][Cooling]")
+{
+    const bool  slowdown = GENERATE(false, true);
+    GCode       generator;
+    PrintConfig config;
+    config.slow_down_for_layer_cooling.values = {slowdown};
+    config.slow_down_layer_time.values        = {4.};
+    config.fan_min_speed.values               = {40};
+    config.fan_max_speed.values               = {40};
+    generator.apply_print_config(config);
+    generator.writer().set_extruders({0});
+    CoolingBuffer     cooling(generator);
+    const std::string source = "G1 F4200;_EXTRUDE_SET_SPEED\nG1 F1200;_EXTRUDE_SET_SPEED\nG1 X100 E1\n"
+                               "G1 F4200;_EXTRUDE_SET_SPEED\nG1 Y10 E1\n"
+                               "G1 F1200;_EXTRUDE_SET_SPEED\nG1 X200 E1\n;_EXTRUDE_END\n";
+    const std::string cooled = cooling.process_layer(std::string(source), 10, true);
+    FanMover          mover(generator.writer(), 1.f, true, false, false, 0.f);
+    const std::string output = mover.process_gcode(cooled, true);
+    INFO(output);
+    GCodeReader reader;
+    reader.parse_buffer(output, [&](GCodeReader& state, const GCodeReader::GCodeLine& line) {
+        if (line.cmd_is("G1") && line.has_y())
+            CHECK(line.new_F(state) == Catch::Approx(4200.));
+    });
 }
 
 TEST_CASE("DynaPin cooling overrides role fans and survives fan look-ahead", "[DynaPin][Cooling]")

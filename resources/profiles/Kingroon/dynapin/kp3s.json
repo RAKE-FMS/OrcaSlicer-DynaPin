@@ -20,6 +20,11 @@
     "blocker_height_z": 5,
     "landing_edge_inset_y": 1.2
   },
+  "support_speed": {
+    "layers": 3,
+    "min_x_distance": 5,
+    "max_x_speed": 0
+  },
   "pull_gcode": {
     "type": "alternating",
     "normal": {
