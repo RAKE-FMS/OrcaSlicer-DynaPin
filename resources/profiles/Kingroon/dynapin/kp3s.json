@@ -69,7 +69,7 @@
         "fast_feed_rate": 5000,
         "feed_rate": 1500,
         "pull_feedrate_fast": 3000,
-        "y_origin_offset":1.8,
+        "y_origin_offset":0,
         "alternating_y_offset": -1,
         "y_offset": -3.5,
         "approach_y_offset": -4,
