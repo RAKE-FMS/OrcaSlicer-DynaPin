@@ -146,16 +146,18 @@ TEST_CASE("DynaPin stabilization never consumes support below the landing top", 
     CHECK(masks[5].empty());
 }
 
-TEST_CASE("DynaPin support speed caps only long X extrusion components", "[DynaPin][SupportSpeed]")
+TEST_CASE("DynaPin support speed caps X extrusion components regardless of length", "[DynaPin][SupportSpeed]")
 {
     const Point origin(0, 0);
-    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(10., 0.)), 80., 5., 20.) == Catch::Approx(20.));
-    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(-10., 0.)), 80., 5., 20.) == Catch::Approx(20.));
-    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(0., 10.)), 80., 5., 20.) == Catch::Approx(80.));
-    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(4.9, 0.)), 80., 5., 20.) == Catch::Approx(80.));
-    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(5., 0.)), 80., 5., 20.) == Catch::Approx(20.));
-    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(6., 8.)), 80., 5., 20.) == Catch::Approx(100. / 3.));
-    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(10., 0.)), 10., 5., 20.) == Catch::Approx(10.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(10., 0.)), 80., 20.) == Catch::Approx(20.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(-10., 0.)), 80., 20.) == Catch::Approx(20.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(0., 10.)), 80., 20.) == Catch::Approx(80.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(4.9, 0.)), 80., 20.) == Catch::Approx(20.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(5., 0.)), 80., 20.) == Catch::Approx(20.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(0.05, 0.)), 80., 20.) == Catch::Approx(20.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(0.3, 0.4)), 80., 20.) == Catch::Approx(100. / 3.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(6., 8.)), 80., 20.) == Catch::Approx(100. / 3.));
+    CHECK(DynaPin::support_segment_speed(Line(origin, Point::new_scale(10., 0.)), 10., 20.) == Catch::Approx(10.));
 }
 
 TEST_CASE("DynaPin landing layers start on each pin without moving their upper connection", "[DynaPin][LandingZ]")

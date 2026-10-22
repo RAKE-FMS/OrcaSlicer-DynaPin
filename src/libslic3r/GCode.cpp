@@ -6881,7 +6881,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
         !path.is_dynapin_landing && !path.is_force_no_extrusion()) {
         // Preserve arc output for paths that have no segment requiring a cap.
         for (const Line& line : path.polyline.lines()) {
-            if (DynaPin::support_segment_speed(line, speed, m_dynapin_support_speed.min_x_distance, max_x_speed) < speed &&
+            if (DynaPin::support_segment_speed(line, speed, max_x_speed) < speed &&
                 !intersection_ln(Lines{line}, stabilization->second).empty()) {
                 protect_support = true;
                 break;
@@ -6966,8 +6966,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                     path_length += line_length;
                     if (protect_support) {
                         double       segment_speed = speed;
-                        const double capped        = DynaPin::support_segment_speed(line, speed, m_dynapin_support_speed.min_x_distance,
-                                                                                    max_x_speed);
+                        const double capped        = DynaPin::support_segment_speed(line, speed, max_x_speed);
                         if (capped < speed && !intersection_ln(Lines{line}, stabilization->second).empty())
                             segment_speed = capped;
                         if (std::abs(m_writer.get_current_speed() - segment_speed * 60.) > EPSILON)

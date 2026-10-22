@@ -123,14 +123,13 @@ TEST_CASE("DynaPin support speed settings default and validate", "[DynaPin][Supp
     DynaPin::Config defaults;
     REQUIRE(DynaPin::load_config_for_print(print, defaults));
     CHECK(defaults.support_speed.layers == 3);
-    CHECK(defaults.support_speed.min_x_distance == 5.);
     CHECK(defaults.support_speed.max_x_speed == 0.);
+    // Existing JSON may still contain min_x_distance; it no longer gates the cap.
     json["support_speed"] = {{"layers", 2}, {"min_x_distance", 8.}, {"max_x_speed", 12.}};
     file.write(json);
     DynaPin::Config custom;
     REQUIRE(DynaPin::load_config_for_print(print, custom));
     CHECK(custom.support_speed.layers == 2);
-    CHECK(custom.support_speed.min_x_distance == 8.);
     CHECK(custom.support_speed.max_x_speed == 12.);
     for (const auto& invalid : {nlohmann::json(-1), nlohmann::json(1.5), nlohmann::json(true), nlohmann::json("3")}) {
         json["support_speed"]["layers"] = invalid;
@@ -145,7 +144,7 @@ TEST_CASE("DynaPin support speed settings default and validate", "[DynaPin][Supp
     DynaPin::Config disabled;
     REQUIRE(DynaPin::load_config_for_print(print, disabled));
     CHECK(disabled.support_speed.layers == 0);
-    for (const char* key : {"min_x_distance", "max_x_speed"}) {
+    for (const char* key : {"max_x_speed"}) {
         for (const auto& invalid : {nlohmann::json(-1.), nlohmann::json("nan"), nlohmann::json(true)}) {
             auto bad                  = json;
             bad["support_speed"][key] = invalid;
@@ -2119,7 +2118,7 @@ TEST_CASE("DynaPin final G-code slows X support extrusion for exactly three laye
     const ExtrusionRole support_role  = GENERATE(erSupportMaterial, erSupportMaterialInterface, erSupportTransition);
     const std::string   role_label    = ExtrusionEntity::role_to_string(support_role);
     auto                json          = pull_reference_fixtures()[0]["config"];
-    json["support_speed"]             = {{"layers", 3}, {"min_x_distance", 5.}, {"max_x_speed", 0.}};
+    json["support_speed"]             = {{"layers", 3}, {"max_x_speed", 0.}};
     PullConfigFile file;
     file.write(json);
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
@@ -2164,8 +2163,8 @@ TEST_CASE("DynaPin final G-code slows X support extrusion for exactly three laye
         if (i == 0)
             layer->dynapin_landing_regions = {footprint};
         ExtrusionPath path(support_role, 0.1, 0.5f, 0.2f);
-        path.polyline = Polyline(
-            Points{Point::new_scale(-8., -8.), Point::new_scale(8., -8.), Point::new_scale(8., 8.), Point::new_scale(-8., -8.)});
+        path.polyline           = Polyline(Points{Point::new_scale(-8., -8.), Point::new_scale(-6., -8.), Point::new_scale(-6., -6.),
+                                                  Point::new_scale(8., -6.), Point::new_scale(8., 8.), Point::new_scale(-8., -8.)});
         path.is_dynapin_landing = i == 0;
         if (arc_fitting) {
             path.simplify_by_fitting_arc(scale_(0.01));
@@ -2186,7 +2185,7 @@ TEST_CASE("DynaPin final G-code slows X support extrusion for exactly three laye
     size_t        callbacks = 0, support_tags = 0, support_moves = 0;
     bool          support = false;
     std::set<int> capped_layers;
-    size_t        normal_y = 0, normal_later = 0, diagonal = 0;
+    size_t        normal_y = 0, normal_later = 0, diagonal = 0, short_x = 0;
     GCodeReader   reader;
     reader.apply_config(print.config());
     reader.parse_buffer(output, [&](GCodeReader& state, const GCodeReader::GCodeLine& line) {
@@ -2203,10 +2202,11 @@ TEST_CASE("DynaPin final G-code slows X support extrusion for exactly three laye
         const double dy    = std::abs(line.new_Y(state) - state.y());
         const double speed = line.new_F(state) / 60.;
         if (index >= 1 && index <= 3) {
-            if (dx >= 5.) {
+            if (dx > 0.001) {
                 CHECK(speed * dx / std::hypot(dx, dy) <= 20.01);
                 capped_layers.insert(index);
                 diagonal += dy > 5.;
+                short_x += dx < 5.;
             } else if (dy > 5.) {
                 CHECK(speed == Catch::Approx(80.).margin(0.01));
                 ++normal_y;
@@ -2219,6 +2219,7 @@ TEST_CASE("DynaPin final G-code slows X support extrusion for exactly three laye
     CAPTURE(callbacks, support_tags, support_moves);
     CHECK(capped_layers == std::set<int>{1, 2, 3});
     CHECK(diagonal >= 3);
+    CHECK(short_x >= 3);
     CHECK(normal_y >= 3);
     CHECK(normal_later >= 3);
 }

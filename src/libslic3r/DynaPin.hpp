@@ -93,7 +93,6 @@ struct PullConfig
 struct SupportSpeedConfig
 {
     int    layers         = 3;
-    double min_x_distance = 5.; // mm per extrusion segment
     double max_x_speed    = 0.; // mm/s; 0 uses initial_layer_speed
 };
 

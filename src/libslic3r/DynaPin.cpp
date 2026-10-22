@@ -1120,16 +1120,14 @@ bool load_config_for_print(const Print& print, Config& config, std::string* erro
                 return fail("DynaPin support_speed.layers must be a non-negative integer");
             config.support_speed.layers = settings["layers"].get<int>();
         }
-        for (const auto& entry : {std::pair{"min_x_distance", &config.support_speed.min_x_distance},
-                                  std::pair{"max_x_speed", &config.support_speed.max_x_speed}}) {
-            if (settings.contains(entry.first)) {
-                if (!settings[entry.first].is_number())
-                    return fail(std::string("DynaPin support_speed.") + entry.first + " must be a number");
-                *entry.second = settings[entry.first].get<double>();
-            }
-            if (!std::isfinite(*entry.second) || *entry.second < 0.)
-                return fail(std::string("DynaPin support_speed.") + entry.first + " must be finite and non-negative");
+        // Legacy min_x_distance is ignored: short segments also need protection.
+        if (settings.contains("max_x_speed")) {
+            if (!settings["max_x_speed"].is_number())
+                return fail("DynaPin support_speed.max_x_speed must be a number");
+            config.support_speed.max_x_speed = settings["max_x_speed"].get<double>();
         }
+        if (!std::isfinite(config.support_speed.max_x_speed) || config.support_speed.max_x_speed < 0.)
+            return fail("DynaPin support_speed.max_x_speed must be finite and non-negative");
     }
     const nlohmann::json pull = j.value("pull_gcode", nlohmann::json::object());
     if (!pull.is_object() || !pull.contains("type") || !pull["type"].is_string() || !pull.contains("normal") ||

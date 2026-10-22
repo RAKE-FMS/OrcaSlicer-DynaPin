@@ -22,7 +22,6 @@
   },
   "support_speed": {
     "layers": 3,
-    "min_x_distance": 5,
     "max_x_speed": 0
   },
   "landing_slope": {

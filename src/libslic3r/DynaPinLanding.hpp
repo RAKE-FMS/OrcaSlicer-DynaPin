@@ -71,7 +71,7 @@ std::vector<LandingExtrusion> schedule_landing_paths(std::vector<LandingExtrusio
 // Use the final extrusion heights: a SupportLayer may merge slabs with different bottoms.
 std::vector<Polygons> support_stabilization_regions(const PrintObject& object, size_t layer_count);
 // Limit the X component without accelerating already slower extrusion.
-double support_segment_speed(const Line& line, double speed, double min_x_distance, double max_x_speed);
+double support_segment_speed(const Line& line, double speed, double max_x_speed);
 bool   ordered_landing_collection(const ExtrusionEntityCollection& collection);
 } // namespace Slic3r::DynaPin
 

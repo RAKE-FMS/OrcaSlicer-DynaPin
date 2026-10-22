@@ -11,10 +11,10 @@
 
 namespace Slic3r::DynaPin {
 
-double support_segment_speed(const Line& line, double speed, double min_x_distance, double max_x_speed)
+double support_segment_speed(const Line& line, double speed, double max_x_speed)
 {
     const double dx = std::abs(unscale<double>(line.b.x() - line.a.x()));
-    if (dx < EPSILON || dx + EPSILON < min_x_distance)
+    if (dx < EPSILON)
         return speed;
     return std::min(speed, max_x_speed * unscale<double>(line.length()) / dx);
 }
