@@ -22,8 +22,13 @@
   },
   "support_speed": {
     "layers": 3,
-    "min_x_distance": 5,
     "max_x_speed": 0
+  },
+  "landing_slope": {
+    "reference_x": 25.0,
+    "slope_x": -0.006666666666666667,
+    "max_band_width": 7.5,
+    "travel_clearance": 2.0
   },
   "pull_gcode": {
     "type": "alternating",

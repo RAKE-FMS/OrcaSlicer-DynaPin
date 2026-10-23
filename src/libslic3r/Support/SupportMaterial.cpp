@@ -6,6 +6,7 @@
 #include "SupportMaterial.hpp"
 #include "SupportCommon.hpp"
 #include "../DynaPin.hpp"
+#include "../DynaPinSupport.hpp"
 #include "../DynaPinPlacement.hpp"
 #include "Geometry.hpp"
 #include "Point.hpp"
@@ -82,7 +83,8 @@ static SupportGeneratorLayersPtr align_dynapin_layers(const std::vector<DynaPin:
                                                       SupportGeneratorLayersPtr&                         bottom_contacts,
                                                       SupportGeneratorLayersPtr&                         top_contacts,
                                                       SupportGeneratorLayersPtr&                         base_interfaces,
-                                                      SupportGeneratorLayerStorage&                      storage)
+                                                      SupportGeneratorLayerStorage&                      storage,
+                                                      double                                             expansion)
 {
     SupportGeneratorLayersPtr added;
     if (surfaces.empty())
@@ -98,7 +100,8 @@ static SupportGeneratorLayersPtr align_dynapin_layers(const std::vector<DynaPin:
             owners.push_back(group);
             slabs.push_back({layer->bottom_print_z(), layer->print_z, layer->polygons});
         }
-    for (const auto& adjustment : DynaPin::align_landing_layers(slabs, surfaces, params.min_layer_height, params.max_suport_layer_height)) {
+    for (const auto& adjustment :
+         DynaPin::align_landing_layers(slabs, surfaces, params.min_layer_height, params.max_suport_layer_height, expansion)) {
         SupportGeneratorLayer& source = *sources[adjustment.source];
         source.polygons               = diff(source.polygons, adjustment.layers.front().polygons);
         for (size_t j = 0; j < adjustment.layers.size(); ++j) {
@@ -1148,9 +1151,10 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
         // Raft layers sit below the object; leave them so first-layer adhesion is kept.
     }
 
-    SupportGeneratorLayersPtr aligned_layers = align_dynapin_layers(dynapin_surfaces, m_slicing_params, intermediate_layers,
+    const auto                landing_surfaces = DynaPin::landing_surfaces_for_object(object);
+    SupportGeneratorLayersPtr aligned_layers = align_dynapin_layers(landing_surfaces, m_slicing_params, intermediate_layers,
                                                                     interface_layers, bottom_contacts, top_contacts, base_interface_layers,
-                                                                    layer_storage);
+                                                                    layer_storage, m_object_config->raft_first_layer_expansion.value);
     if (!aligned_layers.empty())
         this->trim_support_layers_by_object(object, aligned_layers, m_slicing_params.gap_support_object,
                                             m_slicing_params.gap_object_support, m_support_params.gap_xy);
@@ -1160,12 +1164,15 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     append(landing_sources, bottom_contacts);
     append(landing_sources, top_contacts);
     append(landing_sources, base_interface_layers);
-    auto landing_layers = make_dynapin_base_layers(dynapin_surfaces, m_object_config->raft_first_layer_expansion.value, landing_sources,
+    const bool sloped_landing = std::any_of(landing_surfaces.begin(), landing_surfaces.end(),
+                                            [](const auto& s) { return s.source_print_z != 0.; });
+    auto landing_layers = make_dynapin_base_layers(landing_surfaces,
+                                                   sloped_landing ? 0. : m_object_config->raft_first_layer_expansion.value, landing_sources,
                                                    layer_storage);
     // Replace the whole original first footprint, including the exposed edge
     // strips trimmed from the new base. They must not survive as ordinary fill.
     for (auto* source : landing_sources)
-        for (const auto& surface : dynapin_surfaces)
+        for (const auto& surface : landing_surfaces)
             if (std::abs(source->bottom_print_z() - surface.print_z) < EPSILON)
                 source->polygons = diff(source->polygons, {surface.poly});
     if (!landing_layers.empty()) {
@@ -1186,6 +1193,36 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
         }
         append(intermediate_layers, landing_layers);
         std::sort(intermediate_layers.begin(), intermediate_layers.end(), [](const auto* a, const auto* b) { return *a < *b; });
+    }
+
+    if (!landing_surfaces.empty()) {
+        SupportGeneratorLayersPtr candidates = intermediate_layers;
+        append(candidates, interface_layers);
+        append(candidates, bottom_contacts);
+        append(candidates, top_contacts);
+        append(candidates, base_interface_layers);
+        std::vector<DynaPin::LandingLayer> slabs;
+        std::vector<Polygons>              targets;
+        std::vector<double>                margins;
+        for (const auto* layer : candidates) {
+            slabs.push_back({layer->bottom_print_z(), layer->print_z, layer->polygons});
+            targets.push_back(layer->overhang_polygons ? *layer->overhang_polygons : Polygons{});
+            const auto base      = m_support_params.support_material_flow.with_height(float(layer->height));
+            const auto interface = m_support_params.support_material_interface_flow.with_height(float(layer->height));
+            margins.push_back(
+                layer->dynapin_landing_regions.empty() ?
+                    0.5 * std::max({0., double(base.width() - std::min(base.spacing(), m_support_params.support_material_flow.spacing())),
+                                    double(interface.width() -
+                                           std::min(interface.spacing(), m_support_params.support_material_interface_flow.spacing()))}) :
+                    0.);
+        }
+        const auto removals = DynaPin::independent_support_removals(slabs, landing_surfaces, targets, margins);
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            if (removals[i].empty())
+                continue;
+            candidates[i]->polygons                = diff(candidates[i]->polygons, removals[i]);
+            candidates[i]->dynapin_landing_regions = diff(candidates[i]->dynapin_landing_regions, removals[i]);
+        }
     }
 
     BOOST_LOG_TRIVIAL(info) << "Support generator - Creating layers";

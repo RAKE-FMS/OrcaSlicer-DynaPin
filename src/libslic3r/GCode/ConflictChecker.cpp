@@ -1,4 +1,6 @@
 #include "ConflictChecker.hpp"
+#include "../DynaPin.hpp"
+#include "../DynaPinLanding.hpp"
 
 #include <tbb/parallel_for.h>
 #include <tbb/concurrent_vector.h>
@@ -222,6 +224,22 @@ ConflictResultOpt ConflictChecker::find_inter_of_lines_in_diff_objs(PrintObjectP
 {
     if (objs.size() <= 1 && !wtdptr) { return {}; }
     LinesBucketQueue conflictQueue;
+    const bool       dynapin = !objs.empty() && objs.front()->print()->config().enable_dynapin_support_optimization.value &&
+                               DynaPin::effective_debug_stage(*objs.front()->print()) >= 1;
+    std::map<const PrintObject*, ExtrusionLayers> prepared_support;
+    if (dynapin) {
+        for (auto& source : DynaPin::normalized_support_paths(objs)) {
+            std::map<float, ExtrusionPaths> by_height;
+            for (auto& path : source.paths)
+                by_height[path.height].push_back(std::move(path));
+            auto& layers = prepared_support[source.object];
+            layers.type  = ExtrusionLayersType::SUPPORT;
+            for (auto& entry : by_height)
+                layers.push_back({std::move(entry.second), source.layer, float(source.layer->print_z - entry.first), entry.first});
+        }
+        for (auto& entry : prepared_support)
+            std::stable_sort(entry.second.begin(), entry.second.end(), [](const auto& a, const auto& b) { return a.bottom_z < b.bottom_z; });
+    }
 
     if (wtdptr.has_value()) { // wipe tower at 0 by default
         //auto            wtpaths = wtdptr.value()->getFakeExtrusionPathsFromWipeTower();
@@ -239,7 +257,12 @@ ConflictResultOpt ConflictChecker::find_inter_of_lines_in_diff_objs(PrintObjectP
     for (PrintObject *obj : objs) {
         auto layers = getAllLayersExtrusionPathsFromObject(obj);
         conflictQueue.emplace_back_bucket(std::move(layers.perimeters), obj, obj->instances().front().shift);
-        conflictQueue.emplace_back_bucket(std::move(layers.support), obj, obj->instances().front().shift);
+        if (dynapin) {
+            auto& support = prepared_support[obj];
+            if (!support.empty())
+                conflictQueue.emplace_back_bucket(std::move(support), obj, Point(0, 0));
+        } else
+            conflictQueue.emplace_back_bucket(std::move(layers.support), obj, obj->instances().front().shift);
     }
 
     std::vector<LineWithIDs> layersLines;

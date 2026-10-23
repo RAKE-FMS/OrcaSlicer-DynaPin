@@ -1739,6 +1739,7 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
     }*/
 
     std::vector<std::pair<double, double>> warning_ranges;
+    const bool                             starts_on_pin = DynaPin::starts_on_pin(object);
 
     // Pair the object layers with the support layers by z.
     size_t              idx_object_layer     = 0;
@@ -1775,7 +1776,7 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
 
         // Check that there are extrusions on the very first layer. The case with empty
         // first layer may result in skirt/brim in the air and maybe other issues.
-        if (layers_to_print.size() == 1u && !has_extrusions) {
+        if (layers_to_print.size() == 1u && !has_extrusions && !starts_on_pin) {
             const std::string warning =
                 _(L("The first layer is empty. Printing will continue. Check that the first printed layer is supported.")) + "\n" +
                 Slic3r::format(_(L("Object: %1%")), object.model_object()->name);
@@ -1810,7 +1811,8 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
                                      std::max(0., extra_gap);
             // Negative support_contact_z is not taken into account, it can result in false positives in cases
 
-            if (has_extrusions && layer_to_print.print_z() > maximal_print_z + 2. * EPSILON)
+            if (has_extrusions && layer_to_print.print_z() > maximal_print_z + 2. * EPSILON &&
+                (last_extrusion_layer != nullptr || !starts_on_pin))
                 warning_ranges.emplace_back(
                     std::make_pair((last_extrusion_layer ? last_extrusion_layer->print_z() : 0.), layers_to_print.back().print_z()));
         }
@@ -2468,6 +2470,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     m_last_layer_z = 0.f;
     m_max_layer_z  = 0.f;
     m_dynapin_pulls_done.clear();
+    m_dynapin_travel_clearance_z = 0.;
+    m_dynapin_travel_config.reset();
+    m_last_dynapin_landing = false;
     m_dynapin_stabilization_regions.clear();
     m_dynapin_support_speed = {};
     if (print.config().enable_dynapin_support_optimization.value && DynaPin::effective_debug_stage(print) >= 1) {
@@ -5331,25 +5336,41 @@ LayerResult GCode::process_layer(const Print& print,
             if (is_anything_overridden && print_wipe_extrusions == 0)
                 gcode += "; PURGING FINISHED\n";
 
-            std::vector<DynaPin::LandingExtrusion> landing_paths;
-            size_t                                 landing_instances = 0;
+            std::vector<DynaPin::LandingExtrusion>                  landing_paths;
+            std::vector<DynaPin::LandingExtrusion>                  emitted_support;
+            std::vector<DynaPin::LandingRegion>                     landing_regions;
+            std::vector<double>                                     landing_densities(instances_to_print.size(), 1.);
+            std::vector<std::unique_ptr<ExtrusionEntityCollection>> unique_support(instances_to_print.size());
+            size_t                                                  landing_instances = 0;
             if (print.config().enable_dynapin_support_optimization.value && DynaPin::effective_debug_stage(print) >= 1) {
                 for (size_t i = 0; i < instances_to_print.size(); ++i) {
                     const auto& instance = instances_to_print[i];
                     const auto* support  = instance.object_by_extruder.support;
                     const auto  role     = instance.object_by_extruder.support_extrusion_role;
-                    if (support == nullptr || (role != erMixed && role != erSupportMaterial))
+                    if (support == nullptr)
                         continue;
                     const auto& layer_to_print = layers[instance.layer_id];
-                    const bool  overridden =
-                        const_cast<LayerTools&>(layer_tools).wiping_extrusions().is_support_overridden(layer_to_print.original_object);
+                    auto&       wiping         = const_cast<LayerTools&>(layer_tools).wiping_extrusions();
+                    const bool  overridden     = role == erSupportMaterialInterface ?
+                                                     wiping.is_support_interface_overridden(layer_to_print.original_object) :
+                                                     wiping.is_support_overridden(layer_to_print.original_object);
                     if (overridden != (print_wipe_extrusions != 0))
                         continue;
-                    ExtrusionPaths paths;
-                    DynaPin::collect_landing_paths(*support, paths);
-                    if (!paths.empty())
-                        ++landing_instances;
                     const Point& offset = instance.print_object.instances()[instance.instance_id].shift;
+                    if (instances_to_print.size() > 1) {
+                        unique_support[i] = std::make_unique<ExtrusionEntityCollection>(*support);
+                        DynaPin::remove_duplicate_support_paths(*unique_support[i], offset, i, role, emitted_support);
+                        support = unique_support[i].get();
+                    }
+                    if (role != erMixed && role != erSupportMaterial)
+                        continue;
+                    ExtrusionPaths paths;
+                    landing_densities[i] = instance.print_object.config().raft_first_layer_density.value * 0.01;
+                    DynaPin::collect_landing_paths(*support, paths);
+                    if (!paths.empty()) {
+                        ++landing_instances;
+                        append(landing_regions, DynaPin::landing_extrusion_regions(*layer_to_print.support_layer, offset, i));
+                    }
                     for (auto& path : paths) {
                         path.polyline.translate(offset);
                         landing_paths.push_back({i, std::move(path)});
@@ -5358,7 +5379,7 @@ LayerResult GCode::process_layer(const Print& print,
             }
             const bool shared_landing = landing_instances > 1;
             if (shared_landing) {
-                const auto ordered         = DynaPin::schedule_landing_paths(std::move(landing_paths), false);
+                const auto ordered = DynaPin::schedule_landing_paths(std::move(landing_paths), false, landing_densities, landing_regions);
                 size_t     previous_source = size_t(-1);
                 for (const auto& item : ordered) {
                     const auto& instance = instances_to_print[item.source];
@@ -5431,14 +5452,17 @@ LayerResult GCode::process_layer(const Print& print,
                     bool          is_overridden          = support_extrusion_role == erSupportMaterialInterface ? support_intf_overridden :
                                                                                                                   support_overridden;
                     if (is_overridden == (print_wipe_extrusions != 0)) {
+                        const size_t instance_index = &instance_to_print - instances_to_print.data();
+                        const auto&  support        = unique_support[instance_index] ? *unique_support[instance_index] :
+                                                                                       *instance_to_print.object_by_extruder.support;
                         gcode += this->extrude_support(
                             // support_extrusion_role is erSupportMaterial, erSupportTransition, erSupportMaterialInterface or erMixed for
                             // all extrusion paths.
-                            *instance_to_print.object_by_extruder.support, support_extrusion_role, shared_landing);
+                            support, support_extrusion_role, shared_landing);
 
                         // Make sure ironing is the last
                         if (support_extrusion_role == erMixed || support_extrusion_role == erSupportMaterialInterface) {
-                            gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, erIroning);
+                            gcode += this->extrude_support(support, erIroning);
                         }
                     }
 
@@ -5708,8 +5732,7 @@ std::string GCode::change_layer(coordf_t print_z)
             DynaPin::load_config_for_print(*m_print, dynapin_config)) {
             std::vector<std::pair<std::string, DynaPin::Pin>> due_pins;
             for (const DynaPin::Pin& pin : DynaPin::resolved_pins(*m_print)) {
-                const DynaPin::BlockerZRange range = DynaPin::blocker_z_range(dynapin_config, pin);
-                if (range.z_max <= print_z + EPSILON) {
+                if (DynaPin::pin_pull_trigger_z(*m_print, dynapin_config, pin) <= print_z + EPSILON) {
                     const std::string key = std::to_string(pin.row) + ":" + std::to_string(pin.col);
                     if (m_dynapin_pulls_done.find(key) == m_dynapin_pulls_done.end())
                         due_pins.emplace_back(key, pin);
@@ -5725,10 +5748,22 @@ std::string GCode::change_layer(coordf_t print_z)
                 return_position.y() -= xy_offset.y();
 
                 for (const auto& [key, pin] : due_pins) {
+                    if (dynapin_config.landing_slope.slope_x != 0.) {
+                        m_dynapin_travel_config      = dynapin_config;
+                        m_dynapin_travel_clearance_z = std::max(m_dynapin_travel_clearance_z,
+                                                                DynaPin::pin_travel_clearance_z(*m_print, dynapin_config, {pin}) +
+                                                                    m_config.z_offset.value);
+                        // Raw pull moves are outside writer state. Raise before
+                        // entering the pin corridor and again before returning.
+                        std::ostringstream lift;
+                        lift << std::fixed << std::setprecision(4) << "G1 Z" << std::max(m_dynapin_travel_clearance_z, return_position.z())
+                             << " F" << dynapin_config.pull_gcode.normal.fast_feed_rate << "\n";
+                        gcode += lift.str();
+                    }
                     gcode += DynaPin::pull_gcode_for_pin(dynapin_config, pin);
                     m_dynapin_pulls_done.insert(key);
                 }
-                gcode += DynaPin::return_gcode(dynapin_config, return_position);
+                gcode += DynaPin::return_gcode(dynapin_config, return_position, m_dynapin_travel_clearance_z);
             }
         }
     }
@@ -6375,7 +6410,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     if (!m_last_pos_defined || m_last_pos != path.first_point() || m_need_change_layer_lift_z || slope_need_z_travel) {
         const bool _last_pos_undefined = !m_last_pos_defined;
         gcode += this->travel_to(path.first_point(), path.role(), "move to first " + description + " point",
-                                 sloped == nullptr ? DBL_MAX : get_sloped_z(sloped->slope_begin.z_ratio));
+                                 sloped == nullptr ? DBL_MAX : get_sloped_z(sloped->slope_begin.z_ratio),
+                                 path.is_dynapin_landing ? path.width : 0.);
         m_need_change_layer_lift_z = false;
         // Orca: ensure Z matches planned layer height
         if (_last_pos_undefined && !slope_need_z_travel) {
@@ -6845,7 +6881,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
         !path.is_dynapin_landing && !path.is_force_no_extrusion()) {
         // Preserve arc output for paths that have no segment requiring a cap.
         for (const Line& line : path.polyline.lines()) {
-            if (DynaPin::support_segment_speed(line, speed, m_dynapin_support_speed.min_x_distance, max_x_speed) < speed &&
+            if (DynaPin::support_segment_speed(line, speed, max_x_speed) < speed &&
                 !intersection_ln(Lines{line}, stabilization->second).empty()) {
                 protect_support = true;
                 break;
@@ -6930,8 +6966,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                     path_length += line_length;
                     if (protect_support) {
                         double       segment_speed = speed;
-                        const double capped        = DynaPin::support_segment_speed(line, speed, m_dynapin_support_speed.min_x_distance,
-                                                                                    max_x_speed);
+                        const double capped        = DynaPin::support_segment_speed(line, speed, max_x_speed);
                         if (capped < speed && !intersection_ln(Lines{line}, stabilization->second).empty())
                             segment_speed = capped;
                         if (std::abs(m_writer.get_current_speed() - segment_speed * 60.) > EPSILON)
@@ -7147,6 +7182,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
         m_last_notgapfill_extrusion_role = path.role();
     }
 
+    m_last_dynapin_landing = path.is_dynapin_landing;
     this->set_last_pos(path.last_point());
     return gcode;
 }
@@ -7224,16 +7260,19 @@ std::string GCode::_encode_label_ids_to_base64(std::vector<size_t> ids)
 }
 
 // This method accepts &point in print coordinates.
-std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string comment, double z /* = DBL_MAX*/)
+std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string comment, double z /* = DBL_MAX*/, double landing_width)
 {
     /*  Define the travel move as a line between current position and the taget point.
         This is expressed in print coordinates, so it will need to be translated by
         this->origin in order to get G-code coordinates.  */
     Polyline travel{this->last_pos(), point};
+    const double target_z = z == DBL_MAX ? m_nominal_z : z;
 
     // check whether a straight travel move would need retraction
     LiftType lift_type        = LiftType::SpiralLift;
     bool     needs_retraction = this->needs_retraction(travel, role, lift_type);
+    const bool landing_motion   = m_dynapin_travel_config && (landing_width > 0. || m_last_dynapin_landing) &&
+                                  travel.length() > SCALED_EPSILON;
     // check whether wipe could be disabled without causing visible stringing
     bool could_be_wipe_disabled = false;
     // Save state of use_external_mp_once for the case that will be needed to call twice m_avoid_crossing_perimeters.travel_to.
@@ -7244,7 +7283,7 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
     double       jerk_to_set         = 0.0;
     unsigned int acceleration_to_set = 0;
 
-    if (this->on_first_layer()) {
+    if (this->on_first_layer() || landing_motion) {
         if (m_config.default_acceleration.value > 0 && m_config.initial_layer_acceleration.value > 0) {
             acceleration_to_set = (unsigned int) floor(m_config.initial_layer_acceleration.value + 0.5);
         }
@@ -7295,7 +7334,21 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
     // Re-allow reduce_crossing_wall for the next travel moves
     m_avoid_crossing_perimeters.reset_once_modifiers();
 
+    // Adjacent scan lines at the same height form one landing operation.
+    // Keep their short connections low; retract and release when leaving it.
+    // Use the planned path after detours, before a wipe changes its start point.
+    const bool continuous_landing = landing_motion && landing_width > 0. && m_last_dynapin_landing &&
+                                    std::abs(target_z - (m_writer.get_position().z() - m_writer.get_zhop())) < EPSILON &&
+                                    travel.length() <= scale_(2. * landing_width);
+    const bool protect_landing    = landing_motion && !continuous_landing;
+
     // generate G-code for the travel move
+    if (protect_landing) {
+        needs_retraction = true;
+        lift_type        = LiftType::NormalLift;
+    } else if (continuous_landing) {
+        needs_retraction = false;
+    }
     if (needs_retraction) {
         // ORCA: Fix scenario where wipe is disabled when avoid crossing perimeters was enabled even though a retraction move was performed.
         // This replicates the existing behaviour of always wiping when retracting
@@ -7316,6 +7369,9 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
             // If state of use_external_mp_once was changed reset it to right value.
             if (used_external_mp_once)
                 m_avoid_crossing_perimeters.reset_once_modifiers();
+        } else if (last_post_before_retract != this->last_pos()) {
+            // A wipe changes the actual departure point even without detours.
+            travel.points.front() = this->last_pos();
         }
     } else {
         // Reset the wipe path when traveling, so one would not wipe along an old path.
@@ -7334,8 +7390,52 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
 
     // use G1 because we rely on paths being straight (G0 may make round paths)
     if (travel.size() >= 2) {
+        const double original_speed = m_writer.config.travel_speed.value;
+        if (landing_motion)
+            m_writer.config.travel_speed.value = std::min(original_speed, m_config.get_abs_value("initial_layer_speed"));
         // Orca: use `travel_to_xyz` to ensure we start at the correct z, in case we moved z in custom/filament change gcode
-        if (false /*m_spiral_vase*/) {
+        double crossing_clearance_z = 0.;
+        if (m_dynapin_travel_config) {
+            std::vector<DynaPin::Pin> pulled_pins;
+            for (const auto& pin : DynaPin::resolved_pins(*m_print))
+                if (m_dynapin_pulls_done.count(std::to_string(pin.row) + ":" + std::to_string(pin.col)) != 0)
+                    pulled_pins.push_back(pin);
+            crossing_clearance_z = DynaPin::required_pin_travel_z(*m_print, *m_dynapin_travel_config, pulled_pins, travel,
+                                                                  m_origin - m_writer.get_xy_offset().cast<double>(),
+                                                                  target_z - m_config.z_offset.value,
+                                                                  0.5 * EXTRUDER_CONFIG(nozzle_diameter));
+            if (crossing_clearance_z > 0.)
+                crossing_clearance_z += m_config.z_offset.value;
+        }
+        const double previous_object_z = m_dynapin_travel_config && m_need_change_layer_lift_z ?
+                                             double(m_max_layer_z) + m_config.z_offset.value :
+                                             0.;
+        if (protect_landing) {
+            const double nominal_z = std::max(target_z, m_writer.get_position().z() - m_writer.get_zhop());
+            const double safe_z    = std::max(
+                {nominal_z + m_dynapin_travel_config->landing_slope.travel_clearance, crossing_clearance_z, previous_object_z});
+            gcode += m_writer.travel_to_z_preserving_lift(safe_z, "DynaPin landing release");
+            for (size_t i = 1; i < travel.size(); ++i)
+                gcode += m_writer.travel_to_xy(this->point_to_gcode(travel.points[i]), comment);
+            gcode += m_writer.travel_to_z_preserving_lift(target_z, "DynaPin landing height");
+            m_need_change_layer_lift_z = false;
+        } else if (crossing_clearance_z > target_z + EPSILON || previous_object_z > target_z + EPSILON) {
+            const double safe_z = std::max(
+                {crossing_clearance_z, m_writer.get_position().z() - m_writer.get_zhop(), target_z, previous_object_z});
+            gcode += m_writer.travel_to_z_preserving_lift(safe_z, "DynaPin pin clearance");
+            for (size_t i = 1; i < travel.size(); ++i)
+                gcode += m_writer.travel_to_xy(this->point_to_gcode(travel.points[i]), comment);
+            gcode += m_writer.travel_to_z_preserving_lift(target_z, "DynaPin landing height");
+            m_need_change_layer_lift_z = false;
+        } else if (m_dynapin_travel_config && m_need_change_layer_lift_z) {
+            // Reach the new print height before XY: a diagonal ramp from a
+            // lower band could otherwise cross the raised end of the pin.
+            // This is only the layer change, without an extra up/down hop.
+            gcode += m_writer.travel_to_z_preserving_lift(target_z, "DynaPin layer height");
+            for (size_t i = 1; i < travel.size(); ++i)
+                gcode += m_writer.travel_to_xy(this->point_to_gcode(travel.points[i]), comment);
+            m_need_change_layer_lift_z = false;
+        } else if (false /*m_spiral_vase*/) {
             // No lazy z lift for spiral vase mode
             for (size_t i = 1; i < travel.size(); ++i) {
                 gcode += m_writer.travel_to_xy(this->point_to_gcode(travel.points[i]), comment);
@@ -7369,6 +7469,7 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
                 }
             }
         }
+        m_writer.config.travel_speed.value = original_speed;
         this->set_last_pos(travel.points.back());
     }
 

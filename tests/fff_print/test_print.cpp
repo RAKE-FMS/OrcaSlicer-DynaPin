@@ -123,14 +123,13 @@ TEST_CASE("DynaPin support speed settings default and validate", "[DynaPin][Supp
     DynaPin::Config defaults;
     REQUIRE(DynaPin::load_config_for_print(print, defaults));
     CHECK(defaults.support_speed.layers == 3);
-    CHECK(defaults.support_speed.min_x_distance == 5.);
     CHECK(defaults.support_speed.max_x_speed == 0.);
+    // Existing JSON may still contain min_x_distance; it no longer gates the cap.
     json["support_speed"] = {{"layers", 2}, {"min_x_distance", 8.}, {"max_x_speed", 12.}};
     file.write(json);
     DynaPin::Config custom;
     REQUIRE(DynaPin::load_config_for_print(print, custom));
     CHECK(custom.support_speed.layers == 2);
-    CHECK(custom.support_speed.min_x_distance == 8.);
     CHECK(custom.support_speed.max_x_speed == 12.);
     for (const auto& invalid : {nlohmann::json(-1), nlohmann::json(1.5), nlohmann::json(true), nlohmann::json("3")}) {
         json["support_speed"]["layers"] = invalid;
@@ -145,7 +144,7 @@ TEST_CASE("DynaPin support speed settings default and validate", "[DynaPin][Supp
     DynaPin::Config disabled;
     REQUIRE(DynaPin::load_config_for_print(print, disabled));
     CHECK(disabled.support_speed.layers == 0);
-    for (const char* key : {"min_x_distance", "max_x_speed"}) {
+    for (const char* key : {"max_x_speed"}) {
         for (const auto& invalid : {nlohmann::json(-1.), nlohmann::json("nan"), nlohmann::json(true)}) {
             auto bad                  = json;
             bad["support_speed"][key] = invalid;
@@ -2109,6 +2108,71 @@ TEST_CASE("Tree pin selection preserves multi-stage overhang choices", "[Print][
     }
 }
 
+TEST_CASE("DynaPin stabilization includes the full pin width beyond the landing inset", "[DynaPin][SupportSpeed]")
+{
+    ResourcesDirGuard  resources_guard(test_resources_dir());
+    TemporaryDirGuard  temporary_guard;
+    DebugStageEnvGuard stage_guard;
+    PullConfigFile     file;
+    auto               json                           = pull_reference_fixtures()[0]["config"];
+    json["support_exclusion"]["blocker_width_y"]      = 12.4;
+    json["support_exclusion"]["landing_edge_inset_y"] = 1.2;
+    file.write(json);
+    Print print;
+    Model model;
+    auto  config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"enable_dynapin_support_optimization", true},
+                                   {"dynapin_debug_stage", 2},
+                                   {"dynapin_config_path", file.path.string()},
+                                   {"dynapin_selected_pins", "0,0"}});
+    for (const auto& key : config.keys()) {
+        auto* option = config.option(key);
+        if (option->type() == coEnums) {
+            const auto* definition = print_config_def.get(key);
+            if (option->nullable())
+                static_cast<ConfigOptionEnumsGenericNullable*>(option)->keys_map = definition->enum_keys_map;
+            else
+                static_cast<ConfigOptionEnumsGeneric*>(option)->keys_map = definition->enum_keys_map;
+        }
+    }
+    init_dynapin_print(print, model, config);
+    print.process();
+    auto* object = print.get_object(size_t(0));
+    REQUIRE(object->support_layers().empty());
+    const auto surfaces = DynaPin::landing_surfaces_for_object(*object);
+    REQUIRE_FALSE(surfaces.empty());
+    const auto&  surface   = surfaces.front();
+    auto         bounds    = get_extents(surface.poly);
+    const double x         = unscale<double>(bounds.center().x());
+    const double y         = unscale<double>(bounds.center().y());
+    const auto   rectangle = [&](double half_width) {
+        return Polygon(Points{Point::new_scale(x - 2., y - half_width), Point::new_scale(x + 2., y - half_width),
+                              Point::new_scale(x + 2., y + half_width), Point::new_scale(x - 2., y + half_width)});
+    };
+    for (int i = 0; i < 5; ++i) {
+        auto* layer = object->add_support_layer(i, i, 0.2, surface.print_z + 0.2 * (i + 1));
+        if (i == 0)
+            layer->dynapin_landing_regions = {rectangle(5.)};
+        for (double dy : {0., -5.8, 5.8, -6.5, 6.5}) {
+            ExtrusionPath path(erSupportMaterial, 0.1, 0.4f, 0.2f);
+            path.polyline           = Polyline(Points{Point::new_scale(x - 2., y + dy), Point::new_scale(x + 2., y + dy)});
+            path.is_dynapin_landing = i == 0;
+            layer->support_fills.append(path);
+        }
+    }
+    const auto regions = DynaPin::support_stabilization_regions(*object, 3);
+    REQUIRE(regions.size() == 5);
+    CHECK(regions[0].empty());
+    CHECK(regions[4].empty());
+    for (size_t i = 1; i <= 3; ++i) {
+        for (double dy : {-5.8, 5.8})
+            CHECK_FALSE(
+                intersection_ln(Lines{Line(Point::new_scale(x - 1., y + dy), Point::new_scale(x + 1., y + dy))}, regions[i]).empty());
+        for (double dy : {-6.5, 6.5})
+            CHECK(intersection_ln(Lines{Line(Point::new_scale(x - 1., y + dy), Point::new_scale(x + 1., y + dy))}, regions[i]).empty());
+    }
+}
+
 TEST_CASE("DynaPin final G-code slows X support extrusion for exactly three layers", "[DynaPin][SupportSpeed]")
 {
     ResourcesDirGuard   resources_guard(test_resources_dir());
@@ -2119,7 +2183,7 @@ TEST_CASE("DynaPin final G-code slows X support extrusion for exactly three laye
     const ExtrusionRole support_role  = GENERATE(erSupportMaterial, erSupportMaterialInterface, erSupportTransition);
     const std::string   role_label    = ExtrusionEntity::role_to_string(support_role);
     auto                json          = pull_reference_fixtures()[0]["config"];
-    json["support_speed"]             = {{"layers", 3}, {"min_x_distance", 5.}, {"max_x_speed", 0.}};
+    json["support_speed"]             = {{"layers", 3}, {"max_x_speed", 0.}};
     PullConfigFile file;
     file.write(json);
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
@@ -2164,8 +2228,8 @@ TEST_CASE("DynaPin final G-code slows X support extrusion for exactly three laye
         if (i == 0)
             layer->dynapin_landing_regions = {footprint};
         ExtrusionPath path(support_role, 0.1, 0.5f, 0.2f);
-        path.polyline = Polyline(
-            Points{Point::new_scale(-8., -8.), Point::new_scale(8., -8.), Point::new_scale(8., 8.), Point::new_scale(-8., -8.)});
+        path.polyline           = Polyline(Points{Point::new_scale(-8., -8.), Point::new_scale(-6., -8.), Point::new_scale(-6., -6.),
+                                                  Point::new_scale(8., -6.), Point::new_scale(8., 8.), Point::new_scale(-8., -8.)});
         path.is_dynapin_landing = i == 0;
         if (arc_fitting) {
             path.simplify_by_fitting_arc(scale_(0.01));
@@ -2186,7 +2250,7 @@ TEST_CASE("DynaPin final G-code slows X support extrusion for exactly three laye
     size_t        callbacks = 0, support_tags = 0, support_moves = 0;
     bool          support = false;
     std::set<int> capped_layers;
-    size_t        normal_y = 0, normal_later = 0, diagonal = 0;
+    size_t        normal_y = 0, normal_later = 0, diagonal = 0, short_x = 0;
     GCodeReader   reader;
     reader.apply_config(print.config());
     reader.parse_buffer(output, [&](GCodeReader& state, const GCodeReader::GCodeLine& line) {
@@ -2203,10 +2267,11 @@ TEST_CASE("DynaPin final G-code slows X support extrusion for exactly three laye
         const double dy    = std::abs(line.new_Y(state) - state.y());
         const double speed = line.new_F(state) / 60.;
         if (index >= 1 && index <= 3) {
-            if (dx >= 5.) {
+            if (dx > 0.001) {
                 CHECK(speed * dx / std::hypot(dx, dy) <= 20.01);
                 capped_layers.insert(index);
                 diagonal += dy > 5.;
+                short_x += dx < 5.;
             } else if (dy > 5.) {
                 CHECK(speed == Catch::Approx(80.).margin(0.01));
                 ++normal_y;
@@ -2219,6 +2284,7 @@ TEST_CASE("DynaPin final G-code slows X support extrusion for exactly three laye
     CAPTURE(callbacks, support_tags, support_moves);
     CHECK(capped_layers == std::set<int>{1, 2, 3});
     CHECK(diagonal >= 3);
+    CHECK(short_x >= 3);
     CHECK(normal_y >= 3);
     CHECK(normal_later >= 3);
 }
@@ -2457,4 +2523,515 @@ TEST_CASE("DynaPin landing G-code interleaves overlapping model X ranges", "[Pri
     CHECK(active_object.empty());
     const double diameter = print.config().filament_diameter.get_at(0);
     CHECK(extrusion * PI * diameter * diameter / 4. == Catch::Approx(expected_volume).epsilon(0.002));
+}
+
+TEST_CASE("DynaPin slope bands preserve machine heights and landing connections", "[DynaPin][LandingSlope]")
+{
+    PullConfigFile file;
+    file.write(pull_reference_fixtures()[1]["config"]);
+    Print print;
+    Model model;
+    auto  runtime = DynamicPrintConfig::full_print_config();
+    runtime.set_deserialize_strict({{"dynapin_config_path", file.path.string()}, {"printable_area", "0x0,180x0,180x180,0x180"}});
+    init_dynapin_print(print, model, runtime);
+    DynaPin::Config config;
+    REQUIRE(DynaPin::load_config_for_print(print, config));
+    const auto&        object = *print.objects().front();
+    const DynaPin::Pin pin{1, 0};
+    const auto         flat = DynaPin::surface_for_pin(object, config, pin);
+    REQUIRE(DynaPin::landing_surfaces_for_pin(object, config, pin).size() == 1);
+    CHECK(DynaPin::pin_pull_trigger_z(print, config, pin) == DynaPin::blocker_z_range(config, pin).z_max);
+    config.landing_slope.slope_x = GENERATE(-1. / 150., 1. / 150.);
+    const auto bands             = DynaPin::landing_surfaces_for_pin(object, config, pin);
+    REQUIRE(bands.size() > 1);
+    const auto envelope = DynaPin::surface_for_pin(object, config, pin);
+    const auto shift    = object.instances().front().shift_without_plate_offset();
+    Polygons   covered;
+    for (const auto& band : bands) {
+        const auto   box   = get_extents(band.poly);
+        const double left  = unscale<double>(box.min.x() + shift.x());
+        const double right = unscale<double>(box.max.x() + shift.x());
+        CHECK(right - left <= config.landing_slope.max_band_width + EPSILON);
+        CHECK(band.print_z ==
+              Catch::Approx(std::max(DynaPin::pin_top_z_at_x(config, pin, left), DynaPin::pin_top_z_at_x(config, pin, right))));
+        CHECK(band.print_z - std::min(DynaPin::pin_top_z_at_x(config, pin, left), DynaPin::pin_top_z_at_x(config, pin, right)) <=
+              0.05 + EPSILON);
+        CHECK(intersection(covered, {band.poly}).empty());
+        covered.push_back(band.poly);
+    }
+    CHECK(diff({flat.poly}, covered).empty());
+    CHECK(diff(covered, {flat.poly}).empty());
+    CHECK(DynaPin::pin_top_z_at_x(config, pin, 175.) - DynaPin::pin_top_z_at_x(config, pin, 25.) ==
+          Catch::Approx(config.landing_slope.slope_x * 150.));
+    const std::vector<DynaPin::LandingLayer> source{{envelope.print_z + 0.1, envelope.print_z + 0.4, {flat.poly}}};
+    const auto                               changes = DynaPin::align_landing_layers(source, bands, 0.08, 0.3);
+    REQUIRE(changes.size() == bands.size());
+    std::vector<DynaPin::LandingLayer> adjusted;
+    for (size_t i = 0; i < changes.size(); ++i) {
+        const auto& change = changes[i];
+        CHECK(change.source == 0);
+        CHECK(change.layers.front().bottom_z == Catch::Approx(bands[i].print_z));
+        CHECK(change.layers.back().print_z == Catch::Approx(source.front().print_z));
+        double bottom = bands[i].print_z;
+        for (const auto& slab : change.layers) {
+            CHECK(slab.bottom_z == Catch::Approx(bottom));
+            CHECK(slab.print_z - slab.bottom_z >= 0.08 - EPSILON);
+            CHECK(slab.print_z - slab.bottom_z <= 0.3 + EPSILON);
+            bottom = slab.print_z;
+            adjusted.push_back(slab);
+        }
+    }
+    std::set<coord_t> shared_planes;
+    for (const auto& layer : adjusted)
+        shared_planes.insert(scale_(layer.print_z));
+    // A roughly 1 mm wedge needs only a handful of shared planes, rather
+    // than a separate family of intermediate Z values for every band.
+    CHECK(shared_planes.size() <= 8);
+    const auto bases = DynaPin::landing_base_layers(adjusted, bands, 2.);
+    REQUIRE(bases.size() == bands.size());
+    Polygons bases_covered;
+    for (const auto& base : bases) {
+        CHECK(intersection(bases_covered, base.polygons).empty());
+        polygons_append(bases_covered, base.polygons);
+    }
+    CHECK(diff({flat.poly}, bases_covered).empty());
+    // A narrow seed beside an internal boundary must expand onto both bands.
+    const auto box      = get_extents(bands[bands.size() / 2].poly);
+    auto       seed_box = box;
+    seed_box.min.x()    = box.max.x() - scale_(0.3);
+    seed_box.max.x()    = box.max.x() - scale_(0.1);
+    seed_box.min.y() += scale_(3.);
+    seed_box.max.y() -= scale_(3.);
+    const std::vector<DynaPin::LandingLayer> narrow{{envelope.print_z + 0.1, envelope.print_z + 0.4, {seed_box.polygon()}}};
+    const auto                               expanded = DynaPin::align_landing_layers(narrow, bands, 0.08, 0.3, 2.);
+    CHECK(expanded.size() >= 2);
+    Polygons expanded_region;
+    for (const auto& change : expanded) {
+        CHECK(intersection(expanded_region, change.layers.front().polygons).empty());
+        polygons_append(expanded_region, change.layers.front().polygons);
+    }
+    const auto expected_region = intersection(offset(Polygons{seed_box.polygon()}, scale_(2.)), {envelope.poly});
+    CHECK(diff(expected_region, expanded_region).empty());
+    CHECK(diff(expanded_region, expected_region).empty());
+    auto adjacent = DynaPin::landing_surfaces_for_pin(object, config, {pin.row, pin.col + 1});
+    auto joined   = bands;
+    joined.insert(joined.end(), adjacent.begin(), adjacent.end());
+    auto edge_seed    = box;
+    edge_seed.min.y() = box.max.y() - scale_(0.3);
+    edge_seed.max.y() = box.max.y() - scale_(0.1);
+    const std::vector<DynaPin::LandingLayer> edge_layer{{envelope.print_z + 0.1, envelope.print_z + 0.4, {edge_seed.polygon()}}};
+    const auto                               across_pins = DynaPin::align_landing_layers(edge_layer, joined, 0.08, 0.3, 2.);
+    Polygons                                 joined_region;
+    for (const auto& change : across_pins)
+        polygons_append(joined_region, change.layers.front().polygons);
+    CHECK_FALSE(intersection(joined_region, {adjacent[bands.size() / 2].poly}).empty());
+
+    CHECK(DynaPin::pin_pull_trigger_z(print, config, pin) <= bands.back().print_z + EPSILON);
+    CHECK(DynaPin::pin_travel_clearance_z(print, config, {pin}) == Catch::Approx(envelope.print_z + config.landing_slope.travel_clearance));
+}
+
+TEST_CASE("DynaPin slope settings reject invalid numbers and reset when omitted", "[DynaPin][LandingSlope]")
+{
+    PullConfigFile file;
+    Print          print;
+    Model          model;
+    init_pull_config_print(print, model, file);
+    auto json             = pull_reference_fixtures()[0]["config"];
+    json["landing_slope"] = {{"reference_x", 25.}, {"slope_x", -1. / 150.}, {"max_band_width", 7.5}};
+    file.write(json);
+    DynaPin::Config config;
+    std::string     error;
+    REQUIRE(DynaPin::load_config_for_print(print, config, &error));
+    CHECK(config.landing_slope.slope_x == Catch::Approx(-1. / 150.));
+    for (const auto& value : {nlohmann::json("nan"), nlohmann::json("bad"), nlohmann::json(nullptr)}) {
+        json["landing_slope"]["slope_x"] = value;
+        file.write(json);
+        CHECK_FALSE(DynaPin::load_config_for_print(print, config, &error));
+        CHECK(error.find("landing_slope.slope_x") != std::string::npos);
+    }
+    json["landing_slope"] = {{"max_band_width", 0.}};
+    file.write(json);
+    CHECK_FALSE(DynaPin::load_config_for_print(print, config, &error));
+    json.erase("landing_slope");
+    file.write(json);
+    REQUIRE(DynaPin::load_config_for_print(print, config, &error));
+    CHECK(config.landing_slope.slope_x == 0.);
+}
+
+TEST_CASE("DynaPin sloped landings generate lower support and pull before extrusion", "[DynaPin][LandingSlope][LandingSlopeIntegration]")
+{
+    ResourcesDirGuard  resources_guard(test_resources_dir());
+    TemporaryDirGuard  temporary_guard;
+    DebugStageEnvGuard stage_guard;
+    const std::string  style  = GENERATE("default", "tree_slim", "tree_strong", "tree_hybrid");
+    const bool         sloped = GENERATE(false, true);
+    const bool         lifted = GENERATE(false, true);
+    auto               json   = pull_reference_fixtures()[0]["config"];
+    json["landing_slope"]     = {{"reference_x", 25.}, {"slope_x", sloped ? -1. / 150. : 0.}, {"max_band_width", 7.5}};
+    PullConfigFile file;
+    file.write(json);
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"enable_support", true},
+                                   {"enable_dynapin_support_optimization", true},
+                                   {"dynapin_config_path", file.path.string()},
+                                   {"dynapin_selected_pins", "1,0;1,1"},
+                                   {"dynapin_debug_stage", 2},
+                                   {"support_type", style == "default" ? "normal(auto)" : "tree(auto)"},
+                                   {"support_style", style},
+                                   {"raft_first_layer_expansion", 1.},
+                                   {"raft_first_layer_density", 90.},
+                                   {"printable_area", "0x0,180x0,180x180,0x180"},
+                                   {"z_hop", lifted ? "0.2" : "0"},
+                                   {"wipe", "1"},
+                                   {"wipe_distance", "2"},
+                                   {"retract_when_changing_layer", "1"},
+                                   {"layer_change_gcode", ";AFTER_LAYER_CHANGE"},
+                                   {"support_interface_bottom_layers", 0}});
+    for (const auto& key : config.keys()) {
+        auto* option = config.option(key);
+        if (option->type() == coEnums) {
+            const auto* definition = print_config_def.get(key);
+            if (option->nullable())
+                static_cast<ConfigOptionEnumsGenericNullable*>(option)->keys_map = definition->enum_keys_map;
+            else
+                static_cast<ConfigOptionEnumsGeneric*>(option)->keys_map = definition->enum_keys_map;
+        }
+    }
+    Print print;
+    Model model;
+    print.is_BBL_printer() = false;
+    auto* object = model.add_object();
+    auto  mesh   = make_cube(5., 5., 5.);
+    mesh.translate(30., 60., 0.);
+    for (double x : {30., 95., 162.}) {
+        auto deck = make_cube(8., 20., 2.);
+        deck.translate(x, 8., 20.);
+        mesh.merge(deck);
+    }
+    auto lower = make_cube(8., 8., 2.);
+    lower.translate(95., 8., 6.);
+    mesh.merge(lower);
+    object->add_volume(std::move(mesh));
+    object->add_instance();
+    object->ensure_on_bed();
+    print.set_plate_origin(Vec3d::Zero());
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    const auto& printed  = *print.objects().front();
+    const auto  surfaces = DynaPin::landing_surfaces_for_object(printed);
+    const auto  blockers = DynaPin::support_blocker_regions_local(printed);
+    if (sloped)
+        REQUIRE(surfaces.size() > 2);
+    else
+        REQUIRE(surfaces.size() == 2);
+    REQUIRE(blockers.size() == surfaces.size());
+    for (size_t i = 0; i < blockers.size(); ++i) {
+        CHECK(blockers[i].z_max == surfaces[i].print_z);
+        CHECK(blockers[i].z_max - blockers[i].z_min == Catch::Approx(5.));
+    }
+    std::set<int> positions;
+    size_t        landings       = 0;
+    double        support_volume = 0.;
+    bool          lower_support  = false;
+    for (const auto* layer : printed.support_layers()) {
+        const auto flat    = layer->support_fills.flatten();
+        auto       inspect = [&](const ExtrusionPath& path) {
+            support_volume += path.total_volume();
+            if (!path.is_dynapin_landing && layer->print_z < 6. - EPSILON)
+                lower_support = true;
+            if (!path.is_dynapin_landing)
+                return;
+            ++landings;
+            const double bottom   = layer->print_z - path.height;
+            const Point  midpoint = (path.first_point() + path.last_point()) / 2;
+            bool         on_band  = false;
+            for (const auto& surface : surfaces)
+                if (surface.poly.contains(midpoint) && std::abs(bottom - surface.print_z) < 1e-4)
+                    on_band = true;
+            CHECK(on_band);
+            const double x = unscale<double>(midpoint.x() + printed.instances().front().shift_without_plate_offset().x());
+            positions.insert(x < 60. ? 0 : x < 130. ? 1 : 2);
+            CHECK(path.height >= 0.08 - EPSILON);
+            CHECK(path.height <= 0.4 + EPSILON);
+        };
+        for (const auto* entity : flat.entities) {
+            if (const auto* path = dynamic_cast<const ExtrusionPath*>(entity))
+                inspect(*path);
+            else if (const auto* multi = dynamic_cast<const ExtrusionMultiPath*>(entity))
+                for (const auto& path : multi->paths)
+                    inspect(path);
+        }
+    }
+    CAPTURE(style, sloped, lifted, landings, support_volume);
+    CHECK(landings > 0);
+    CHECK(lower_support);
+    CHECK(positions == std::set<int>{0, 1, 2});
+    const auto           path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("dynapin-slope-%%%%.gcode");
+    GCodeProcessorResult processor_result;
+    print.export_gcode(path.string(), &processor_result, nullptr);
+    std::ifstream     input(path.string());
+    const std::string gcode((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    bool              pulled        = false;
+    size_t            pulls         = 0;
+    size_t            moves         = 0;
+    bool              landing       = false;
+    bool              in_pull_group = false;
+    size_t            low_travels   = 0;
+    DynaPin::Config   pin_config;
+    REQUIRE(DynaPin::load_config_for_print(print, pin_config));
+    const double clearance          = DynaPin::pin_travel_clearance_z(print, pin_config, {{1, 0}, {1, 1}});
+    size_t       wipes              = 0;
+    size_t       hop_checks         = 0;
+    size_t       landing_travel_checks     = 0;
+    size_t       continuous_landing_checks = 0;
+    double       nominal_layer_z    = 0.;
+    double       last_extrusion_z          = 0.;
+    bool         last_extrusion_landing    = false;
+    bool         moved_z_since_extrusion   = false;
+    bool         wiping             = false;
+    bool         first_layer_travel = false;
+    GCodeReader  reader;
+    reader.apply_config(print.config());
+    reader.parse_buffer(gcode, [&](GCodeReader& state, const GCodeReader::GCodeLine& line) {
+        if (line.cmd_is("G1") && line.has_z() && std::abs(line.z() - state.z()) > 0.001)
+            moved_z_since_extrusion = true;
+        if (line.raw().rfind(";Z:", 0) == 0)
+            nominal_layer_z = std::stod(line.raw().substr(3));
+        if (line.raw().rfind("; Z_HEIGHT: ", 0) == 0)
+            nominal_layer_z = std::stod(line.raw().substr(12));
+        if (line.raw() == ";AFTER_LAYER_CHANGE")
+            first_layer_travel = true;
+        if (line.raw() == ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Start)) {
+            wiping = true;
+            ++wipes;
+        }
+        if (line.raw() == ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_End))
+            wiping = false;
+        if (!wiping && !in_pull_group && line.cmd_is("G1") && !line.has_e() && (line.has_x() || line.has_y()) && first_layer_travel) {
+            if (sloped && lifted && pulled) {
+                INFO(line.raw());
+                CHECK(state.z() >= nominal_layer_z + 0.2 - 0.001);
+                ++hop_checks;
+            }
+            first_layer_travel = false;
+        }
+        if (line.raw().find("; BEGIN_DYNAPIN_PULL") == 0) {
+            ++pulls;
+            pulled        = true;
+            in_pull_group = true;
+        }
+        if (line.raw().find("; END_DYNAPIN_RETURN") == 0)
+            in_pull_group = false;
+        if (sloped && pulled && !in_pull_group && !wiping && line.cmd_is("G1") && !line.has_e() &&
+            ((line.has_x() && std::abs(line.x() - state.x()) > 0.001) || (line.has_y() && std::abs(line.y() - state.y()) > 0.001))) {
+            INFO(line.raw());
+            const Point  from      = Point::new_scale(state.x(), state.y());
+            const Point  to        = Point::new_scale(line.has_x() ? line.x() : state.x(), line.has_y() ? line.y() : state.y());
+            const double minimum_z = line.has_z() ? std::min<double>(state.z(), line.z()) : state.z();
+            CHECK(DynaPin::required_pin_travel_z(print, pin_config, {{1, 0}, {1, 1}}, Polyline(Points{from, to}), Vec2d::Zero(), minimum_z,
+                                                 0.2) == 0.);
+            if (landing) {
+                CHECK((line.has_f() ? line.f() : state.f()) <= print.config().initial_layer_speed.value * 60. + 0.01);
+                if (minimum_z >= nominal_layer_z + pin_config.landing_slope.travel_clearance - 0.001) {
+                    CHECK_FALSE(line.has_z()); // Vertical release must precede XY.
+                    ++landing_travel_checks;
+                } else {
+                    CHECK(last_extrusion_landing);
+                    CHECK(last_extrusion_z == Catch::Approx(nominal_layer_z).margin(0.001));
+                    CHECK(minimum_z == Catch::Approx(nominal_layer_z).margin(0.001));
+                    CHECK(unscale<double>((to - from).norm()) < 2.);
+                    CHECK_FALSE(moved_z_since_extrusion);
+                    ++continuous_landing_checks;
+                }
+            }
+            if (minimum_z < clearance - 0.001)
+                ++low_travels;
+        }
+        if (line.raw() == DynaPin::LANDING_FAN_START)
+            landing = true;
+        if (line.raw() == DynaPin::LANDING_FAN_END)
+            landing = false;
+        if (landing && line.extruding(state)) {
+            CHECK(pulled);
+            CHECK(state.z() < 15.2);
+            ++moves;
+        }
+        if (!wiping && line.extruding(state)) {
+            last_extrusion_landing  = landing;
+            last_extrusion_z        = line.has_z() ? line.z() : state.z();
+            moved_z_since_extrusion = false;
+        }
+    });
+    CHECK(pulls == 2);
+    CHECK(moves > 0);
+    CHECK((low_travels > 0) == sloped);
+    CHECK(wipes > 0);
+    if (sloped && lifted)
+        CHECK(hop_checks > 0);
+    if (sloped) {
+        CHECK(landing_travel_checks > 0);
+        CHECK(continuous_landing_checks > 0);
+    }
+    CAPTURE(print.print_statistics().total_used_filament, print.print_statistics().estimated_normal_print_time);
+    CHECK(print.print_statistics().total_used_filament > 0.);
+    boost::filesystem::remove(path);
+}
+
+TEST_CASE("DynaPin support removes collinear extrusion shared by separate instances", "[DynaPin][SupportOverlap]")
+{
+    const auto length = [](const ExtrusionEntityCollection& collection) {
+        const auto flat   = collection.flatten();
+        double     result = 0.;
+        for (const auto* entity : flat.entities)
+            result += entity->length();
+        return result * SCALING_FACTOR;
+    };
+    const auto path = [](double x0, double y0, double x1, double y1) {
+        ExtrusionPath result(erSupportMaterial, 0.1, 0.5, 0.2);
+        result.polyline = Polyline(Points{Point::new_scale(x0, y0), Point::new_scale(x1, y1)});
+        return result;
+    };
+    std::vector<DynaPin::LandingExtrusion> emitted;
+    ExtrusionEntityCollection              first;
+    first.append(path(0., 0., 0., 10.));
+    DynaPin::remove_duplicate_support_paths(first, Point::new_scale(20., 30.), 0, erMixed, emitted);
+    REQUIRE(first.entities.size() == 1);
+    const bool                reversed = GENERATE(false, true);
+    ExtrusionEntityCollection second;
+    auto                      duplicate = reversed ? path(0., 10., 0., 0.) : path(0., 0., 0., 10.);
+    duplicate.polyline.translate(Point::new_scale(10., 20.));
+    second.append(duplicate);
+    DynaPin::remove_duplicate_support_paths(second, Point::new_scale(10., 10.), 1, erMixed, emitted);
+    CHECK(second.empty());
+
+    ExtrusionEntityCollection partial;
+    partial.append(path(20., 25., 20., 45.));
+    DynaPin::remove_duplicate_support_paths(partial, Point(0, 0), 2, erMixed, emitted);
+    CHECK(length(partial) == Catch::Approx(10.).margin(0.001));
+    CHECK(partial.entities.size() == 2);
+
+    ExtrusionEntityCollection distinct;
+    distinct.append(path(19., 35., 21., 35.));     // transverse crossing
+    distinct.append(path(20.01, 30., 20.01, 40.)); // separate parallel line
+    auto thicker   = path(20., 30., 20., 40.);
+    thicker.height = 0.3;
+    distinct.append(thicker);
+    DynaPin::remove_duplicate_support_paths(distinct, Point(0, 0), 3, erMixed, emitted);
+    CHECK(length(distinct) == Catch::Approx(22.));
+
+    ExtrusionEntityCollection same_source;
+    same_source.append(path(0., 0., 0., 10.));
+    DynaPin::remove_duplicate_support_paths(same_source, Point::new_scale(20., 30.), 0, erMixed, emitted);
+    CHECK_FALSE(same_source.empty());
+
+    emitted.clear();
+    ExtrusionEntityCollection diagonal;
+    diagonal.append(path(0., 0., 10., 10.));
+    DynaPin::remove_duplicate_support_paths(diagonal, Point(0, 0), 0, erMixed, emitted);
+    ExtrusionEntityCollection nested;
+    auto*                     group  = new ExtrusionEntityCollection;
+    auto                      marked = path(15., 15., 5., 5.);
+    marked.is_dynapin_landing        = true;
+    group->append(ExtrusionMultiPath(marked));
+    nested.entities.push_back(group);
+    DynaPin::remove_duplicate_support_paths(nested, Point(0, 0), 1, erMixed, emitted);
+    CHECK(length(nested) == Catch::Approx(std::sqrt(50.)).margin(0.001));
+    ExtrusionPaths landing;
+    DynaPin::collect_landing_paths(nested, landing);
+    REQUIRE(landing.size() == 1);
+    CHECK(landing.front().first_point() == Point::new_scale(15., 15.));
+    CHECK(landing.front().height == marked.height);
+    CHECK(landing.front().mm3_per_mm == marked.mm3_per_mm);
+}
+
+TEST_CASE("DynaPin slope is inert when disabled and zero slope preserves G-code", "[DynaPin][LandingSlope][LandingSlopeCompatibility]")
+{
+    ResourcesDirGuard  resources_guard(test_resources_dir());
+    TemporaryDirGuard  temporary_guard;
+    DebugStageEnvGuard stage_guard;
+    const bool         enabled = GENERATE(false, true);
+    PullConfigFile     file;
+    auto               json = pull_reference_fixtures()[0]["config"];
+    file.write(json);
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"dynapin_config_path", file.path.string()},
+                                   {"enable_dynapin_support_optimization", enabled},
+                                   {"dynapin_selected_pins", "0,0"},
+                                   {"dynapin_debug_stage", 2},
+                                   {"support_type", "normal(auto)"}});
+    for (const auto& key : config.keys()) {
+        auto* option = config.option(key);
+        if (option->type() == coEnums) {
+            const auto* definition = print_config_def.get(key);
+            if (option->nullable())
+                static_cast<ConfigOptionEnumsGenericNullable*>(option)->keys_map = definition->enum_keys_map;
+            else
+                static_cast<ConfigOptionEnumsGeneric*>(option)->keys_map = definition->enum_keys_map;
+        }
+    }
+    Print prepared;
+    Model model;
+    prepared.is_BBL_printer() = false;
+    init_dynapin_print(prepared, model, config);
+    auto output = [&]() {
+        Print print;
+        print.is_BBL_printer() = false;
+        print.set_plate_origin(Vec3d::Zero());
+        print.apply(model, config);
+        print.set_status_silent();
+        print.process();
+        print.get_object(size_t(0))->set_id(0);
+        const auto           path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("dynapin-compat-%%%%.gcode");
+        GCodeProcessorResult result;
+        print.export_gcode(path.string(), &result, nullptr);
+        std::ifstream input(path.string());
+        std::string   text, line;
+        while (std::getline(input, line))
+            if (line.rfind("; generated by ", 0) != 0)
+                text += line + '\n';
+        boost::filesystem::remove(path);
+        return text;
+    };
+    const auto baseline   = output();
+    json["landing_slope"] = {{"slope_x", enabled ? 0. : -1. / 150.}, {"reference_x", 25.}, {"max_band_width", 7.5}};
+    file.write(json);
+    const auto actual = output();
+    CAPTURE(enabled, actual.size(), baseline.size());
+    CHECK((actual == baseline));
+}
+
+TEST_CASE("DynaPin only lifts travels crossing a raised physical pin surface", "[DynaPin][LandingSlope][PinTravel]")
+{
+    PullConfigFile file;
+    file.write(pull_reference_fixtures()[0]["config"]);
+    Print print;
+    Model model;
+    init_pull_config_print(print, model, file);
+    DynaPin::Config config;
+    REQUIRE(DynaPin::load_config_for_print(print, config));
+    config.landing_slope.slope_x = -1. / 150.;
+    const DynaPin::Pin pin{1, 0};
+    const double       y = DynaPin::pin_y(config, pin) - 7.2;
+    const double       z = DynaPin::pin_top_z_at_x(config, pin, 170.) + 0.25;
+    const Polyline     root(Points{Point::new_scale(170., y), Point::new_scale(160., y)});
+    const Polyline     across(Points{Point::new_scale(170., y), Point::new_scale(25., y)});
+    auto               required = [&](const Polyline& path, double height, Vec2d origin = Vec2d::Zero()) {
+        return DynaPin::required_pin_travel_z(print, config, {pin}, path, origin, height, 0.2);
+    };
+    CHECK(required(root, z) == 0.);
+    CHECK(required(across, z) == Catch::Approx(DynaPin::pin_top_z_at_x(config, pin, 24.8) + 2.));
+    CHECK(required(across, DynaPin::pin_top_z_at_x(config, pin, 20.) + 0.1) == 0.);
+    auto local = across;
+    local.translate(-scale_(10.), -scale_(50.));
+    CHECK(required(local, z, Vec2d(10., 50.)) == required(across, z));
+    auto outside = across;
+    outside.translate(0, scale_(0.5 * config.blocker_width_y + 0.3));
+    CHECK(required(outside, z) == 0.);
+    auto edge = across;
+    edge.translate(0, scale_(0.5 * config.blocker_width_y + 0.1));
+    CHECK(required(edge, z) > z);
+    CHECK(DynaPin::required_pin_travel_z(print, config, {}, across, Vec2d::Zero(), z, 0.2) == 0.);
+    CHECK(DynaPin::required_pin_travel_z(print, config, {{0, 0}}, across, Vec2d::Zero(), z, 0.2) == 0.);
 }

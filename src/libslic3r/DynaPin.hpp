@@ -93,8 +93,15 @@ struct PullConfig
 struct SupportSpeedConfig
 {
     int    layers         = 3;
-    double min_x_distance = 5.; // mm per extrusion segment
     double max_x_speed    = 0.; // mm/s; 0 uses initial_layer_speed
+};
+
+struct LandingSlopeConfig
+{
+    double reference_x    = 25.; // machine X at the configured pin-top height
+    double slope_x        = 0.;  // dz/dx; zero preserves horizontal landing
+    double max_band_width = 7.5;
+    double travel_clearance = 2.;
 };
 
 struct Config
@@ -112,6 +119,7 @@ struct Config
     double         landing_edge_inset_y = 0.;
     PullConfig     pull_gcode;
     SupportSpeedConfig support_speed;
+    LandingSlopeConfig landing_slope;
 };
 
 struct BlockerZRange
@@ -152,6 +160,7 @@ struct VirtualSupportSurface
     Polygon poly;         // ピン上面の XY 形状（object-local 座標）
     double  print_z = 0.; // ピン上面の Z 高さ (mm)
     double  edge_inset_y = 0.; // 着地面の外縁余白。隣接ピンとの共有境界には適用しない。
+    double  source_print_z = 0.; // Original horizontal landing envelope, before band alignment.
 };
 
 struct LandingLayer
@@ -172,7 +181,8 @@ struct LandingLayerAdjustment
 std::vector<LandingLayerAdjustment> align_landing_layers(const std::vector<LandingLayer>&          layers,
                                                          const std::vector<VirtualSupportSurface>& surfaces,
                                                          double                                    min_height,
-                                                         double                                    max_height);
+                                                         double                                    max_height,
+                                                         double                                    expansion = 0.);
 
 // Result indices match layers; coincident Z slabs count as a single layer.
 std::vector<Polygons> landing_regions(const std::vector<LandingLayer>&          layers,
@@ -217,6 +227,13 @@ const std::vector<Pin>& resolved_pins(const Print& print);
 bool                    load_config_for_print(const Print& print, Config& config, std::string* error = nullptr);
 LocalBlocker            blocker_for_pin(const PrintObject& object, const Config& config, const Pin& pin);
 VirtualSupportSurface   surface_for_pin(const PrintObject& object, const Config& config, const Pin& pin);
+// Routing keeps one conservative horizontal envelope per pin; only landing
+// generation consumes the disjoint horizontal bands below that envelope.
+std::vector<VirtualSupportSurface> landing_surfaces_for_pin(const PrintObject& object, const Config& config, const Pin& pin);
+std::vector<VirtualSupportSurface> landing_surfaces_for_object(const PrintObject& object);
+double                  pin_top_z_at_x(const Config& config, const Pin& pin, double machine_x);
+double                  pin_pull_trigger_z(const Print& print, const Config& config, const Pin& pin);
+double                  pin_travel_clearance_z(const Print& print, const Config& config, const std::vector<Pin>& pins);
 std::optional<Point>    nearest_pin_landing_point(const Polygon& safe_region, const Point& from);
 bool                    pin_collides_with_model(const Print& print, const Config& config, const Pin& pin,
                                                std::size_t* intersection_count = nullptr);

@@ -94,3 +94,32 @@ SCENARIO("set_speed emits values with fixed-point output.", "[GCodeWriter]") {
         }
     }
 }
+
+TEST_CASE("DynaPin vertical layer changes preserve requested Z-hop", "[GCodeWriter][DynaPin][PinLift]")
+{
+    GCodeWriter writer;
+    PrintConfig config;
+    config.z_hop.values              = {0.2};
+    config.retract_lift_above.values = {0.};
+    config.retract_lift_below.values = {0.};
+    writer.apply_print_config(config);
+    writer.set_extruders({0});
+    writer.set_extruder(0);
+    writer.travel_to_z(10.);
+    const bool eager = GENERATE(false, true);
+    if (eager)
+        writer.eager_lift(LiftType::NormalLift);
+    else
+        writer.lazy_lift(LiftType::NormalLift);
+    writer.travel_to_z_preserving_lift(10.04);
+    CHECK(writer.get_position().z() == Catch::Approx(10.24));
+    CHECK(writer.get_zhop() == Catch::Approx(0.2));
+    writer.travel_to_xy(Vec2d(5., 5.));
+    CHECK(writer.get_position().z() == Catch::Approx(10.24));
+    writer.unlift();
+    CHECK(writer.get_position().z() == Catch::Approx(10.04));
+    CHECK(writer.get_zhop() == 0.);
+    writer.travel_to_z_preserving_lift(10.26);
+    CHECK(writer.get_position().z() == Catch::Approx(10.26));
+    CHECK(writer.get_zhop() == 0.);
+}
