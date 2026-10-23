@@ -20,6 +20,10 @@
 #include <algorithm>
 #include <cstdlib>
 #include <future>
+#include <chrono>
+#include <iostream>
+#include <random>
+#include <tbb/task_arena.h>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 
@@ -2052,6 +2056,38 @@ TEST_CASE("Tree pin projection preserves boundary and height ordering", "[Print]
     CHECK(DynaPin::select_from_projection({}).selected.empty());
 }
 
+TEST_CASE("Tree pin projection batches contacts without changing selections", "[Print][DynaPin][TreePinSelection]")
+{
+    std::mt19937                       rng(7241);
+    std::uniform_int_distribution<int> coordinate(-20, 20);
+    for (int trial = 0; trial < 128; ++trial) {
+        CAPTURE(trial);
+        std::vector<DynaPin::ProjectionEvent> events;
+        for (int i = 0; i < 40; ++i) {
+            const coord_t x = coordinate(rng) * 10000;
+            const coord_t y = coordinate(rng) * 10000;
+            Polygon       outer{{x, y}, {x + 100000, y}, {x + 100000, y + 100000}, {x, y + 100000}};
+            Polygon       hole{{x + 20000, y + 20000}, {x + 80000, y + 20000}, {x + 80000, y + 80000}, {x + 20000, y + 80000}};
+            outer.rotate((trial % 9) * 0.1);
+            hole.rotate((trial % 9) * 0.1);
+            events.push_back({DynaPin::ProjectionEventType::Contact, double(i), diff({outer}, {hole}), {}, false});
+        }
+        for (int i = 0; i < 12; ++i) {
+            const coord_t x = coordinate(rng) * 10000 + (i % 3 - 1);
+            const coord_t y = coordinate(rng) * 10000;
+            Polygon       surface{{x, y}, {x + 50000, y}, {x + 50000, y + 50000}, {x, y + 50000}};
+            events.push_back({DynaPin::ProjectionEventType::PinSurface, double(i * 3), {surface}, {i, 0}, i % 3 == 0});
+            if (i % 2 == 0)
+                events.push_back({DynaPin::ProjectionEventType::Model, double(i * 3 + 1), {surface}, {}, false});
+        }
+        std::shuffle(events.begin(), events.end(), rng);
+        const auto expected = Test::reference_select_from_projection(events);
+        const auto actual   = DynaPin::select_from_projection(events);
+        CHECK(actual.selected == expected.selected);
+        CHECK(actual.rejected_collisions == expected.rejected_collisions);
+    }
+}
+
 TEST_CASE("Tree pin selection preserves multi-stage overhang choices", "[Print][DynaPin][TreePinSelection]")
 {
     ResourcesDirGuard resources_guard(test_resources_dir());
@@ -2287,6 +2323,174 @@ TEST_CASE("DynaPin final G-code slows X support extrusion for exactly three laye
     CHECK(short_x >= 3);
     CHECK(normal_y >= 3);
     CHECK(normal_later >= 3);
+}
+
+TEST_CASE("DynaPin caps travel approaching and leaving stabilized support", "[DynaPin][SupportSpeed]")
+{
+    ResourcesDirGuard   resources_guard(test_resources_dir());
+    TemporaryDirGuard   temporary_guard;
+    DebugStageEnvGuard  stage_guard;
+    const bool          arc_fitting    = GENERATE(false, true);
+    const ExtrusionRole support_role   = GENERATE(erSupportMaterial, erSupportMaterialInterface, erSupportTransition);
+    const std::string   hop_type       = GENERATE("Normal Lift", "Slope Lift", "Spiral Lift");
+    const int           mode           = GENERATE(0, 1, 2); // Disabled, zero protected layers, enabled.
+    const int           limited_layers = mode == 2 ? 3 : 0;
+    const std::string   role_label     = ExtrusionEntity::role_to_string(support_role);
+    auto                json           = pull_reference_fixtures()[0]["config"];
+    json["support_speed"]              = {{"layers", mode == 1 ? 0 : 3}, {"max_x_speed", 0.}};
+    PullConfigFile file;
+    file.write(json);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    for (const std::string& key : config.keys()) {
+        ConfigOption* option = config.option(key);
+        if (option->type() == coEnums) {
+            const auto* definition = print_config_def.get(key);
+            if (option->nullable())
+                static_cast<ConfigOptionEnumsGenericNullable*>(option)->keys_map = definition->enum_keys_map;
+            else
+                static_cast<ConfigOptionEnumsGeneric*>(option)->keys_map = definition->enum_keys_map;
+        }
+    }
+    config.set_deserialize_strict({{"enable_dynapin_support_optimization", mode != 0},
+                                   {"dynapin_debug_stage", 2},
+                                   {"dynapin_config_path", file.path.string()},
+                                   {"dynapin_selected_pins", "0,0"},
+                                   {"enable_support", true},
+                                   {"support_type", "normal(auto)"},
+                                   {"initial_layer_speed", 20.},
+                                   {"support_speed", 80.},
+                                   {"travel_speed", 150.},
+                                   {"travel_speed_z", 100.},
+                                   {"z_hop", "0.4"},
+                                   {"z_hop_types", hop_type},
+                                   {"retraction_minimum_travel", "0"},
+                                   {"wipe", "0"},
+                                   {"support_interface_speed", "100%"},
+                                   {"bridge_speed", 80.},
+                                   {"slow_down_layers", 0},
+                                   {"max_volumetric_extrusion_rate_slope", 20.},
+                                   {"fan_speedup_time", 1.},
+                                   {"slow_down_for_layer_cooling", "0"},
+                                   {"filament_max_volumetric_speed", "1000"},
+                                   {"enable_arc_fitting", arc_fitting}});
+    Print print;
+    Model model;
+    init_dynapin_print(print, model, config);
+    print.process();
+    PrintObject* object = print.get_object(size_t(0));
+    REQUIRE(object->support_layers().empty());
+    const Polygon footprint(
+        Points{Point::new_scale(-9., -9.), Point::new_scale(9., -9.), Point::new_scale(9., 9.), Point::new_scale(-9., 9.)});
+    for (int i = 0; i < 5; ++i) {
+        SupportLayer* layer    = object->add_support_layer(i, i, 0.2, 7.5 + i * 0.2);
+        layer->support_islands = {ExPolygon(footprint)};
+        if (i == 0)
+            layer->dynapin_landing_regions = {footprint};
+        ExtrusionPath path(support_role, 0.1, 0.5f, 0.2f);
+        path.polyline           = Polyline(Points{Point::new_scale(-8., -8.), Point::new_scale(-6., -8.), Point::new_scale(-6., -6.),
+                                                  Point::new_scale(8., -6.), Point::new_scale(8., 8.), Point::new_scale(-8., -8.)});
+        path.is_dynapin_landing = i == 0;
+        if (arc_fitting) {
+            path.simplify_by_fitting_arc(scale_(0.01));
+            REQUIRE_FALSE(path.polyline.fitting_result.empty());
+        }
+        ExtrusionEntityCollection ordered;
+        ordered.no_sort = true;
+        ordered.append(path);
+        for (double x : {20., 30., 6.}) {
+            path.polyline = Polyline(Points{Point::new_scale(x, 5.), Point::new_scale(x + 2., 5.)});
+            ordered.append(path);
+        }
+        layer->support_fills.append(ordered);
+    }
+    const auto output_path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("dynapin-speed-%%%%%%.gcode");
+    GCodeProcessorResult result;
+    print.export_gcode(output_path.string(), &result, nullptr);
+    std::ifstream     stream(output_path.string());
+    const std::string output((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    if (mode == 0) {
+        // A configured limit must be inert when DynaPin itself is disabled.
+        json["support_speed"]["layers"] = 0;
+        file.write(json);
+        print.export_gcode(output_path.string(), &result, nullptr);
+        std::ifstream     reference_stream(output_path.string());
+        const std::string reference((std::istreambuf_iterator<char>(reference_stream)), std::istreambuf_iterator<char>());
+        auto              without_timestamp = [](const std::string& text) {
+            std::istringstream lines(text);
+            std::string        normalized, line;
+            while (std::getline(lines, line))
+                if (line.rfind("; generated by ", 0) != 0)
+                    normalized += line + '\n';
+            return normalized;
+        };
+        CHECK((without_timestamp(output) == without_timestamp(reference)));
+    }
+    boost::filesystem::remove(output_path);
+    const std::string role_prefix        = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role);
+    bool              support            = false;
+    int               previous_index     = -1;
+    bool              previous_protected = false;
+    const Point       shift              = object->instances().front().shift;
+    struct TravelMove
+    {
+        double x_speed;
+        double speed;
+        std::string raw;
+    };
+    std::vector<TravelMove> pending;
+    std::set<int>           approaches, departures, ordinary, outside;
+    GCodeReader             reader;
+    reader.apply_config(print.config());
+    reader.parse_buffer(output, [&](GCodeReader& state, const GCodeReader::GCodeLine& line) {
+        if (line.raw().find(role_prefix) == 0)
+            support = line.raw() == role_prefix + role_label;
+        if (!line.cmd_is("G1") && !line.cmd_is("G2") && !line.cmd_is("G3"))
+            return;
+        const double dx    = std::abs(line.new_X(state) - state.x());
+        const double dy    = std::abs(line.new_Y(state) - state.y());
+        const double dz    = std::abs(line.new_Z(state) - state.z());
+        const double speed = line.new_F(state) / 60.;
+        if (line.extruding(state) && (line.has_x() || line.has_y())) {
+            const int  index           = support ? int(std::round((state.z() - 7.5) / 0.2)) : -1;
+            const bool protected_layer = limited_layers > 0 && index >= 1 && index <= 3;
+            const bool approaching     = protected_layer && footprint.contains(Point::new_scale(state.x(), state.y()) - shift);
+            const bool departing       = previous_protected;
+            for (const auto& move : pending) {
+                if (approaching || departing) {
+                    CAPTURE(hop_type, arc_fitting, index, previous_index, move.raw);
+                    CHECK(move.x_speed <= 20.02);
+                    if (approaching)
+                        approaches.insert(index);
+                    if (departing)
+                        departures.insert(previous_index);
+                } else if (index >= 1 && index == previous_index) {
+                    CHECK(move.speed >= 99.99); // Spirals use travel_speed_z (100 mm/s).
+                    if (move.speed > 149.99) {
+                        if (index == 4)
+                            ordinary.insert(index);
+                        else
+                            outside.insert(index);
+                    }
+                }
+            }
+            pending.clear();
+            previous_index     = index;
+            previous_protected = protected_layer && footprint.contains(Point::new_scale(line.new_X(state), line.new_Y(state)) - shift);
+        } else if (dx > 0.01 || dy > 0.01 || line.cmd_is("G2") || line.cmd_is("G3")) {
+            // A spiral has X tangents even when its endpoints share the same XY.
+            const double x_speed = line.cmd_is("G1") ? speed * dx / std::sqrt(dx * dx + dy * dy + dz * dz) : speed;
+            pending.push_back({x_speed, speed, line.raw()});
+        }
+    });
+    if (limited_layers > 0) {
+        CHECK(approaches == std::set<int>{1, 2, 3});
+        CHECK(departures == std::set<int>{1, 2, 3});
+    } else {
+        CHECK(approaches.empty());
+        CHECK(departures.empty());
+    }
+    CHECK(ordinary == std::set<int>{4});
+    CHECK(outside == std::set<int>{1, 2, 3});
 }
 
 TEST_CASE("DynaPin pulls share one lift and restore the saved position", "[DynaPin][DynaPinPull]")
@@ -3034,4 +3238,270 @@ TEST_CASE("DynaPin only lifts travels crossing a raised physical pin surface", "
     CHECK(required(edge, z) > z);
     CHECK(DynaPin::required_pin_travel_z(print, config, {}, across, Vec2d::Zero(), z, 0.2) == 0.);
     CHECK(DynaPin::required_pin_travel_z(print, config, {{0, 0}}, across, Vec2d::Zero(), z, 0.2) == 0.);
+}
+
+namespace {
+void init_dynapin_geometry_print(Print& print, Model& model, const DynamicPrintConfig& config, bool bridge = false)
+{
+    TriangleMesh mesh = make_cube(5., 5., 20.);
+    TriangleMesh top  = make_cube(60., 20., 5.);
+    top.translate(0., 0., 20.);
+    mesh.merge(top);
+    if (bridge) {
+        TriangleMesh second = make_cube(5., 20., 20.);
+        second.translate(55., 0., 0.);
+        mesh.merge(second);
+    }
+    auto* object = model.add_object();
+    object->add_volume(std::move(mesh));
+    object->add_instance()->set_offset({80., 40., 0.});
+    object->ensure_on_bed();
+    print.set_plate_origin(Vec3d::Zero());
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.set_status_silent();
+}
+} // namespace
+
+TEST_CASE("DynaPin placement preparation skips only dispensable toolpaths", "[DynaPin][DynaPinGeometry]")
+{
+    ResourcesDirGuard  resources_guard(test_resources_dir());
+    const bool         tree        = GENERATE(false, true);
+    const bool         thick       = GENERATE(false, true);
+    const bool         independent = GENERATE(false, true);
+    DynamicPrintConfig config      = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"enable_support", true},
+                                   {"enable_dynapin_support_optimization", true},
+                                   {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+                                   {"support_type", tree ? "tree(auto)" : "normal(auto)"},
+                                   {"thick_bridges", thick},
+                                   {"independent_support_layer_height", independent}});
+    Print print;
+    Model model;
+    init_dynapin_geometry_print(print, model, config);
+    REQUIRE(print.prepare_slices_for_support_geometry({}, DynaPin::SupportGeometryMode::PlacementSearch));
+    for (const PrintObject* object : print.objects()) {
+        CHECK(object->is_step_done(posPerimeters));
+        CHECK(object->is_step_done(posPrepareInfill));
+        CHECK(object->is_step_done(posInfill) == (!tree && thick && independent));
+        CHECK(object->step_state_with_timestamp(posEstimateCurledExtrusions).state == PrintStateBase::INVALID);
+        CHECK(object->step_state_with_timestamp(posIroning).state == PrintStateBase::INVALID);
+    }
+}
+
+TEST_CASE("DynaPin Normal search preparation preserves support geometry", "[DynaPin][DynaPinGeometry]")
+{
+    ResourcesDirGuard  resources_guard(test_resources_dir());
+    const bool         bridge            = GENERATE(false, true);
+    const bool         thick             = GENERATE(false, true);
+    const bool         independent       = GENERATE(false, true);
+    const bool         bridge_no_support = GENERATE(false, true);
+    DynamicPrintConfig config            = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"enable_support", true},
+                                   {"enable_dynapin_support_optimization", true},
+                                   {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+                                   {"support_type", "normal(auto)"},
+                                   {"thick_bridges", thick},
+                                   {"independent_support_layer_height", independent},
+                                   {"bridge_no_support", bridge_no_support}});
+    Print exact_print, search_print;
+    Model exact_model, search_model;
+    init_dynapin_geometry_print(exact_print, exact_model, config, bridge);
+    init_dynapin_geometry_print(search_print, search_model, config, bridge);
+    std::vector<DynaPin::SupportSlab> exact, search;
+    REQUIRE(exact_print.generate_support_geometry_only(exact));
+    REQUIRE(
+        search_print.generate_support_geometry_only(search, {}, nullptr, nullptr, nullptr, DynaPin::SupportGeometryMode::PlacementSearch));
+    CHECK(DynaPin::support_volume_mm3(search) == Catch::Approx(DynaPin::support_volume_mm3(exact)).margin(1e-6));
+    CHECK(search_print.dynapin_selection().pins == exact_print.dynapin_selection().pins);
+}
+
+TEST_CASE("DynaPin Tree geometry mode emits areas without extrusion paths", "[DynaPin][DynaPinGeometry]")
+{
+    ResourcesDirGuard  resources_guard(test_resources_dir());
+    const char*        style  = GENERATE("tree_slim", "tree_strong", "tree_hybrid");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"enable_support", true},
+                                   {"enable_dynapin_support_optimization", true},
+                                   {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+                                   {"support_type", "tree(auto)"},
+                                   {"support_style", style}});
+    Print print;
+    Model model;
+    init_dynapin_geometry_print(print, model, config);
+    REQUIRE(print.prepare_slices_for_support_geometry({}, DynaPin::SupportGeometryMode::PlacementSearch));
+    print.update_dynapin_selection();
+    PrintObject* object = print.get_object(0);
+    TreeSupport  tree(*object, object->slicing_parameters());
+    tree.generate(TreeSupport::GenerationMode::GeometryOnly);
+    REQUIRE_FALSE(object->support_layers().empty());
+    double area = 0.;
+    for (const SupportLayer* layer : object->support_layers()) {
+        CHECK(layer->support_fills.empty());
+        area += Slic3r::area(layer->base_areas);
+    }
+    CHECK(area > 0.);
+}
+
+TEST_CASE("DynaPin geometry benchmark compares bounded placement pipelines", "[.DynaPinGeometryBenchmark]")
+{
+    ResourcesDirGuard  resources_guard(test_resources_dir());
+    TemporaryDirGuard  temporary_guard;
+    DebugStageEnvGuard stage_guard;
+    REQUIRE(::setenv("DYNAPIN_DEBUG_STAGE", "2", 1) == 0);
+    const char* fixture = GENERATE("Simple_Bridge.3mf", "Arch_Bridge.3mf", "RemoveGymnastBase.3mf");
+    if (const char* filter = std::getenv("DYNAPIN_BENCHMARK_FIXTURE"))
+        if (std::string(filter) != fixture)
+            return;
+    const bool                exact = std::getenv("DYNAPIN_BENCHMARK_EXACT") != nullptr;
+    const bool                full  = std::getenv("DYNAPIN_BENCHMARK_FULL") != nullptr;
+    const auto                mode  = exact ? DynaPin::SupportGeometryMode::Exact : DynaPin::SupportGeometryMode::PlacementSearch;
+    Model                     model;
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext substitution{ForwardCompatibilitySubstitutionRule::Disable};
+    PlateDataPtrs             plates;
+    std::vector<Preset*>      presets;
+    ImportedProjectDataGuard  imported(plates, presets);
+    bool                      is_bbl = false;
+    Semver                    version;
+    const std::string         path = (boost::filesystem::path(TEST_DATA_DIR) / "dynapin" / fixture).string();
+    REQUIRE(load_bbs_3mf(path.c_str(), &config, &substitution, &model, &plates, &presets, &is_bbl, &version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
+    config.set_deserialize_strict({{"enable_dynapin_support_optimization", true},
+                                   {"enable_dynapin_placement_optimization", true},
+                                   {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+                                   {"dynapin_debug_stage", 2},
+                                   {"dynapin_selected_pins", ""},
+                                   {"support_type", "tree(auto)"},
+                                   {"printable_area", "0x0,180x0,180x180,0x180"},
+                                   {"printable_height", 180.}});
+    Print print;
+    print.set_plate_origin(Vec3d::Zero());
+    for (auto* object : model.objects)
+        print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.set_status_silent();
+    const auto preparation = DynaPin::prepare_placement_task(model, print, {{0., 0.}, {180., 0.}, {180., 180.}, {0., 180.}}, 180., {}, 0);
+    REQUIRE(preparation.task);
+    const auto allowed = [full](double angle) { return full || angle == 0. || angle == 5. || angle == 355.; };
+    for (int repeat = 0; repeat < (full ? 1 : 3); ++repeat) {
+        auto task = *preparation.task;
+        if (!full)
+            task.search.angle_group_concurrency = 1;
+        // Default to a bounded search; full mode keeps production angles and concurrency.
+        const auto range_provider              = task.search.delta_y_range_for_rotation;
+        task.search.delta_y_range_for_rotation = [allowed, range_provider](double angle) {
+            return allowed(angle) ? range_provider(angle) : std::optional<DynaPin::DeltaYInterval>{};
+        };
+        const auto evaluator        = DynaPin::make_scene_angle_evaluator(task.scene, {}, mode);
+        task.search.angle_evaluator = [allowed, evaluator](double angle, const std::vector<DynaPin::PlacementCandidate>& candidates,
+                                                           std::vector<std::optional<double>>&        results,
+                                                           const DynaPin::CandidateCompletedCallback& completed) {
+            if (allowed(angle))
+                evaluator(angle, candidates, results, completed);
+            else
+                results.assign(candidates.size(), std::nullopt);
+        };
+        const auto start      = std::chrono::steady_clock::now();
+        auto       result     = DynaPin::optimize_placement(task.search, DynaPin::make_scene_evaluator(task.scene, {}, mode));
+        const auto search_end = std::chrono::steady_clock::now();
+        if (!exact)
+            result = DynaPin::revalidate_placement_result(std::move(result), {0., 0.}, DynaPin::make_scene_evaluator(task.scene));
+        const double search_ms     = std::chrono::duration<double, std::milli>(search_end - start).count();
+        const double validation_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - search_end).count();
+        const double elapsed       = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        std::cout << "DYNAPIN_BENCH fixture=" << fixture << " exact=" << exact << " full=" << full << " repeat=" << repeat
+                  << " elapsed_ms=" << elapsed << " search_ms=" << search_ms << " validation_ms=" << validation_ms
+                  << " evaluations=" << result.evaluations << " status=" << int(result.status) << " volume=" << result.volume_mm3 << '\n';
+        CHECK((result.status == DynaPin::PlacementStatus::Improved || result.status == DynaPin::PlacementStatus::Unchanged));
+    }
+}
+
+TEST_CASE("DynaPin temporary placement evaluation preserves live geometry and Normal G-code", "[DynaPin][DynaPinGeometry]")
+{
+    ResourcesDirGuard  resources_guard(test_resources_dir());
+    TemporaryDirGuard  temporary_guard;
+    const bool         enabled = GENERATE(false, true);
+    const bool         tree    = GENERATE(false, true);
+    DynamicPrintConfig config  = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"enable_support", true},
+                                   {"enable_dynapin_support_optimization", enabled},
+                                   {"dynapin_config_path", "Kingroon/dynapin/kp3s.json"},
+                                   {"support_type", tree ? "tree(auto)" : "normal(auto)"},
+                                   {"printable_area", "0x0,180x0,180x180,0x180"},
+                                   {"printable_height", 180.},
+                                   {"gcode_label_objects", false},
+                                   {"seam_position", "back"}});
+    for (const auto& key : config.keys()) {
+        auto* option = config.option(key);
+        if (option->type() == coEnums) {
+            const auto* definition = print_config_def.get(key);
+            if (option->nullable())
+                static_cast<ConfigOptionEnumsGenericNullable*>(option)->keys_map = definition->enum_keys_map;
+            else
+                static_cast<ConfigOptionEnumsGeneric*>(option)->keys_map = definition->enum_keys_map;
+        }
+    }
+    Print live;
+    Model model;
+    init_dynapin_geometry_print(live, model, config);
+    DynaPin::PlacementSceneSnapshot scene;
+    scene.model              = std::make_shared<Model>(model);
+    scene.config             = config;
+    const auto* object       = model.objects.front();
+    const auto* instance     = object->instances.front();
+    scene.target_object_id   = object->id();
+    scene.target_instance_id = instance->id();
+    scene.initial_transform  = instance->get_matrix();
+    scene.world_center       = object->instance_bounding_box(*instance, false).center();
+    scene.printable_area     = {{0., 0.}, {180., 0.}, {180., 180.}, {0., 180.}};
+    scene.printable_height   = 180.;
+    const auto export_gcode  = [](Print& print) {
+        tbb::task_arena arena(1);
+        return arena.execute([&] {
+            std::srand(0);
+            const auto path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("dynapin-geometry-%%%%-%%%%.gcode");
+            print.process();
+            GCodeProcessorResult result;
+            print.export_gcode(path.string(), &result, nullptr);
+            std::ifstream input(path.string());
+            std::string   output((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+            boost::filesystem::remove(path);
+            return output;
+        });
+    };
+    auto       before        = export_gcode(live);
+    const auto support_paths = [&] {
+        std::vector<Points> paths;
+        for (const auto* object : live.objects())
+            for (const auto* layer : object->support_layers())
+                for (const auto& path : layer->support_fills.as_polylines())
+                    paths.push_back(path.points);
+        return paths;
+    };
+    const auto paths_before = support_paths();
+    const auto pins_before  = live.dynapin_selection().pins;
+    // Rejected candidates must leave the live Print unchanged too.
+    DynaPin::evaluate_scene_candidate(scene, {0., 0.}, {}, DynaPin::SupportGeometryMode::PlacementSearch);
+    CHECK(support_paths() == paths_before);
+    CHECK(live.dynapin_selection().pins == pins_before);
+    // Compare Tree's live paths directly; repeated exports are sensitive to
+    // support path ordering and are not a stable byte-level oracle here.
+    if (tree)
+        return;
+    auto after = export_gcode(live);
+    // Only the generated-at comment is wall-clock dependent.
+    const auto strip_timestamp = [](std::string& gcode) {
+        const auto begin = gcode.find("; generated by ");
+        if (begin != std::string::npos)
+            gcode.erase(begin, gcode.find('\n', begin) - begin);
+    };
+    strip_timestamp(before);
+    strip_timestamp(after);
+    const auto mismatch = std::mismatch(before.begin(), before.end(), after.begin(), after.end());
+    const auto offset   = size_t(mismatch.first - before.begin());
+    INFO("First G-code difference at byte " << offset << ": " << before.substr(offset, 100) << " / "
+                                            << after.substr(std::min(offset, after.size()), 100));
+    CHECK(mismatch.first == before.end());
+    CHECK(before.size() == after.size());
 }

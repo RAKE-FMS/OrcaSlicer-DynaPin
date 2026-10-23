@@ -996,28 +996,68 @@ static ProjectionSelection select_from_projection_impl(std::vector<ProjectionEve
         return type_order(lhs.type) < type_order(rhs.type);
     });
 
-    ProjectionSelection result;
-    Polygons            projection;
-    auto                intersects = [&](const Polygons& a, const Polygons& b) {
+    ProjectionSelection      result;
+    Polygons                 projection;
+    std::vector<BoundingBox> projection_bounds;
+    bool                     bounds_dirty     = true;
+    bool                     pending_contacts = false;
+    size_t remaining_pins = std::count_if(events.begin(), events.end(),
+                                          [](const ProjectionEvent& event) { return event.type == ProjectionEventType::PinSurface; });
+    auto   intersects     = [&](const Polygons& clip) {
+        if (bounds_dirty) {
+            projection_bounds.clear();
+            projection_bounds.reserve(projection.size());
+            for (const Polygon& polygon : projection)
+                projection_bounds.push_back(get_extents(polygon));
+            bounds_dirty = false;
+        }
+        const BoundingBox clip_bounds = get_extents(clip);
+        Polygons          relevant;
+        for (size_t i = 0; i < projection.size(); ++i) {
+            const BoundingBox& bounds = projection_bounds[i];
+            // Keep touching bounds: the polygon intersection decides boundaries.
+            if (bounds.max.x() >= clip_bounds.min.x() && clip_bounds.max.x() >= bounds.min.x() && bounds.max.y() >= clip_bounds.min.y() &&
+                clip_bounds.max.y() >= bounds.min.y())
+                relevant.push_back(projection[i]);
+        }
+        if (relevant.empty())
+            return false;
         if (work)
             ++work->intersections;
-        return !intersection(a, b).empty();
+        return !intersection(relevant, clip).empty();
     };
     for (const ProjectionEvent& event : events) {
+        // Geometry below the final pin cannot affect any selection.
+        if (remaining_pins == 0)
+            break;
         if (event.type == ProjectionEventType::Contact) {
             polygons_append(projection, event.polygons);
+            pending_contacts = true;
+            continue;
+        }
+        // Consecutive contact events only accumulate area. Normalize once at
+        // the next query/subtraction, rather than re-unioning the growing
+        // projection at every object layer (hundreds of times on fine meshes).
+        if (pending_contacts) {
             if (work)
                 ++work->unions;
-            projection = union_(projection);
-        } else if (event.type == ProjectionEventType::Model) {
+            projection       = union_(projection);
+            bounds_dirty     = true;
+            pending_contacts = false;
+        }
+        if (event.type == ProjectionEventType::Model) {
             if (!projection.empty()) {
                 if (work) {
                     ++work->differences;
                     ++work->offsets;
                 }
-                projection = diff(projection, offset(event.polygons, float(SCALED_EPSILON)));
+                projection   = diff(projection, offset(event.polygons, float(SCALED_EPSILON)));
+                bounds_dirty = true;
             }
-        } else if (!projection.empty() && intersects(projection, event.polygons)) {
+        } else {
+            --remaining_pins;
+            if (projection.empty() || !intersects(event.polygons))
+                continue;
             if (event.colliding)
                 result.rejected_collisions.push_back(event.pin);
             else {
@@ -1026,7 +1066,8 @@ static ProjectionSelection select_from_projection_impl(std::vector<ProjectionEve
                 // upper pin consumes only the projection landing on its top.
                 if (work)
                     ++work->differences;
-                projection = diff(projection, event.polygons);
+                projection   = diff(projection, event.polygons);
+                bounds_dirty = true;
             }
         }
     }

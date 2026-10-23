@@ -621,8 +621,10 @@ private:
     double m_dynapin_travel_clearance_z = 0.;
     std::optional<DynaPin::Config> m_dynapin_travel_config;
     bool                             m_last_dynapin_landing = false;
+    bool                             m_last_dynapin_stabilized_support = false;
     DynaPin::SupportSpeedConfig      m_dynapin_support_speed;
     std::map<const Layer*, Polygons> m_dynapin_stabilization_regions;
+    bool                             dynapin_stabilized_support(const Point& point, ExtrusionRole role) const;
 
     std::vector<const PrintObject*> m_printed_objects;
 
