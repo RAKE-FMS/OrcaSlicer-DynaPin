@@ -1645,7 +1645,7 @@ void TreeSupport::move_bounds_to_contact_nodes(std::vector<TreeSupport3D::Suppor
     }
 }
 
-void TreeSupport::generate()
+void TreeSupport::generate(GenerationMode mode)
 {
     m_object->clear_dynapin_tree_landing_plan();
     m_dynapin_polygon_landings.clear();
@@ -1777,19 +1777,19 @@ void TreeSupport::generate()
     draw_circles();
     profiler.stage_finish(STAGE_DRAW_CIRCLES);
 
-
-
-    profiler.stage_start(STAGE_GENERATE_TOOLPATHS);
-    m_object->print()->set_status(70, _u8L("Generating support"));
-    generate_toolpaths();
-    profiler.stage_finish(STAGE_GENERATE_TOOLPATHS);
-    validate_dynapin_landings();
+    if (mode == GenerationMode::Toolpaths) {
+        profiler.stage_start(STAGE_GENERATE_TOOLPATHS);
+        m_object->print()->set_status(70, _u8L("Generating support"));
+        generate_toolpaths();
+        profiler.stage_finish(STAGE_GENERATE_TOOLPATHS);
+    }
+    validate_dynapin_landings(mode);
 
     profiler.stage_finish(STAGE_total);
     BOOST_LOG_TRIVIAL(info) << "tree support time " << profiler.report();
 }
 
-void TreeSupport::validate_dynapin_landings()
+void TreeSupport::validate_dynapin_landings(GenerationMode mode)
 {
     DynaPin::TreePinLandingPlan plan = m_object->dynapin_tree_landing_plan();
     if (plan.landings.empty())
@@ -1801,12 +1801,26 @@ void TreeSupport::validate_dynapin_landings()
             continue;
         bool intersects = false;
         for (const SupportLayer* layer : m_object->support_layers()) {
-            if (layer == nullptr || layer->bottom_z() >= blocker.z_max - EPSILON || layer->print_z <= blocker.z_min + EPSILON)
+            if (layer == nullptr)
                 continue;
-            for (const ExtrusionEntity* entity : layer->support_fills.flatten().entities) {
-                if (!intersection(entity->polygons_covered_by_width(), Polygons{blocker.poly}).empty()) {
-                    intersects = true;
-                    break;
+            if (mode == GenerationMode::GeometryOnly) {
+                for (const auto& group : layer->area_groups) {
+                    const double height = group.height > 0. ? group.height : layer->height;
+                    if (layer->print_z - height >= blocker.z_max - EPSILON || layer->print_z <= blocker.z_min + EPSILON)
+                        continue;
+                    if (!intersection(to_polygons(*group.area), Polygons{blocker.poly}).empty()) {
+                        intersects = true;
+                        break;
+                    }
+                }
+            } else {
+                if (layer->bottom_z() >= blocker.z_max - EPSILON || layer->print_z <= blocker.z_min + EPSILON)
+                    continue;
+                for (const ExtrusionEntity* entity : layer->support_fills.flatten().entities) {
+                    if (!intersection(entity->polygons_covered_by_width(), Polygons{blocker.poly}).empty()) {
+                        intersects = true;
+                        break;
+                    }
                 }
             }
             if (intersects)
@@ -1816,10 +1830,16 @@ void TreeSupport::validate_dynapin_landings()
             colliding_pins.push_back(blocker.pin);
     }
 
-    const auto has_extrusion = [this](double print_z, const Polygon& footprint) {
+    const auto has_extrusion = [this, mode](double print_z, const Polygon& footprint) {
         const SupportLayer* layer = m_object->get_support_layer_at_printz(print_z, EPSILON);
         if (layer == nullptr)
             return false;
+        if (mode == GenerationMode::GeometryOnly) {
+            for (const auto& group : layer->area_groups)
+                if (!intersection(to_polygons(*group.area), Polygons{footprint}).empty())
+                    return true;
+            return false;
+        }
         for (const ExtrusionEntity* entity : layer->support_fills.flatten().entities)
             if (!intersection(entity->polygons_covered_by_width(), Polygons{footprint}).empty())
                 return true;

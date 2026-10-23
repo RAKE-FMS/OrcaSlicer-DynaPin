@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/DynaPinPlacement.hpp"
+
 #include "libslic3r/Model.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
@@ -733,8 +734,8 @@ TEST_CASE("DynaPin placement auto scheduling respects memory admission", "[DynaP
 
 TEST_CASE("DynaPin Tree placement task honors angle group concurrency", "[DynaPinPlacement]")
 {
-    // Only the current pose uses a real scene. The synthetic angle evaluator
-    // isolates task scheduling from the cost and resource needs of Tree geometry.
+    // The baseline and finalists use a real scene. The synthetic angle evaluator
+    // isolates search scheduling from the cost and resource needs of Tree geometry.
     auto  model  = std::make_shared<Model>();
     auto* object = model->add_object();
     object->add_volume(make_cube(5., 5., 5.));
@@ -780,7 +781,9 @@ TEST_CASE("DynaPin Tree placement task honors angle group concurrency", "[DynaPi
             active.fetch_sub(1);
         };
         const auto result = DynaPin::run_placement_task(task);
-        REQUIRE(result.status == DynaPin::PlacementStatus::Improved);
+        // The synthetic scores cannot override the exact zero-support baseline.
+        REQUIRE(result.status == DynaPin::PlacementStatus::Unchanged);
+        CHECK(result.volume_mm3 == 0.);
         if (concurrency == 1) {
             CHECK(peak.load() == 1);
             serial_result = result;
@@ -793,4 +796,95 @@ TEST_CASE("DynaPin Tree placement task honors angle group concurrency", "[DynaPi
             CHECK(result.evaluations == serial_result->evaluations);
         }
     }
+}
+
+TEST_CASE("DynaPin final validation reorders at most five alternatives", "[DynaPinPlacement]")
+{
+    using namespace Slic3r::DynaPin;
+    PlacementResult search;
+    search.status = PlacementStatus::Unchanged;
+    for (int i = 1; i <= 6; ++i)
+        search.finalists.push_back({double(i), 0.});
+    std::vector<double> checked;
+    const auto          result = revalidate_placement_result(search, {0., 0.}, [&](const PlacementCandidate& c) -> std::optional<double> {
+        checked.push_back(c.rotation_deg);
+        if (c.rotation_deg == 1.)
+            return std::nullopt;
+        return 1000. - c.rotation_deg * 10.;
+    });
+    CHECK(result.status == PlacementStatus::Improved);
+    CHECK(result.candidate == PlacementCandidate{5., 0.});
+    CHECK(result.volume_mm3 == 950.);
+    CHECK(checked == std::vector<double>{0., 1., 2., 3., 4., 5.});
+}
+
+TEST_CASE("DynaPin final validation preserves the baseline or cancels", "[DynaPinPlacement]")
+{
+    using namespace Slic3r::DynaPin;
+    PlacementResult search;
+    search.status    = PlacementStatus::Improved;
+    search.finalists = {{5., 1.}, {355., 0.}};
+    SECTION("Sub-threshold improvements keep the baseline")
+    {
+        const auto result = revalidate_placement_result(search, {0., 0.}, [](const PlacementCandidate& c) {
+            return std::optional<double>{c.rotation_deg == 0. ? 1000. : 999.5};
+        });
+        CHECK(result.status == PlacementStatus::Unchanged);
+        CHECK(result.volume_mm3 == 1000.);
+    }
+    SECTION("Rejected alternatives keep the exact current pose")
+    {
+        const auto result = revalidate_placement_result(search, {0., 0.}, [](const PlacementCandidate& c) -> std::optional<double> {
+            return c.rotation_deg == 0. ? std::optional<double>{1000.} : std::nullopt;
+        });
+        CHECK(result.status == PlacementStatus::Unchanged);
+        CHECK(result.candidate == PlacementCandidate{0., 0.});
+        CHECK(result.volume_mm3 == 1000.);
+    }
+    SECTION("An infeasible baseline prevents applying a result")
+    {
+        const auto result = revalidate_placement_result(search, {0., 0.}, [](const PlacementCandidate&) { return std::optional<double>{}; });
+        CHECK(result.status == PlacementStatus::NoFeasiblePose);
+        CHECK_FALSE(result.warning.empty());
+    }
+    SECTION("Ties use displacement before rotation")
+    {
+        const auto result = revalidate_placement_result(search, {0., 0.}, [](const PlacementCandidate& c) {
+            return std::optional<double>{c.rotation_deg == 0. ? 1000. : 900.};
+        });
+        CHECK(result.candidate == PlacementCandidate{355., 0.});
+    }
+    SECTION("Cancellation during the last evaluation prevents applying")
+    {
+        bool       canceled = false;
+        const auto result   = revalidate_placement_result(
+            search, {0., 0.},
+            [&](const PlacementCandidate& c) {
+                canceled = c.rotation_deg == 355.;
+                return std::optional<double>{1000. - c.rotation_deg};
+            },
+            [&] { return canceled; });
+        CHECK(result.status == PlacementStatus::Canceled);
+    }
+}
+
+TEST_CASE("DynaPin search retains five distinct ranked alternatives even without improvement", "[DynaPinPlacement]")
+{
+    using namespace Slic3r::DynaPin;
+    PlacementSearchInput input;
+    input.pitch_y     = 16.;
+    input.y_min       = -8.;
+    input.y_max       = 8.;
+    input.concurrency = 1;
+    const auto result = optimize_placement(input, [](const PlacementCandidate&) { return std::optional<double>{1000.}; });
+    CHECK(result.status == PlacementStatus::Unchanged);
+    REQUIRE(result.finalists.size() == 5);
+    for (size_t i = 0; i < result.finalists.size(); ++i) {
+        CHECK_FALSE(result.finalists[i] == PlacementCandidate{0., 0.});
+        for (size_t j = 0; j < i; ++j)
+            CHECK_FALSE(result.finalists[i] == result.finalists[j]);
+    }
+    CHECK(result.finalists.front().delta_y == 0.);
+    for (const auto& candidate : result.finalists)
+        CHECK(rotation_distance_deg(result.finalists.front().rotation_deg, 0.) <= rotation_distance_deg(candidate.rotation_deg, 0.));
 }

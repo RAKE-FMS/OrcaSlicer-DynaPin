@@ -373,9 +373,10 @@ static bool tree_candidate_requires_landing(const Print&            print,
     return projected_tree_pins.empty() || generated_tree_pins.empty();
 }
 
-std::optional<double> evaluate_scene_candidate(const PlacementSceneSnapshot &scene,
-                                               const PlacementCandidate     &candidate,
-                                               const CancelCallback         &cancel)
+std::optional<double> evaluate_scene_candidate(const PlacementSceneSnapshot& scene,
+                                               const PlacementCandidate&     candidate,
+                                               const CancelCallback&         cancel,
+                                               SupportGeometryMode           mode)
 {
     if (!scene.model || !scene.target_object_id.valid() || !scene.target_instance_id.valid())
         return std::nullopt;
@@ -434,8 +435,8 @@ std::optional<double> evaluate_scene_candidate(const PlacementSceneSnapshot &sce
     // This call runs update_dynapin_selection() before support generation.
     // The existing blocker collision scan therefore removes only colliding
     // pins while the candidate pose remains eligible for volume scoring.
-    if (!candidate_print.generate_support_geometry_only(
-            slabs, cancel, &scene.target_instance_id, &generated_tree_pins, &projected_tree_pins))
+    if (!candidate_print.generate_support_geometry_only(slabs, cancel, &scene.target_instance_id, &generated_tree_pins,
+                                                        &projected_tree_pins, mode))
         return std::nullopt;
     if (cancel && cancel())
         return std::nullopt;
@@ -451,19 +452,20 @@ std::optional<double> evaluate_scene_candidate(const PlacementSceneSnapshot &sce
     return support_volume_mm3(slabs);
 }
 
-PlacementEvaluator make_scene_evaluator(PlacementSceneSnapshot scene, const CancelCallback &cancel)
+PlacementEvaluator make_scene_evaluator(PlacementSceneSnapshot scene, const CancelCallback& cancel, SupportGeometryMode mode)
 {
-    return [scene = std::move(scene), cancel](const PlacementCandidate &candidate) {
-        return evaluate_scene_candidate(scene, candidate, cancel);
+    return [scene = std::move(scene), cancel, mode](const PlacementCandidate& candidate) {
+        return evaluate_scene_candidate(scene, candidate, cancel, mode);
     };
 }
 
-void evaluate_scene_angle_group(const PlacementSceneSnapshot          &scene,
+void evaluate_scene_angle_group(const PlacementSceneSnapshot&          scene,
                                 double                                 rotation_deg,
-                                const std::vector<PlacementCandidate> &candidates,
-                                std::vector<std::optional<double>>    &results,
-                                const CandidateCompletedCallback      &completed,
-                                const CancelCallback                  &cancel)
+                                const std::vector<PlacementCandidate>& candidates,
+                                std::vector<std::optional<double>>&    results,
+                                const CandidateCompletedCallback&      completed,
+                                const CancelCallback&                  cancel,
+                                SupportGeometryMode                    mode)
 {
     results.assign(candidates.size(), std::nullopt);
     if (candidates.empty())
@@ -530,7 +532,7 @@ void evaluate_scene_angle_group(const PlacementSceneSnapshot          &scene,
         return;
     }
 
-    if (!candidate_print.prepare_slices_for_support_geometry(cancel))
+    if (!candidate_print.prepare_slices_for_support_geometry(cancel, mode))
         return;
     if (cancel && cancel())
         return;
@@ -585,8 +587,8 @@ void evaluate_scene_angle_group(const PlacementSceneSnapshot          &scene,
         std::vector<SupportSlab> slabs;
         std::vector<Pin>         generated_tree_pins;
         std::vector<Pin>         projected_tree_pins;
-        if (!candidate_print.generate_support_geometry_for_current_shift(
-                slabs, cancel, &scene.target_instance_id, &generated_tree_pins, &projected_tree_pins)) {
+        if (!candidate_print.generate_support_geometry_for_current_shift(slabs, cancel, &scene.target_instance_id, &generated_tree_pins,
+                                                                         &projected_tree_pins, mode)) {
             if (!(cancel && cancel()) && completed)
                 completed(i);
             continue;
@@ -611,14 +613,13 @@ void evaluate_scene_angle_group(const PlacementSceneSnapshot          &scene,
     }
 }
 
-AngleGroupEvaluator make_scene_angle_evaluator(PlacementSceneSnapshot scene, const CancelCallback &cancel)
+AngleGroupEvaluator make_scene_angle_evaluator(PlacementSceneSnapshot scene, const CancelCallback& cancel, SupportGeometryMode mode)
 {
-    return [scene = std::move(scene), cancel](double                                 rotation_deg,
-                                              const std::vector<PlacementCandidate> &candidates,
-                                              std::vector<std::optional<double>>    &results,
-                                              const CandidateCompletedCallback     &completed) {
-        evaluate_scene_angle_group(scene, rotation_deg, candidates, results, completed, cancel);
-    };
+    return
+        [scene = std::move(scene), cancel, mode](double rotation_deg, const std::vector<PlacementCandidate>& candidates,
+                                                 std::vector<std::optional<double>>& results, const CandidateCompletedCallback& completed) {
+            evaluate_scene_angle_group(scene, rotation_deg, candidates, results, completed, cancel, mode);
+        };
 }
 
 static PlacementPreparationResult prepare_placement_task_impl(const Model&                          model,
@@ -724,7 +725,12 @@ static PlacementPreparationResult prepare_placement_task_impl(const Model&      
     search.angle_group_concurrency    = 0;
     search.delta_y_range_for_rotation = [scene](double rotation_deg) { return placement_delta_y_range_for_scene(scene, rotation_deg); };
 
-    const bool tree_support = is_tree(target_print_object->config().support_type.value);
+    // The score includes every object on the plate, including Tree support
+    // belonging to an object other than the placement target.
+    const bool tree_support = std::any_of(print.objects().begin(), print.objects().end(), [](const PrintObject* object) {
+        return object->has_support() && is_tree(object->config().support_type.value) &&
+               !is_tree_organic(object->config().support_type.value, object->config().support_style.value);
+    });
 
     preparation.task = PlacementTask{eligibility, std::move(search), std::move(scene), tree_support};
     return preparation;
@@ -749,6 +755,77 @@ PlacementPreparationResult prepare_placement_task(const Model&                  
     }
 }
 
+PlacementResult revalidate_placement_result(PlacementResult           result,
+                                            const PlacementCandidate& current,
+                                            const PlacementEvaluator& evaluator,
+                                            const CancelCallback&     cancel,
+                                            const ProgressCallback&   progress)
+{
+    if (result.status != PlacementStatus::Improved && result.status != PlacementStatus::Unchanged)
+        return result;
+    result.candidate = current;
+    auto canceled    = [&] {
+        if (cancel && cancel()) {
+            result.status = PlacementStatus::Canceled;
+            return true;
+        }
+        return false;
+    };
+    if (canceled())
+        return result;
+    ++result.evaluations;
+    const auto baseline = evaluator(current);
+    if (canceled())
+        return result;
+    if (!baseline || !finite(*baseline) || *baseline < 0.) {
+        result.status  = PlacementStatus::NoFeasiblePose;
+        result.warning = "The current pose is not feasible during exact DynaPin validation";
+        return result;
+    }
+    const double                                       epsilon = std::max(1., *baseline * 0.001);
+    std::vector<std::pair<PlacementCandidate, double>> valid{{current, *baseline}};
+    std::set<CandidateKey>                             seen{candidate_key(current)};
+    size_t                                             checked = 0;
+    for (const auto& candidate : result.finalists) {
+        if (checked == 5)
+            break;
+        if (!seen.emplace(candidate_key(candidate)).second)
+            continue;
+        if (canceled())
+            return result;
+        ++checked;
+        ++result.evaluations;
+        const auto volume = evaluator(candidate);
+        if (canceled())
+            return result;
+        if (volume && finite(*volume) && *volume >= 0.)
+            valid.emplace_back(candidate, *volume);
+        if (progress)
+            progress(90 + int(checked * 9 / std::min<size_t>(5, result.finalists.size())));
+    }
+    double best_volume = *baseline;
+    for (const auto& entry : valid)
+        best_volume = std::min(best_volume, entry.second);
+    auto winner = valid.begin();
+    bool found  = false;
+    for (auto it = valid.begin(); it != valid.end(); ++it) {
+        if (it->second > best_volume + epsilon)
+            continue;
+        if (!found || candidate_tie_less(it->first, winner->first, current.rotation_deg)) {
+            winner = it;
+            found  = true;
+        }
+    }
+    result.status     = PlacementStatus::Unchanged;
+    result.volume_mm3 = *baseline;
+    if (winner->second < *baseline - epsilon) {
+        result.status     = PlacementStatus::Improved;
+        result.candidate  = winner->first;
+        result.volume_mm3 = winner->second;
+    }
+    return result;
+}
+
 PlacementResult run_placement_task(PlacementTask                task,
                                    const CancelCallback&        cancel,
                                    const ProgressCallback&      progress,
@@ -763,11 +840,28 @@ PlacementResult run_placement_task(PlacementTask                task,
             return result;
         }
         if (!task.search.angle_evaluator)
-            task.search.angle_evaluator = make_scene_angle_evaluator(task.scene, cancel);
+            task.search.angle_evaluator = make_scene_angle_evaluator(task.scene, cancel, SupportGeometryMode::PlacementSearch);
         const auto begin  = std::chrono::steady_clock::now();
-        auto       result = optimize_placement(task.search, make_scene_evaluator(task.scene, cancel), cancel, progress, progress_stage);
+        const ProgressCallback search_progress = task.tree_support && progress ?
+                                                     ProgressCallback{[&](int value) { progress(value * 90 / 100); }} :
+                                                     progress;
+        auto       result = optimize_placement(task.search, make_scene_evaluator(task.scene, cancel, SupportGeometryMode::PlacementSearch),
+                                               cancel, search_progress, progress_stage);
+        const auto search_end = std::chrono::steady_clock::now();
+        if (task.tree_support && (result.status == PlacementStatus::Improved || result.status == PlacementStatus::Unchanged)) {
+            if (progress_stage)
+                progress_stage(PlacementProgressStage::Finalizing);
+            result = revalidate_placement_result(std::move(result),
+                                                 {normalized_rotation_deg(task.search.current_rotation_deg), task.search.current_delta_y},
+                                                 make_scene_evaluator(task.scene, cancel, SupportGeometryMode::Exact), cancel, progress);
+        }
+        if (task.tree_support && progress)
+            progress(100);
         BOOST_LOG_TRIVIAL(info) << "[DynaPin] placement task completed: elapsed_ms="
                                 << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count()
+                                << ", search_ms=" << std::chrono::duration<double, std::milli>(search_end - begin).count()
+                                << ", validation_ms="
+                                << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - search_end).count()
                                 << ", evaluations=" << result.evaluations << ", status=" << int(result.status);
         return result;
     } catch (const std::bad_alloc&) {
@@ -1536,6 +1630,23 @@ PlacementResult optimize_placement(const PlacementSearchInput &input,
     }
 
     set_stage(PlacementProgressStage::Finalizing);
+    // Use the same tolerance/tie rule as winner selection. Avoid an epsilon
+    // sort comparator, which would not define a strict weak ordering.
+    auto alternatives = feasible;
+    alternatives.erase(std::remove_if(alternatives.begin(), alternatives.end(), [&](const auto& entry) { return entry.first == current; }),
+                       alternatives.end());
+    while (!alternatives.empty() && result.finalists.size() < 5) {
+        const double minimum = std::min_element(alternatives.begin(), alternatives.end(), [](const auto& lhs, const auto& rhs) {
+                                   return lhs.second < rhs.second;
+                               })->second;
+        auto         next    = alternatives.end();
+        for (auto it = alternatives.begin(); it != alternatives.end(); ++it)
+            if (it->second <= minimum + epsilon &&
+                (next == alternatives.end() || candidate_tie_less(it->first, next->first, input.current_rotation_deg)))
+                next = it;
+        result.finalists.push_back(next->first);
+        alternatives.erase(next);
+    }
     double best_volume = std::numeric_limits<double>::infinity();
     for (const auto &entry : feasible)
         if (strictly_better(entry.second, best_volume))

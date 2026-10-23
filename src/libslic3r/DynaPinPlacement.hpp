@@ -159,6 +159,8 @@ struct PlacementResult
     double             volume_mm3 = std::numeric_limits<double>::quiet_NaN();
     size_t             evaluations = 0;
     std::string        warning;
+    // Best distinct alternatives to the current pose, in score/tie order.
+    std::vector<PlacementCandidate> finalists;
 };
 
 struct PlacementTarget
@@ -194,7 +196,7 @@ struct PlacementTask
     PlacementEligibility   eligibility;
     PlacementSearchInput   search;
     PlacementSceneSnapshot scene;
-    bool                   tree_support = false;
+    bool                   tree_support = false; // The scored scene contains non-Organic Tree support.
 };
 
 struct PlacementPreparationResult
@@ -225,19 +227,32 @@ enum class PlacementProgressStage {
 };
 using ProgressStageCallback = std::function<void(PlacementProgressStage)>;
 
-std::optional<double> evaluate_scene_candidate(const PlacementSceneSnapshot &scene,
-                                               const PlacementCandidate     &candidate,
-                                               const CancelCallback         &cancel = {});
+std::optional<double> evaluate_scene_candidate(const PlacementSceneSnapshot& scene,
+                                               const PlacementCandidate&     candidate,
+                                               const CancelCallback&         cancel = {},
+                                               SupportGeometryMode           mode   = SupportGeometryMode::Exact);
 
-void evaluate_scene_angle_group(const PlacementSceneSnapshot          &scene,
+void evaluate_scene_angle_group(const PlacementSceneSnapshot&          scene,
                                 double                                 rotation_deg,
-                                const std::vector<PlacementCandidate> &candidates,
-                                std::vector<std::optional<double>>    &results,
-                                const CandidateCompletedCallback      &completed = {},
-                                const CancelCallback                  &cancel = {});
+                                const std::vector<PlacementCandidate>& candidates,
+                                std::vector<std::optional<double>>&    results,
+                                const CandidateCompletedCallback&      completed = {},
+                                const CancelCallback&                  cancel    = {},
+                                SupportGeometryMode                    mode      = SupportGeometryMode::Exact);
 
-PlacementEvaluator  make_scene_evaluator(PlacementSceneSnapshot scene, const CancelCallback &cancel = {});
-AngleGroupEvaluator make_scene_angle_evaluator(PlacementSceneSnapshot scene, const CancelCallback &cancel = {});
+PlacementEvaluator  make_scene_evaluator(PlacementSceneSnapshot scene,
+                                         const CancelCallback&  cancel = {},
+                                         SupportGeometryMode    mode   = SupportGeometryMode::Exact);
+AngleGroupEvaluator make_scene_angle_evaluator(PlacementSceneSnapshot scene,
+                                               const CancelCallback&  cancel = {},
+                                               SupportGeometryMode    mode   = SupportGeometryMode::Exact);
+
+// Re-score the current pose and at most five alternatives using exact geometry.
+PlacementResult revalidate_placement_result(PlacementResult           result,
+                                            const PlacementCandidate& current,
+                                            const PlacementEvaluator& evaluator,
+                                            const CancelCallback&     cancel   = {},
+                                            const ProgressCallback&   progress = {});
 
 PlacementPreparationResult prepare_placement_task(const Model&                          model,
                                                   const Print&                          print,
