@@ -2289,6 +2289,174 @@ TEST_CASE("DynaPin final G-code slows X support extrusion for exactly three laye
     CHECK(normal_later >= 3);
 }
 
+TEST_CASE("DynaPin caps travel approaching and leaving stabilized support", "[DynaPin][SupportSpeed]")
+{
+    ResourcesDirGuard   resources_guard(test_resources_dir());
+    TemporaryDirGuard   temporary_guard;
+    DebugStageEnvGuard  stage_guard;
+    const bool          arc_fitting    = GENERATE(false, true);
+    const ExtrusionRole support_role   = GENERATE(erSupportMaterial, erSupportMaterialInterface, erSupportTransition);
+    const std::string   hop_type       = GENERATE("Normal Lift", "Slope Lift", "Spiral Lift");
+    const int           mode           = GENERATE(0, 1, 2); // Disabled, zero protected layers, enabled.
+    const int           limited_layers = mode == 2 ? 3 : 0;
+    const std::string   role_label     = ExtrusionEntity::role_to_string(support_role);
+    auto                json           = pull_reference_fixtures()[0]["config"];
+    json["support_speed"]              = {{"layers", mode == 1 ? 0 : 3}, {"max_x_speed", 0.}};
+    PullConfigFile file;
+    file.write(json);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    for (const std::string& key : config.keys()) {
+        ConfigOption* option = config.option(key);
+        if (option->type() == coEnums) {
+            const auto* definition = print_config_def.get(key);
+            if (option->nullable())
+                static_cast<ConfigOptionEnumsGenericNullable*>(option)->keys_map = definition->enum_keys_map;
+            else
+                static_cast<ConfigOptionEnumsGeneric*>(option)->keys_map = definition->enum_keys_map;
+        }
+    }
+    config.set_deserialize_strict({{"enable_dynapin_support_optimization", mode != 0},
+                                   {"dynapin_debug_stage", 2},
+                                   {"dynapin_config_path", file.path.string()},
+                                   {"dynapin_selected_pins", "0,0"},
+                                   {"enable_support", true},
+                                   {"support_type", "normal(auto)"},
+                                   {"initial_layer_speed", 20.},
+                                   {"support_speed", 80.},
+                                   {"travel_speed", 150.},
+                                   {"travel_speed_z", 100.},
+                                   {"z_hop", "0.4"},
+                                   {"z_hop_types", hop_type},
+                                   {"retraction_minimum_travel", "0"},
+                                   {"wipe", "0"},
+                                   {"support_interface_speed", "100%"},
+                                   {"bridge_speed", 80.},
+                                   {"slow_down_layers", 0},
+                                   {"max_volumetric_extrusion_rate_slope", 20.},
+                                   {"fan_speedup_time", 1.},
+                                   {"slow_down_for_layer_cooling", "0"},
+                                   {"filament_max_volumetric_speed", "1000"},
+                                   {"enable_arc_fitting", arc_fitting}});
+    Print print;
+    Model model;
+    init_dynapin_print(print, model, config);
+    print.process();
+    PrintObject* object = print.get_object(size_t(0));
+    REQUIRE(object->support_layers().empty());
+    const Polygon footprint(
+        Points{Point::new_scale(-9., -9.), Point::new_scale(9., -9.), Point::new_scale(9., 9.), Point::new_scale(-9., 9.)});
+    for (int i = 0; i < 5; ++i) {
+        SupportLayer* layer    = object->add_support_layer(i, i, 0.2, 7.5 + i * 0.2);
+        layer->support_islands = {ExPolygon(footprint)};
+        if (i == 0)
+            layer->dynapin_landing_regions = {footprint};
+        ExtrusionPath path(support_role, 0.1, 0.5f, 0.2f);
+        path.polyline           = Polyline(Points{Point::new_scale(-8., -8.), Point::new_scale(-6., -8.), Point::new_scale(-6., -6.),
+                                                  Point::new_scale(8., -6.), Point::new_scale(8., 8.), Point::new_scale(-8., -8.)});
+        path.is_dynapin_landing = i == 0;
+        if (arc_fitting) {
+            path.simplify_by_fitting_arc(scale_(0.01));
+            REQUIRE_FALSE(path.polyline.fitting_result.empty());
+        }
+        ExtrusionEntityCollection ordered;
+        ordered.no_sort = true;
+        ordered.append(path);
+        for (double x : {20., 30., 6.}) {
+            path.polyline = Polyline(Points{Point::new_scale(x, 5.), Point::new_scale(x + 2., 5.)});
+            ordered.append(path);
+        }
+        layer->support_fills.append(ordered);
+    }
+    const auto output_path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("dynapin-speed-%%%%%%.gcode");
+    GCodeProcessorResult result;
+    print.export_gcode(output_path.string(), &result, nullptr);
+    std::ifstream     stream(output_path.string());
+    const std::string output((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    if (mode == 0) {
+        // A configured limit must be inert when DynaPin itself is disabled.
+        json["support_speed"]["layers"] = 0;
+        file.write(json);
+        print.export_gcode(output_path.string(), &result, nullptr);
+        std::ifstream     reference_stream(output_path.string());
+        const std::string reference((std::istreambuf_iterator<char>(reference_stream)), std::istreambuf_iterator<char>());
+        auto              without_timestamp = [](const std::string& text) {
+            std::istringstream lines(text);
+            std::string        normalized, line;
+            while (std::getline(lines, line))
+                if (line.rfind("; generated by ", 0) != 0)
+                    normalized += line + '\n';
+            return normalized;
+        };
+        CHECK((without_timestamp(output) == without_timestamp(reference)));
+    }
+    boost::filesystem::remove(output_path);
+    const std::string role_prefix        = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role);
+    bool              support            = false;
+    int               previous_index     = -1;
+    bool              previous_protected = false;
+    const Point       shift              = object->instances().front().shift;
+    struct TravelMove
+    {
+        double x_speed;
+        double speed;
+        std::string raw;
+    };
+    std::vector<TravelMove> pending;
+    std::set<int>           approaches, departures, ordinary, outside;
+    GCodeReader             reader;
+    reader.apply_config(print.config());
+    reader.parse_buffer(output, [&](GCodeReader& state, const GCodeReader::GCodeLine& line) {
+        if (line.raw().find(role_prefix) == 0)
+            support = line.raw() == role_prefix + role_label;
+        if (!line.cmd_is("G1") && !line.cmd_is("G2") && !line.cmd_is("G3"))
+            return;
+        const double dx    = std::abs(line.new_X(state) - state.x());
+        const double dy    = std::abs(line.new_Y(state) - state.y());
+        const double dz    = std::abs(line.new_Z(state) - state.z());
+        const double speed = line.new_F(state) / 60.;
+        if (line.extruding(state) && (line.has_x() || line.has_y())) {
+            const int  index           = support ? int(std::round((state.z() - 7.5) / 0.2)) : -1;
+            const bool protected_layer = limited_layers > 0 && index >= 1 && index <= 3;
+            const bool approaching     = protected_layer && footprint.contains(Point::new_scale(state.x(), state.y()) - shift);
+            const bool departing       = previous_protected;
+            for (const auto& move : pending) {
+                if (approaching || departing) {
+                    CAPTURE(hop_type, arc_fitting, index, previous_index, move.raw);
+                    CHECK(move.x_speed <= 20.02);
+                    if (approaching)
+                        approaches.insert(index);
+                    if (departing)
+                        departures.insert(previous_index);
+                } else if (index >= 1 && index == previous_index) {
+                    CHECK(move.speed >= 99.99); // Spirals use travel_speed_z (100 mm/s).
+                    if (move.speed > 149.99) {
+                        if (index == 4)
+                            ordinary.insert(index);
+                        else
+                            outside.insert(index);
+                    }
+                }
+            }
+            pending.clear();
+            previous_index     = index;
+            previous_protected = protected_layer && footprint.contains(Point::new_scale(line.new_X(state), line.new_Y(state)) - shift);
+        } else if (dx > 0.01 || dy > 0.01 || line.cmd_is("G2") || line.cmd_is("G3")) {
+            // A spiral has X tangents even when its endpoints share the same XY.
+            const double x_speed = line.cmd_is("G1") ? speed * dx / std::sqrt(dx * dx + dy * dy + dz * dz) : speed;
+            pending.push_back({x_speed, speed, line.raw()});
+        }
+    });
+    if (limited_layers > 0) {
+        CHECK(approaches == std::set<int>{1, 2, 3});
+        CHECK(departures == std::set<int>{1, 2, 3});
+    } else {
+        CHECK(approaches.empty());
+        CHECK(departures.empty());
+    }
+    CHECK(ordinary == std::set<int>{4});
+    CHECK(outside == std::set<int>{1, 2, 3});
+}
+
 TEST_CASE("DynaPin pulls share one lift and restore the saved position", "[DynaPin][DynaPinPull]")
 {
     const std::string  mode = GENERATE("normal", "reverted", "alternating");

@@ -2473,6 +2473,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     m_dynapin_travel_clearance_z = 0.;
     m_dynapin_travel_config.reset();
     m_last_dynapin_landing = false;
+    m_last_dynapin_stabilized_support = false;
+    m_writer.set_travel_max_x_speed(0.);
     m_dynapin_stabilization_regions.clear();
     m_dynapin_support_speed = {};
     if (print.config().enable_dynapin_support_optimization.value && DynaPin::effective_debug_stage(print) >= 1) {
@@ -7183,6 +7185,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     }
 
     m_last_dynapin_landing = path.is_dynapin_landing;
+    m_last_dynapin_stabilized_support = !path.is_dynapin_landing && !path.is_force_no_extrusion() &&
+                                        dynapin_stabilized_support(path.last_point(), path.role());
     this->set_last_pos(path.last_point());
     return gcode;
 }
@@ -7259,6 +7263,14 @@ std::string GCode::_encode_label_ids_to_base64(std::vector<size_t> ids)
     return encodeBase64(bitset);
 }
 
+bool GCode::dynapin_stabilized_support(const Point& point, ExtrusionRole role) const
+{
+    if (role != erSupportMaterial && role != erSupportMaterialInterface && role != erSupportTransition)
+        return false;
+    const auto regions = m_dynapin_stabilization_regions.find(m_layer);
+    return regions != m_dynapin_stabilization_regions.end() && contains(regions->second, point);
+}
+
 // This method accepts &point in print coordinates.
 std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string comment, double z /* = DBL_MAX*/, double landing_width)
 {
@@ -7267,6 +7279,12 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
         this->origin in order to get G-code coordinates.  */
     Polyline travel{this->last_pos(), point};
     const double target_z = z == DBL_MAX ? m_nominal_z : z;
+    // Remember departure across layer/object changes; the current layer only
+    // identifies the destination. Keep the limit active through retract/lift.
+    const bool protect_support = m_last_dynapin_stabilized_support || (landing_width == 0. && dynapin_stabilized_support(point, role));
+    if (protect_support)
+        m_writer.set_travel_max_x_speed(m_dynapin_support_speed.max_x_speed > 0. ? m_dynapin_support_speed.max_x_speed :
+                                                                                   m_config.get_abs_value("initial_layer_speed"));
 
     // check whether a straight travel move would need retraction
     LiftType lift_type        = LiftType::SpiralLift;
@@ -7473,6 +7491,8 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
         this->set_last_pos(travel.points.back());
     }
 
+    m_writer.set_travel_max_x_speed(0.);
+    m_last_dynapin_stabilized_support = false;
     return gcode;
 }
 
