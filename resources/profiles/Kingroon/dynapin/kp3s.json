@@ -35,7 +35,7 @@
     "normal": {
       "x_hook": 169,
       "x_latch": 174,
-      "x_front": 20,
+      "x_front": 15,
       "fast_feed_rate": 5000,
       "feed_rate": 1500,
       "pull_feedrate_fast": 3000,
@@ -53,7 +53,7 @@
       "normal": {
         "x_hook": 169,
         "x_latch": 172,
-        "x_front": 20,
+        "x_front": 15,
         "fast_feed_rate": 5000,
         "feed_rate": 1500,
         "pull_feedrate_fast": 3000,
@@ -70,7 +70,7 @@
       "reverted": {
         "x_hook": 169,
         "x_latch": 172,
-        "x_front": 20,
+        "x_front": 15,
         "fast_feed_rate": 5000,
         "feed_rate": 1500,
         "pull_feedrate_fast": 3000,
@@ -88,7 +88,7 @@
     "reverted": {
       "x_hook": 169,
       "x_latch": 172,
-      "x_front": 20,
+      "x_front": 15,
       "fast_feed_rate": 5000,
       "feed_rate": 1500,
       "pull_feedrate_fast": 3000,
