@@ -253,7 +253,7 @@ void Print::finalize_dynapin_tree_selection()
 template class PrintState<PrintStep, psCount>;
 template class PrintState<PrintObjectStep, posCount>;
 
-bool Print::prepare_slices_for_support_geometry(const std::function<bool()> &cancel)
+bool Print::prepare_slices_for_support_geometry(const std::function<bool()>& cancel, DynaPin::SupportGeometryMode mode)
 {
     if (m_objects.empty())
         return true;
@@ -274,9 +274,17 @@ bool Print::prepare_slices_for_support_geometry(const std::function<bool()> &can
         if (canceled())
             return false;
         object->make_perimeters();
-        object->estimate_curled_extrusions();
-        object->infill();
-        object->ironing();
+        if (mode == DynaPin::SupportGeometryMode::Exact) {
+            object->estimate_curled_extrusions();
+            object->infill();
+            object->ironing();
+        } else if (!is_tree(object->config().support_type.value) && object->config().thick_bridges &&
+                   m_config.independent_support_layer_height) {
+            // Normal support's thick-bridge contact Z depends on actual bridge fills.
+            object->infill();
+        } else {
+            object->prepare_infill();
+        }
     }
     return !canceled();
 }
@@ -285,7 +293,8 @@ bool Print::generate_support_geometry_for_current_shift(std::vector<DynaPin::Sup
                                                         const std::function<bool()>&       cancel,
                                                         const ObjectID*                    tree_target_instance_id,
                                                         std::vector<DynaPin::Pin>*         generated_tree_pins,
-                                                        std::vector<DynaPin::Pin>*         projected_tree_pins)
+                                                        std::vector<DynaPin::Pin>*         projected_tree_pins,
+                                                        DynaPin::SupportGeometryMode       mode)
 {
     slabs.clear();
     if (generated_tree_pins != nullptr)
@@ -313,7 +322,7 @@ bool Print::generate_support_geometry_for_current_shift(std::vector<DynaPin::Sup
             std::any_of(object->instances().begin(), object->instances().end(), [tree_target_instance_id](const PrintInstance &instance) {
                 return instance.model_instance != nullptr && instance.model_instance->id() == *tree_target_instance_id;
             });
-        object->generate_support_geometry_only(object_slabs, is_target_instance ? generated_tree_pins : nullptr);
+        object->generate_support_geometry_only(object_slabs, is_target_instance ? generated_tree_pins : nullptr, mode);
         for (const DynaPin::SupportSlab &slab : object_slabs) {
             for (const PrintInstance &instance : object->instances()) {
                 DynaPin::SupportSlab plate_slab = slab;
@@ -330,15 +339,17 @@ bool Print::generate_support_geometry_only(std::vector<DynaPin::SupportSlab>& sl
                                            const std::function<bool()>&       cancel,
                                            const ObjectID*                    tree_target_instance_id,
                                            std::vector<DynaPin::Pin>*         generated_tree_pins,
-                                           std::vector<DynaPin::Pin>*         projected_tree_pins)
+                                           std::vector<DynaPin::Pin>*         projected_tree_pins,
+                                           DynaPin::SupportGeometryMode       mode)
 {
     if (generated_tree_pins != nullptr)
         generated_tree_pins->clear();
     if (projected_tree_pins != nullptr)
         projected_tree_pins->clear();
-    if (!prepare_slices_for_support_geometry(cancel))
+    if (!prepare_slices_for_support_geometry(cancel, mode))
         return false;
-    return generate_support_geometry_for_current_shift(slabs, cancel, tree_target_instance_id, generated_tree_pins, projected_tree_pins);
+    return generate_support_geometry_for_current_shift(slabs, cancel, tree_target_instance_id, generated_tree_pins, projected_tree_pins,
+                                                       mode);
 }
 
 PrintRegion::PrintRegion(const PrintRegionConfig &config) : PrintRegion(config, config.hash()) {}

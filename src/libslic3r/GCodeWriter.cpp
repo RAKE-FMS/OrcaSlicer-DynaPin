@@ -537,19 +537,36 @@ std::string GCodeWriter::set_speed(double F, const std::string &comment, const s
     return w.string();
 }
 
-std::string GCodeWriter::travel_to_xy(const Vec2d &point, const std::string &comment)
+double GCodeWriter::limited_travel_speed(double speed, const Vec2d& delta) const
 {
-    m_pos(0) = point(0);
-    m_pos(1) = point(1);
+    if (m_travel_max_x_speed <= 0.)
+        return speed;
+    // Match the emitted coordinates: rounding a short X component can otherwise
+    // make its actual speed exceed the limit even on a long diagonal travel.
+    const Vec2d start = to_2d(m_pos) - Vec2d(m_x_offset, m_y_offset);
+    Vec2d       rounded_delta;
+    for (int axis = 0; axis < 2; ++axis)
+        rounded_delta[axis] = GCodeFormatter::quantize_xyzf(start[axis] + delta[axis]) - GCodeFormatter::quantize_xyzf(start[axis]);
+    const double dx = std::abs(rounded_delta.x());
+    if (dx > EPSILON)
+        return std::min(speed, m_travel_max_x_speed * rounded_delta.norm() / dx);
+    return speed;
+}
+
+std::string GCodeWriter::travel_to_xy(const Vec2d& point, const std::string& comment)
+{
+    const Vec2d delta = point - to_2d(m_pos);
+    auto        speed = m_is_first_layer ? this->config.get_abs_value("initial_layer_travel_speed") : this->config.travel_speed.value;
+    speed             = limited_travel_speed(speed, delta);
+    m_pos(0)          = point(0);
+    m_pos(1)          = point(1);
 
     this->set_current_position_clear(true);
-    //BBS: take plate offset into consider
-    Vec2d point_on_plate = { point(0) - m_x_offset, point(1) - m_y_offset };
+    // BBS: take plate offset into consider
+    Vec2d point_on_plate = {point(0) - m_x_offset, point(1) - m_y_offset};
 
     GCodeG1Formatter w;
     w.emit_xy(point_on_plate);
-    auto speed = m_is_first_layer
-        ? this->config.get_abs_value("initial_layer_travel_speed") : this->config.travel_speed.value;
     w.emit_f(speed * 60.0);
     //BBS
     w.emit_comment(GCodeWriter::full_gcode_comment, comment);
@@ -636,6 +653,7 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
     Vec3d dest_point = point;
     auto travel_speed =
         m_is_first_layer ? this->config.get_abs_value("initial_layer_travel_speed") : this->config.travel_speed.value;
+    travel_speed = limited_travel_speed(travel_speed, to_2d(point - m_pos));
     //BBS: a z_hop need to be handle when travel
     if (std::abs(m_to_lift) > EPSILON) {
         assert(std::abs(m_lifted) < EPSILON);
@@ -677,7 +695,7 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
                 Vec3d slope_top_point = Vec3d(temp(0), temp(1), delta(2)) + source;
                 GCodeG1Formatter w0;
                 w0.emit_xyz(slope_top_point);
-                w0.emit_f(travel_speed * 60.0);
+                w0.emit_f(limited_travel_speed(travel_speed, to_2d(slope_top_point - source)) * 60.0);
                 //BBS
                 w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
                 slop_move = w0.string();
@@ -732,13 +750,13 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
     {
         //force to move xy first then z after filament change
         w.emit_xy(Vec2d(point_on_plate.x(), point_on_plate.y()));
-        w.emit_f(this->config.travel_speed.value * 60.0);
+        w.emit_f(limited_travel_speed(this->config.travel_speed.value, to_2d(dest_point - m_pos)) * 60.0);
         w.emit_comment(GCodeWriter::full_gcode_comment, comment);
         out_string = w.string() + _travel_to_z(point_on_plate.z(), comment);
     } else {
         GCodeG1Formatter w;
         w.emit_xyz(point_on_plate);
-        w.emit_f(this->config.travel_speed.value * 60.0);
+        w.emit_f(limited_travel_speed(this->config.travel_speed.value, to_2d(dest_point - m_pos)) * 60.0);
         w.emit_comment(GCodeWriter::full_gcode_comment, comment);
         out_string = w.string();
     }
@@ -802,6 +820,9 @@ std::string GCodeWriter::_spiral_travel_to_z(double z, const Vec2d &ij_offset, c
         speed = m_is_first_layer ? this->config.get_abs_value("initial_layer_travel_speed")
                                  : this->config.travel_speed.value;
     }
+    // A full spiral has X tangents regardless of its start/end XY coordinates.
+    if (m_travel_max_x_speed > 0.)
+        speed = std::min(speed, m_travel_max_x_speed);
 
     if (!this->config.enable_arc_fitting) { // Orca: if arc fitting is disabled, approximate the arc with small linear segments
         std::ostringstream oss;

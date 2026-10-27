@@ -364,7 +364,9 @@ public:
     void generate_support_preview();
     // Generate temporary support geometry for placement scoring.  The
     // temporary generator clears any support layers before returning.
-    void generate_support_geometry_only(std::vector<DynaPin::SupportSlab>& slabs, std::vector<DynaPin::Pin>* generated_tree_pins = nullptr);
+    void generate_support_geometry_only(std::vector<DynaPin::SupportSlab>& slabs,
+                                        std::vector<DynaPin::Pin>*         generated_tree_pins = nullptr,
+                                        DynaPin::SupportGeometryMode       mode                = DynaPin::SupportGeometryMode::Exact);
     const std::vector<VolumeSlices>& firstLayerObjSlice() const { return firstLayerObjSliceByVolume; }
     std::vector<VolumeSlices>& firstLayerObjSliceMod() { return firstLayerObjSliceByVolume; }
     const std::vector<groupedVolumeSlices>& firstLayerObjGroups() const { return firstLayerObjSliceByGroups; }
@@ -511,7 +513,7 @@ private:
     void infill();
     void ironing();
     void generate_support_material();
-    void generate_tree_support_with_dynapin_retries();
+    void generate_tree_support_with_dynapin_retries(DynaPin::SupportGeometryMode mode = DynaPin::SupportGeometryMode::Exact);
     void estimate_curled_extrusions();
     void simplify_extrusion_path();
 
@@ -931,13 +933,16 @@ public:
                                         const std::function<bool()>&       cancel                  = {},
                                         const ObjectID*                    tree_target_instance_id = nullptr,
                                         std::vector<DynaPin::Pin>*         generated_tree_pins     = nullptr,
-                                        std::vector<DynaPin::Pin>*         projected_tree_pins     = nullptr);
-    bool prepare_slices_for_support_geometry(const std::function<bool()>& cancel = {});
+                                        std::vector<DynaPin::Pin>*         projected_tree_pins     = nullptr,
+                                        DynaPin::SupportGeometryMode       mode                    = DynaPin::SupportGeometryMode::Exact);
+    bool prepare_slices_for_support_geometry(const std::function<bool()>& cancel = {},
+                                             DynaPin::SupportGeometryMode mode   = DynaPin::SupportGeometryMode::Exact);
     bool generate_support_geometry_for_current_shift(std::vector<DynaPin::SupportSlab>& slabs,
                                                      const std::function<bool()>&       cancel                  = {},
                                                      const ObjectID*                    tree_target_instance_id = nullptr,
                                                      std::vector<DynaPin::Pin>*         generated_tree_pins     = nullptr,
-                                                     std::vector<DynaPin::Pin>*         projected_tree_pins     = nullptr);
+                                                     std::vector<DynaPin::Pin>*         projected_tree_pins     = nullptr,
+                                                     DynaPin::SupportGeometryMode       mode = DynaPin::SupportGeometryMode::Exact);
     // Exports G-code into a file name based on the path_template, returns the file path of the generated G-code file.
     // If preview_data is not null, the preview_data is filled in for the G-code visualization (not used by the command line Slic3r).
     std::string         export_gcode(const std::string& path_template, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);

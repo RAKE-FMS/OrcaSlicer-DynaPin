@@ -73,6 +73,8 @@ public:
     std::string set_speed(double F, const std::string &comment = std::string(), const std::string &cooling_marker = std::string());
     // SoftFever NOTE: the returned speed is mm/minute
     double      get_current_speed() const { return m_current_speed;}
+    // Temporary X component limit for travel and Z-hop; zero disables it.
+    void        set_travel_max_x_speed(double speed) { m_travel_max_x_speed = speed; }
     std::string travel_to_xy(const Vec2d &point, const std::string &comment = std::string());
     std::string travel_to_xyz(const Vec3d &point, const std::string &comment = std::string(), bool force_z = false);
     std::string travel_to_z(double z, const std::string &comment = std::string(), bool force = false);
@@ -181,6 +183,7 @@ public:
     //SoftFever
     bool            m_is_bbl_printers = false;
     double          m_current_speed;
+    double          m_travel_max_x_speed = 0.;
     bool            m_is_first_layer = true;
 
     enum class Acceleration {
@@ -189,6 +192,7 @@ public:
     };
 
     std::string _travel_to_z(double z, const std::string &comment);
+    double      limited_travel_speed(double speed, const Vec2d& delta) const;
     std::string _spiral_travel_to_z(double z, const Vec2d &ij_offset, const std::string &comment);
     std::string _retract(double length, double restart_extra, const std::string &comment);
     std::string set_acceleration_internal(Acceleration type, unsigned int acceleration);

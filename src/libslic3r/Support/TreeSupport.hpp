@@ -388,7 +388,8 @@ public:
      * \param storage The data storage where the mesh data is gotten from and
      * where the resulting support areas are stored.
      */
-    void generate();
+    enum class GenerationMode { Toolpaths, GeometryOnly };
+    void generate(GenerationMode mode = GenerationMode::Toolpaths);
 
     void detect_overhangs(bool check_support_necessity = false);
 
@@ -478,7 +479,7 @@ private:
      */
     void draw_circles();
     void prepare_dynapin_landing_layers();
-    void validate_dynapin_landings();
+    void validate_dynapin_landings(GenerationMode mode);
 
     /*!
      * \brief Drops down the nodes of the tree support towards the build plate.

@@ -15,6 +15,7 @@ class PrintObject;
 class ExtrusionEntityCollection;
 
 namespace DynaPin {
+enum class SupportGeometryMode { Exact, PlacementSearch };
 
 inline constexpr const char* LANDING_FAN_START = ";_DYNAPIN_LANDING_FAN_START";
 inline constexpr const char* LANDING_FAN_END   = ";_DYNAPIN_LANDING_FAN_END";

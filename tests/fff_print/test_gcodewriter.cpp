@@ -3,6 +3,7 @@
 #include <memory>
 
 #include "libslic3r/GCodeWriter.hpp"
+#include "libslic3r/GCodeReader.hpp"
 
 using namespace Slic3r;
 
@@ -122,4 +123,38 @@ TEST_CASE("DynaPin vertical layer changes preserve requested Z-hop", "[GCodeWrit
     writer.travel_to_z_preserving_lift(10.26);
     CHECK(writer.get_position().z() == Catch::Approx(10.26));
     CHECK(writer.get_zhop() == 0.);
+}
+
+TEST_CASE("Travel X component limit preserves Y speed and resets after protected motion", "[GCodeWriter][DynaPin][SupportSpeed]")
+{
+    GCodeWriter writer;
+    PrintConfig config;
+    config.travel_speed.value               = 150.;
+    config.initial_layer_travel_speed.value = 120.;
+    writer.apply_print_config(config);
+    writer.set_extruders({0});
+    writer.set_extruder(0);
+    writer.set_is_first_layer(GENERATE(false, true));
+    const bool xyz = GENERATE(false, true);
+    auto move      = [&](const Vec3d& target) { return xyz ? writer.travel_to_xyz(target, "", true) : writer.travel_to_xy(to_2d(target)); };
+    auto speed     = [&](const Vec3d& from, const Vec3d& to) {
+        writer.set_position(from);
+        writer.set_current_position_clear(true);
+        GCodeReader reader;
+        double      feedrate = 0.;
+        reader.parse_buffer(move(to), [&](GCodeReader& state, const GCodeReader::GCodeLine& line) { feedrate = line.new_F(state) / 60.; });
+        return feedrate;
+    };
+    const double normal_x = speed(Vec3d::Zero(), Vec3d(10., 0., 0.));
+    const double normal_y = speed(Vec3d::Zero(), Vec3d(0., 10., 0.));
+    writer.set_travel_max_x_speed(20.);
+    CHECK_THAT(speed(Vec3d::Zero(), Vec3d(10., 0., 0.)), Catch::Matchers::WithinAbs(20., 0.001));
+    CHECK_THAT(speed(Vec3d::Zero(), Vec3d(-0.05, 0., 0.)), Catch::Matchers::WithinAbs(20., 0.001));
+    CHECK_THAT(speed(Vec3d::Zero(), Vec3d(0., 10., 0.)), Catch::Matchers::WithinAbs(normal_y, 0.001));
+    CHECK_THAT(speed(Vec3d::Zero(), Vec3d(3., 4., 0.)), Catch::Matchers::WithinAbs(100. / 3., 0.001));
+    writer.set_travel_max_x_speed(200.);
+    CHECK_THAT(speed(Vec3d::Zero(), Vec3d(10., 0., 0.)), Catch::Matchers::WithinAbs(normal_x, 0.001));
+    writer.set_travel_max_x_speed(20.);
+    writer.set_travel_max_x_speed(0.);
+    CHECK_THAT(speed(Vec3d::Zero(), Vec3d(10., 0., 0.)), Catch::Matchers::WithinAbs(normal_x, 0.001));
 }

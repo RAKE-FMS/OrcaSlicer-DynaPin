@@ -4017,7 +4017,7 @@ void PrintObject::_generate_support_material()
     }
 }
 
-void PrintObject::generate_tree_support_with_dynapin_retries()
+void PrintObject::generate_tree_support_with_dynapin_retries(DynaPin::SupportGeometryMode mode)
 {
     const bool retry = m_print->dynapin_selection().source == DynaPin::SelectionSource::Automatic &&
                        !is_tree_organic(m_config.support_type.value, m_config.support_style.value);
@@ -4026,7 +4026,8 @@ void PrintObject::generate_tree_support_with_dynapin_retries()
     for (size_t attempt = 0; attempt < max_attempts; ++attempt) {
         TreeSupport tree_support(*this, m_slicing_params, retry ? &candidates : nullptr);
         tree_support.throw_on_cancel = [this]() { this->throw_if_canceled(); };
-        tree_support.generate();
+        tree_support.generate(mode == DynaPin::SupportGeometryMode::PlacementSearch ? TreeSupport::GenerationMode::GeometryOnly :
+                                                                                      TreeSupport::GenerationMode::Toolpaths);
         if (!retry || dynapin_tree_landing_plan().used_pins == candidates)
             return;
         candidates = dynapin_tree_landing_plan().used_pins;
@@ -4036,7 +4037,9 @@ void PrintObject::generate_tree_support_with_dynapin_retries()
     }
 }
 
-void PrintObject::generate_support_geometry_only(std::vector<DynaPin::SupportSlab>& slabs, std::vector<DynaPin::Pin>* generated_tree_pins)
+void PrintObject::generate_support_geometry_only(std::vector<DynaPin::SupportSlab>& slabs,
+                                                 std::vector<DynaPin::Pin>*         generated_tree_pins,
+                                                 DynaPin::SupportGeometryMode       mode)
 {
     slabs.clear();
     if (generated_tree_pins != nullptr)
@@ -4060,7 +4063,7 @@ void PrintObject::generate_support_geometry_only(std::vector<DynaPin::SupportSla
             }
         } restore{*this, dynapin_tree_landing_plan()};
 
-        generate_tree_support_with_dynapin_retries();
+        generate_tree_support_with_dynapin_retries(mode);
         if (generated_tree_pins != nullptr)
             *generated_tree_pins = dynapin_tree_landing_plan().used_pins;
         for (const SupportLayer* layer : m_support_layers) {
