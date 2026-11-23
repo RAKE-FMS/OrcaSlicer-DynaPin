@@ -1,4 +1,5 @@
 #include "DynaPinLanding.hpp"
+#include "DynaPin.hpp"
 #include "Exception.hpp"
 #include "Print.hpp"
 #include "DynaPinPlacement.hpp"

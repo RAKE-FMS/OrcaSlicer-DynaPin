@@ -2,6 +2,7 @@
 
 #include "ClipperUtils.hpp"
 #include "BuildVolume.hpp"
+#include "DynaPin.hpp"
 #include "Geometry.hpp"
 #include "Layer.hpp"
 #include "Model.hpp"

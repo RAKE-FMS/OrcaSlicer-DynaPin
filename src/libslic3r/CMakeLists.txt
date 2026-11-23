@@ -8,6 +8,8 @@ if(NOT DEFINED ORCA_CHECK_GCODE_PLACEHOLDERS)
 endif()
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/libslic3r_version.h.in ${CMAKE_CURRENT_BINARY_DIR}/libslic3r_version.h @ONLY)
+# Keep the changing revision out of the shared version header and the PCH.
+configure_file(libslic3r_git_commit.h.in libslic3r_git_commit.h @ONLY)
 
 if (MINGW)
     add_compile_options(-Wa,-mbig-obj)
@@ -90,6 +92,7 @@ set(lisbslic3r_sources
     BuildVolume.hpp
     calib.cpp
     calib.hpp
+    CalibData.hpp
     Circle.cpp
     Circle.hpp
     clipper.cpp
@@ -259,6 +262,7 @@ set(lisbslic3r_sources
     DynaPinLanding.hpp
     DynaPin.cpp
     DynaPin.hpp
+    DynaPinPrintTypes.hpp
     DynaPinPlacement.cpp
     DynaPinPlacement.hpp
     GCodeWriter.cpp

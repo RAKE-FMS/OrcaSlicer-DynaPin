@@ -6,7 +6,7 @@
 #include "Fill/FillLightning.hpp"
 
 #include "BoundingBox.hpp"
-#include "DynaPin.hpp"
+#include "DynaPinPrintTypes.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include "Flow.hpp"
 #include "Point.hpp"
@@ -25,11 +25,12 @@
 #include <functional>
 #include <set>
 
-#include "calib.hpp"
+#include "CalibData.hpp"
 
 namespace Slic3r {
 
 namespace DynaPin {
+struct ProjectionEvent;
 struct SupportSlab;
 }
 

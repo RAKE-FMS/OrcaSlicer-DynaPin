@@ -9,6 +9,7 @@
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/TriangleMeshSlicer.hpp"
 
 #include "libslic3r/Shape/TextShape.hpp"
 

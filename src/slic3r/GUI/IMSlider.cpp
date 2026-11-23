@@ -1,4 +1,5 @@
 #include "IMSlider.hpp"
+#include "libslic3r/Print.hpp"
 #include "libslic3r/GCode.hpp"
 #include "GUI_App.hpp"
 #include "NotificationManager.hpp"

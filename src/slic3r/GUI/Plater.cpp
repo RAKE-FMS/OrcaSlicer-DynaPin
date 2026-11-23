@@ -1,6 +1,8 @@
 #include "Plater.hpp"
 #include "PreviewCaptureDialog.hpp"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/calib.hpp"
+#include "libslic3r/DynaPin.hpp"
 #include "libslic3r_version.h"
 
 #include <cstddef>

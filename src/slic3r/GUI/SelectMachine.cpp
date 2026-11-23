@@ -1,6 +1,7 @@
 #include "SelectMachine.hpp"
 #include "I18N.hpp"
 
+#include "libslic3r/Print.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/Color.hpp"

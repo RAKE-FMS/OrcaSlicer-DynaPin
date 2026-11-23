@@ -9,7 +9,7 @@
 
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Semver.hpp"
-#include "calib.hpp"
+#include "CalibData.hpp"
 
 using namespace nlohmann;
 

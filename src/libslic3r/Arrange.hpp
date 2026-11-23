@@ -3,7 +3,9 @@
 
 #include "ExPolygon.hpp"
 #include "PrintConfig.hpp"
-#include "Print.hpp"
+
+#include <functional>
+#include <iostream>
 
 #define BED_SHRINK_SEQ_PRINT 5
 

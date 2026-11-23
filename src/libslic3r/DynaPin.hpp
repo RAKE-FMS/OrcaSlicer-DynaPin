@@ -1,6 +1,7 @@
 #ifndef slic3r_DynaPin_hpp_
 #define slic3r_DynaPin_hpp_
 
+#include "DynaPinPrintTypes.hpp"
 #include "ExPolygon.hpp"
 
 #include <cstddef>
@@ -15,28 +16,8 @@ class PrintObject;
 class ExtrusionEntityCollection;
 
 namespace DynaPin {
-enum class SupportGeometryMode { Exact, PlacementSearch };
-
 inline constexpr const char* LANDING_FAN_START = ";_DYNAPIN_LANDING_FAN_START";
 inline constexpr const char* LANDING_FAN_END   = ";_DYNAPIN_LANDING_FAN_END";
-
-struct Pin
-{
-    int row = 0;
-    int col = 0;
-
-    bool operator==(const Pin& rhs) const { return row == rhs.row && col == rhs.col; }
-};
-
-enum class SelectionSource { Unavailable, Manual, Automatic };
-
-struct SelectionResult
-{
-    SelectionSource  source = SelectionSource::Unavailable;
-    std::vector<Pin> pins;
-    std::vector<Pin> rejected_collisions;
-    std::string      warning;
-};
 
 enum class ProjectionEventType { Contact, PinSurface, Model };
 
@@ -197,23 +178,6 @@ std::vector<LandingLayer> landing_base_layers(const std::vector<LandingLayer>&  
                                               double                                    expansion);
 Polygons                  landing_printable_region(const PrintObject& object);
 void                  mark_landing_paths(ExtrusionEntityCollection& collection, const Polygons& regions);
-
-struct TreePinLanding
-{
-    Pin      pin;
-    uint64_t branch_id = 0;
-    size_t   layer_id  = 0;
-    Point    position;
-    Polygon  footprint;
-    double   print_z = 0.;
-    double   support_print_z = 0.;
-};
-
-struct TreePinLandingPlan
-{
-    std::vector<TreePinLanding> landings;
-    std::vector<Pin>            used_pins;
-};
 
 std::vector<Pin>        parse_pin_list(const std::string& pins);
 bool                    has_manual_selection(const Print& print);
