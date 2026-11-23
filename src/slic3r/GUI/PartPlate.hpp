@@ -14,7 +14,6 @@
 #include "libslic3r/Arrange.hpp"
 #include "Plater.hpp"
 #include "libslic3r/Model.hpp"
-#include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "GLCanvas3D.hpp"
 #include "GLTexture.hpp"
@@ -64,6 +63,7 @@ class Model;
 class ModelObject;
 class ModelInstance;
 class Print;
+class PrintBase;
 class SLAPrint;
 
 namespace GUI {

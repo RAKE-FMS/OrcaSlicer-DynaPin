@@ -1,4 +1,5 @@
 #include "SendMultiMachinePage.hpp"
+#include "libslic3r/Print.hpp"
 #include "TaskManager.hpp"
 #include "I18N.hpp"
 

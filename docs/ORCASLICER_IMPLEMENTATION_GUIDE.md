@@ -798,7 +798,7 @@ Examples:
 
 ```bash
 # macOS
-cmake --build build/arm64 --config RelWithDebInfo --target all --
+cmake --build build/arm64 --config Release --target OrcaSlicer --parallel 4
 
 # Linux
 cmake --build build --config RelWithDebInfo --target all --

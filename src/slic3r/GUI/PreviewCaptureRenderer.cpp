@@ -6,6 +6,7 @@
 #include "3DScene.hpp"
 #include "GLShader.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
 #include "libslic3r/BuildVolume.hpp"
 #include <boost/nowide/cstdio.hpp>
 #include <functional>

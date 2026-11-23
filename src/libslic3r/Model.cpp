@@ -31,7 +31,7 @@
 #include "SVG.hpp"
 #include <Eigen/Dense>
 #include <functional>
-#include "GCodeWriter.hpp"
+#include "calib.hpp"
 
 // BBS: for segment
 #include "MeshBoolean.hpp"
@@ -170,6 +170,32 @@ void Model::update_links_bottom_up_recursive()
 		for (ModelVolume *model_volume : model_object->volumes)
 			model_volume->set_model_object(model_object);
 	}
+}
+
+Model::Model()
+{
+    assert(this->id().valid());
+}
+
+Model::Model(const Model &rhs) : ObjectBase(-1)
+{
+    assert(this->id().invalid());
+    this->assign_copy(rhs);
+    assert(this->id().valid());
+    assert(this->id() == rhs.id());
+}
+
+Model::Model(Model &&rhs) : ObjectBase(-1)
+{
+    assert(this->id().invalid());
+    this->assign_copy(std::move(rhs));
+    assert(this->id().valid());
+    assert(this->id() == rhs.id());
+}
+
+Model::Model(int) : ObjectBase(-1)
+{
+    assert(this->id().invalid());
 }
 
 Model::~Model()

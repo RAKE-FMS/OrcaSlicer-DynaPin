@@ -1,5 +1,6 @@
 #include "ArrangeJob.hpp"
 
+#include "libslic3r/Print.hpp"
 #include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/SVG.hpp"
 #include "libslic3r/MTUtils.hpp"

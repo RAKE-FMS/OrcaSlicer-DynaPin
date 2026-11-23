@@ -23,6 +23,7 @@ namespace Slic3r {
 
 class DynamicPrintConfig;
 class Model;
+class Print;
 class SLAPrint;
 
 class SlicingStatusEvent : public wxEvent

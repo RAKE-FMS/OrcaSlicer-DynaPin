@@ -1,4 +1,5 @@
 #include "ClipperUtils.hpp"
+#include "DynaPin.hpp"
 #include "Model.hpp"
 #include "Print.hpp"
 

@@ -6,6 +6,7 @@
 #include "slic3r/GUI/UserManager.hpp"
 #include "slic3r/GUI/TaskManager.hpp"
 #include "format.hpp"
+#include "libslic3r_git_commit.h"
 #include "libslic3r_version.h"
 #include "Downloader.hpp"
 

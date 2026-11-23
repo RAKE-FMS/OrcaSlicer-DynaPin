@@ -1,7 +1,7 @@
 #ifndef slic3r_DynaPinPlacement_hpp_
 #define slic3r_DynaPinPlacement_hpp_
 
-#include "DynaPin.hpp"
+#include "DynaPinPrintTypes.hpp"
 #include "ObjectID.hpp"
 #include "Polygon.hpp"
 #include "PrintConfig.hpp"

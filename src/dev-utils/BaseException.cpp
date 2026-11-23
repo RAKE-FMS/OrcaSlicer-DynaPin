@@ -9,6 +9,7 @@
 #include <boost/format.hpp>
 #include <mutex>
 
+#include "libslic3r_git_commit.h"
 #include "libslic3r_version.h"
 
 static std::string g_log_folder;

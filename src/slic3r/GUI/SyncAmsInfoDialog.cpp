@@ -1,5 +1,7 @@
 #include "SyncAmsInfoDialog.hpp"
 
+#include "libslic3r/Print.hpp"
+
 #include <thread>
 #include <wx/event.h>
 #include <wx/sizer.h>

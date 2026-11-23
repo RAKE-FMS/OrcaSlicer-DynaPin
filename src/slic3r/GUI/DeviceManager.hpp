@@ -14,7 +14,7 @@
 #include "libslic3r/ProjectTask.hpp"
 #include "slic3r/Utils/json_diff.hpp"
 #include "boost/bimap/bimap.hpp"
-#include "libslic3r/calib.hpp"
+#include "libslic3r/CalibData.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include "DeviceCore/DevDefs.h"

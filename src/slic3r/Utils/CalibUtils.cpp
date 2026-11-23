@@ -9,6 +9,8 @@
 #include "libslic3r/ClipperUtils.hpp"
 
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/calib.hpp"
 #include "slic3r/GUI/Jobs/BoostThreadWorker.hpp"
 #include "slic3r/GUI/Jobs/PlaterWorker.hpp"
 #include "../GUI/MsgDialog.hpp"

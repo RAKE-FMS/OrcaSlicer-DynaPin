@@ -26,7 +26,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PrintBase.hpp"
 
-#include "libslic3r/calib.hpp"
+#include "libslic3r/CalibData.hpp"
 #include "libslic3r/CutUtils.hpp"
 #include "libslic3r/FlushVolCalc.hpp"
 

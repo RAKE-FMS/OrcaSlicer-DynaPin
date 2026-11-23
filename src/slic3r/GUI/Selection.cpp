@@ -1,6 +1,7 @@
 #include "libslic3r/libslic3r.h"
 #include "Selection.hpp"
 
+#include "libslic3r/Print.hpp"
 #include "3DScene.hpp"
 #include "GLCanvas3D.hpp"
 #include "GUI_App.hpp"

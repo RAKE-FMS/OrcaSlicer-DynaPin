@@ -1,4 +1,5 @@
 #include "Config.hpp"
+#include "DynaPin.hpp"
 #include "Exception.hpp"
 #include "Print.hpp"
 #include "BoundingBox.hpp"

@@ -30,20 +30,35 @@ brew install texinfo
 
 リポジトリ付属の macOS 向けラッパースクリプトを使うと手順が簡単です:
 ```bash
-./build_release_macos.sh
+CMAKE_BUILD_PARALLEL_LEVEL=4 ./build_release_macos.sh -x
 ```
-（スクリプトは環境に応じた追加手順を実行します。必要に応じて実行権限を付与してください。）
+Apple Silicon では依存ライブラリとアプリをビルドし、`build/arm64` に Ninja Multi-Config のビルドツリーを作成します。
+
+## macOS での差分ビルド
+
+初回ビルド後は、既存の Release 構成で変更されたファイルとその依存先を再ビルドします。
+
+```bash
+cmake --build build/arm64 --config Release --target OrcaSlicer --parallel 4
+./mac-run.sh
+```
+
+`mac-run.sh` は `build/arm64/src/Release/OrcaSlicer.app` を開きます。配布用バンドルのコピーと翻訳の検証は `./build_release_macos.sh -sx` で行います。Intel Mac でビルドする場合は、ビルドディレクトリのアーキテクチャ名に `x86_64` を使ってください。
+
+Ninja が再ビルドする対象と理由は、実行前に確認できます。
+
+```bash
+ninja -C build/arm64 -f build-Release.ninja -n -d explain OrcaSlicer
+```
 
 ## 推奨ビルド（アウトオブソース）
 汎用的な手順（Linux/macOS/Windows 共通）:
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target OrcaSlicer --config Release --parallel
-cmake --build build/arm64 --target OrcaSlicer --config Release --parallel 4
+cmake --build build --target OrcaSlicer --config Release --parallel 4
 ```
 - Windows (Visual Studio) では `--config Release` が必要な場合があります。
 - ビルドターゲット名は環境によって `OrcaSlicer` となります。
-- parallelを制限なしに回すのは危険
 
 ## テストの実行
 ビルド済みテストを走らせる手順:
